@@ -1,0 +1,785 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Assistant</title>
+    <link rel="icon" href="branding/icon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+
+<body>
+    <div class="app-container">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <div class="logo">
+                    <i class="fa-solid fa-brain"></i>
+                    <span>AsuréFlow</span>
+                </div>
+            </div>
+
+            <div class="nav-menu">
+                <div class="nav-section-label">Main</div>
+                <button class="nav-item active" data-tab="chat">
+                    <i class="fa-regular fa-comments"></i>
+                    <span>Live Session</span>
+                </button>
+                <button class="nav-item" data-tab="notes">
+                    <i class="fa-solid fa-note-sticky"></i>
+                    <span>Notes</span>
+                </button>
+                <button class="nav-item" data-tab="history">
+                    <i class="fa-solid fa-clock-rotate-left"></i>
+                    <span>History</span>
+                </button>
+                
+                <div class="nav-section-label">Configure</div>
+                <button class="nav-item" data-tab="settings">
+                    <i class="fa-solid fa-sliders"></i>
+                    <span>Settings</span>
+                </button>
+            </div>
+
+            <div class="sidebar-footer">
+                <div class="status-panel">
+                    <div class="status-row">
+                        <div class="status-indicator">
+                            <div class="dot connecting" id="connection-dot"></div>
+                            <span id="connection-status">Connecting...</span>
+                        </div>
+                    </div>
+                    <span id="activity-status" class="hidden"></span>
+                    
+                    <div class="session-info">
+                        <div class="session-info-item">
+                            <span>Session</span>
+                            <span class="session-info-value" id="session-id">—</span>
+                        </div>
+                        <div class="session-info-item">
+                            <span>Duration</span>
+                            <span class="session-info-value" id="session-duration">00:00</span>
+                        </div>
+                        <div class="session-info-item">
+                            <span>Messages</span>
+                            <span class="session-info-value" id="session-msg-count">0</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Header -->
+            <header class="top-bar">
+                <div class="context-info">
+                    <h2 id="tab-title">Current Session</h2>
+                    <span class="subtitle" id="tab-subtitle">Real-time transcription & AI analysis</span>
+                </div>
+                <div class="actions">
+                    <button class="action-btn" id="new-session-btn" title="Start New Session">
+                        <i class="fa-solid fa-plus"></i>
+                        <span>New Session</span>
+                    </button>
+                    <button class="icon-btn" id="toggle-ai" title="Toggle AI Assistant">
+                        <i class="fa-solid fa-robot"></i>
+                    </button>
+                    <button class="icon-btn" id="toggle-mic" title="Toggle Microphone">
+                        <i class="fa-solid fa-microphone"></i>
+                    </button>
+                    <button class="icon-btn" id="toggle-audio" title="Toggle System Audio">
+                        <i class="fa-solid fa-volume-high"></i>
+                    </button>
+                </div>
+            </header>
+
+            <!-- Chat Tab -->
+            <div id="tab-chat" class="tab-content active">
+                <div class="session-layout">
+                    <div class="session-left">
+                        <div class="context-panel" id="session-context-panel">
+                            <div class="context-header">
+                                <div class="context-header-left">
+                                    <h3>Context</h3>
+                                    <span class="subtitle" id="session-context-subtitle">Optional session context (used by AI)</span>
+                                </div>
+                                <div class="context-actions">
+                                    <button class="icon-btn" id="context-toggle-btn" title="Show/Hide Context">
+                                        <i class="fa-solid fa-chevron-down"></i>
+                                    </button>
+                                    <button class="icon-btn" id="context-clear-btn" title="Clear Context">
+                                        <i class="fa-solid fa-trash-can"></i>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="context-body hidden" id="session-context-body">
+                                <textarea id="session-context-input" rows="3" placeholder="Add optional context for this Live Session..."></textarea>
+                                <div class="context-hint">Included in AI replies and notes for this session.</div>
+                            </div>
+                        </div>
+
+                        <div class="chat-container" id="chat-container">
+                            <div class="message system">
+                                <div class="avatar"><i class="fa-solid fa-info"></i></div>
+                                <div class="bubble">
+                                    Welcome! Configure your API key in Settings to enable AI responses. 
+                                    Toggle the microphone or system audio to start transcription.
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="input-area">
+                            <div class="input-wrapper">
+                                <input type="text" id="manual-input" placeholder="Type a message or just speak...">
+                                <button id="send-btn" title="Send"><i class="fa-solid fa-paper-plane"></i></button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <aside class="session-right">
+                        <div class="notes-panel">
+                            <div class="notes-header">
+                                <h3>Live Notes</h3>
+                                <span class="subtitle">AI-generated key points</span>
+                            </div>
+                            <div class="notes-toolbar">
+                                <button class="icon-btn" id="notes-refresh-btn" title="Refresh Notes">
+                                    <i class="fa-solid fa-arrows-rotate"></i>
+                                </button>
+                                <button class="icon-btn" id="notes-clear-btn" title="Clear Notes">
+                                    <i class="fa-solid fa-trash-can"></i>
+                                </button>
+                                <button class="icon-btn" id="notes-export-btn" title="Export Notes">
+                                    <i class="fa-solid fa-download"></i>
+                                </button>
+                            </div>
+                            <div class="notes-content">
+                                <ul id="notes-points-session" class="notes-list"></ul>
+                                <div class="empty-state" id="notes-empty-state">
+                                    <i class="fa-regular fa-lightbulb"></i>
+                                    <p>Notes will appear as the conversation progresses</p>
+                                </div>
+                            </div>
+                            <div class="note-input-area">
+                                <div class="note-input-wrapper">
+                                    <input type="text" id="manual-note-input" placeholder="Add a manual note...">
+                                    <button id="add-note-btn" title="Add Note"><i class="fa-solid fa-plus"></i></button>
+                                </div>
+                            </div>
+                        </div>
+                    </aside>
+                </div>
+            </div>
+
+            <!-- Notes Tab -->
+            <div id="tab-notes" class="tab-content">
+                <div class="notes-full-layout">
+                    <div class="notes-full-panel">
+                        <div class="notes-full-header">
+                            <h2>All Notes</h2>
+                            <span class="subtitle">Manage AI-generated and manual notes</span>
+                        </div>
+                        <div class="notes-full-toolbar">
+                            <button class="notes-filter-btn active" data-filter="all">All</button>
+                            <button class="notes-filter-btn" data-filter="ai">AI Generated</button>
+                            <button class="notes-filter-btn" data-filter="manual">Manual</button>
+                            <button class="notes-filter-btn" data-filter="pinned">Pinned</button>
+                            <div style="flex:1"></div>
+                            <button class="action-btn" id="export-all-notes-btn">
+                                <i class="fa-solid fa-download"></i>
+                                <span>Export</span>
+                            </button>
+                        </div>
+                        <div class="notes-full-content">
+                            <div class="notes-grid" id="notes-grid">
+                                <!-- Notes will be rendered here -->
+                            </div>
+                            <div class="empty-state" id="notes-full-empty">
+                                <i class="fa-regular fa-note-sticky"></i>
+                                <p>No notes yet. Start a session to generate AI notes or add manual notes.</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- History Tab -->
+            <div id="tab-history" class="tab-content">
+                <div class="history-layout">
+                    <div class="history-sidebar">
+                        <div class="history-header">
+                            <input type="text" class="history-search" placeholder="Search sessions..." id="history-search">
+                        </div>
+                        <div class="history-list" id="history-list">
+                            <!-- History items will be rendered here -->
+                        </div>
+                    </div>
+                    <div class="history-content" id="history-content">
+                        <div class="history-empty">
+                            <i class="fa-solid fa-clock-rotate-left"></i>
+                            <p>Select a session from the list to view its transcript and notes</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Settings Tab -->
+            <div id="tab-settings" class="tab-content">
+                <div class="settings-layout">
+                    <nav class="settings-nav">
+                        <button class="settings-nav-item active" data-settings-section="api">
+                            <i class="fa-solid fa-key"></i>
+                            <span>API</span>
+                        </button>
+                        <button class="settings-nav-item" data-settings-section="assistant">
+                            <i class="fa-solid fa-robot"></i>
+                            <span>Assistant</span>
+                        </button>
+                        <button class="settings-nav-item" data-settings-section="notes">
+                            <i class="fa-solid fa-note-sticky"></i>
+                            <span>Notes</span>
+                        </button>
+                        <button class="settings-nav-item" data-settings-section="audio">
+                            <i class="fa-solid fa-microphone"></i>
+                            <span>Audio</span>
+                        </button>
+                        <button class="settings-nav-item" data-settings-section="policy">
+                            <i class="fa-solid fa-shield-halved"></i>
+                            <span>Policy</span>
+                        </button>
+                        <button class="settings-nav-item" data-settings-section="advanced">
+                            <i class="fa-solid fa-gear"></i>
+                            <span>Advanced</span>
+                        </button>
+
+                        <div class="settings-nav-footer">
+                            <button class="primary-btn" id="save-settings">Save Changes</button>
+                            <button class="secondary-btn" id="reset-settings">Reset Defaults</button>
+                            <div class="setting-hint">Applies to all settings.</div>
+                        </div>
+                    </nav>
+                    
+                    <div class="settings-content">
+                        <!-- API Settings -->
+                        <div class="settings-panel" id="settings-api">
+                            <div class="settings-section">
+                                <div class="settings-section-title">API Configuration</div>
+
+                                <div class="setting-group">
+                                    <label>Provider</label>
+                                    <select id="setting-provider">
+                                        <option value="openrouter">OpenRouter</option>
+                                        <option value="openai">OpenAI</option>
+                                        <option value="canopywave">Canopy Wave</option>
+                                        <option value="huggingface">Hugging Face</option>
+                                        <option value="custom">Custom (OpenAI-compatible)</option>
+                                    </select>
+                                    <div class="setting-hint">Sets defaults for Base URL/Model. API key can also come from env vars (OPENROUTER_API_KEY, OPENAI_API_KEY, CANOPYWAVE_API_KEY, HF_TOKEN).</div>
+                                </div>
+
+                                <div class="setting-group">
+                                    <label>API Key</label>
+                                    <input type="password" id="setting-api-key" placeholder="sk-... or your OpenRouter key">
+                                    <div class="setting-hint">Stored locally (or leave blank to use the provider env var).</div>
+                                </div>
+
+                                <div class="setting-group">
+                                    <label>Base URL</label>
+                                    <input type="text" id="setting-base-url" value="https://openrouter.ai/api/v1">
+                                    <div class="setting-hint">OpenAI-compatible endpoint. Canopy Wave: https://inference.canopywave.io/v1</div>
+                                </div>
+
+                                <div class="setting-group">
+                                    <label>Model</label>
+                                    <input type="text" id="setting-model" value="openai/gpt-4o-mini">
+                                    <div class="setting-hint">Model identifier (e.g., gpt-4o, gpt-4o-mini, claude-3-5-sonnet).</div>
+                                </div>
+
+                                <div class="setting-group">
+                                    <label>Extra Headers (JSON)</label>
+                                    <textarea id="setting-extra-headers" rows="3" placeholder='{"HTTP-Referer":"https://example.com","X-Title":"AI Assistant"}'></textarea>
+                                    <div class="setting-hint">Optional. Added to every request.</div>
+                                </div>
+                            </div>
+                            
+                            <div class="btn-row">
+                                <button class="secondary-btn" id="test-api-btn">Test Connection</button>
+                            </div>
+                        </div>
+
+                        <!-- Assistant Settings -->
+                        <div class="settings-panel hidden" id="settings-assistant">
+                            <div class="settings-section">
+                                <div class="settings-section-title">Assistant Behavior</div>
+                                
+                                <div class="setting-group">
+                                    <label>System Prompt</label>
+                                    <textarea id="setting-prompt" rows="5">You are a helpful AI assistant. Summarize the user's input and reply concisely. Focus on being practical and actionable.</textarea>
+                                    <div class="setting-hint">Instructions that shape how the AI responds.</div>
+                                </div>
+
+                                <div class="setting-row">
+                                    <div class="setting-row-info">
+                                        <div class="setting-row-label">Auto-respond</div>
+                                        <div class="setting-row-desc">AI automatically responds to transcriptions</div>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="setting-auto-respond">
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+
+                                <div class="setting-row">
+                                    <div class="setting-row-info">
+                                        <div class="setting-row-label">Web Search</div>
+                                        <div class="setting-row-desc">Let AI (and notes) decide when to search the web for accuracy</div>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="setting-web-search">
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+
+                                <div class="setting-group">
+                                    <label>Response Interval (seconds)</label>
+                                    <div class="setting-range">
+                                        <input type="range" id="setting-ai-interval" min="2" max="30" value="8">
+                                        <span class="range-value" id="ai-interval-value">8s</span>
+                                    </div>
+                                    <div class="setting-hint">Minimum time between AI responses.</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Notes Settings -->
+                        <div class="settings-panel hidden" id="settings-notes">
+                            <div class="settings-section">
+                                <div class="settings-section-title">AI Note-Taking</div>
+                                
+                                <div class="setting-row">
+                                    <div class="setting-row-info">
+                                        <div class="setting-row-label">Enable Auto Notes</div>
+                                        <div class="setting-row-desc">AI automatically extracts key points from conversation</div>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="setting-notes-enabled" checked>
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+
+                                <div class="setting-row">
+                                    <div class="setting-row-info">
+                                        <div class="setting-row-label">Smart Notes (Merge / Prune)</div>
+                                        <div class="setting-row-desc">Keeps notes concise over time by merging duplicates and removing stale items</div>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="setting-notes-smart" checked>
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+
+                                <div class="setting-group">
+                                    <label>Max AI Notes</label>
+                                    <div class="setting-range">
+                                        <input type="range" id="setting-notes-max-ai" min="6" max="40" value="18">
+                                        <span class="range-value" id="notes-max-ai-value">18</span>
+                                    </div>
+                                    <div class="setting-hint">Upper limit for AI notes after merging/pruning (manual/pinned notes are kept).</div>
+                                </div>
+
+                                <div class="setting-group">
+                                    <label>Notes Generation Interval (seconds)</label>
+                                    <div class="setting-range">
+                                        <input type="range" id="setting-notes-interval" min="10" max="120" value="30">
+                                        <span class="range-value" id="notes-interval-value">30s</span>
+                                    </div>
+                                    <div class="setting-hint">How often AI analyzes the conversation for notes.</div>
+                                </div>
+
+                                <div class="setting-row">
+                                    <div class="setting-row-info">
+                                        <div class="setting-row-label">Generate Notes Only On Interaction</div>
+                                        <div class="setting-row-desc">Disable the interval loop; generate notes when a new message or manual note is added</div>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="setting-notes-interaction-only">
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+
+                                <div class="setting-group">
+                                    <label>Notes Format</label>
+                                    <select id="setting-notes-format">
+                                        <option value="bullets">Bullet Points</option>
+                                        <option value="structured">Structured (Decisions/Actions/Risks)</option>
+                                        <option value="summary">Summary Paragraphs</option>
+                                        <option value="custom">Custom Template</option>
+                                    </select>
+                                </div>
+
+                                <div class="setting-group">
+                                    <label>Notes System Prompt</label>
+                                    <textarea id="setting-notes-prompt" rows="4">Analyze the conversation and extract key information. Focus on: decisions made, action items, important facts, and potential risks or concerns.</textarea>
+                                    <div class="setting-hint">Instructions for how AI should generate notes.</div>
+                                </div>
+
+                                <div class="setting-group">
+                                    <label>Context Window (messages)</label>
+                                    <div class="setting-range">
+                                        <input type="range" id="setting-notes-context" min="5" max="50" value="10">
+                                        <span class="range-value" id="notes-context-value">10</span>
+                                    </div>
+                                    <div class="setting-hint">How many recent messages to analyze for notes.</div>
+                                </div>
+                            </div>
+
+                            <div class="settings-section">
+                                <div class="settings-section-title">Note Categories</div>
+                                
+                                <div class="setting-row">
+                                    <div class="setting-row-info">
+                                        <div class="setting-row-label">Extract Decisions</div>
+                                        <div class="setting-row-desc">Identify decisions made during conversation</div>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="setting-notes-decisions" checked>
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+
+                                <div class="setting-row">
+                                    <div class="setting-row-info">
+                                        <div class="setting-row-label">Extract Action Items</div>
+                                        <div class="setting-row-desc">Identify tasks and to-dos mentioned</div>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="setting-notes-actions" checked>
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+
+                                <div class="setting-row">
+                                    <div class="setting-row-info">
+                                        <div class="setting-row-label">Extract Risks/Concerns</div>
+                                        <div class="setting-row-desc">Flag potential issues or warnings</div>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="setting-notes-risks" checked>
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+
+                                <div class="setting-row">
+                                    <div class="setting-row-info">
+                                        <div class="setting-row-label">Extract Key Facts</div>
+                                        <div class="setting-row-desc">Capture important information and data</div>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="setting-notes-facts" checked>
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Audio Settings -->
+                        <div class="settings-panel hidden" id="settings-audio">
+                            <div class="settings-section">
+                                <div class="settings-section-title">Input Devices</div>
+                                
+                                <div class="setting-group">
+                                    <label>Microphone</label>
+                                    <select id="setting-mic">
+                                        <option value="">(Select microphone)</option>
+                                    </select>
+                                </div>
+
+                                <div class="setting-group">
+                                    <label>System Audio (Loopback)</label>
+                                    <select id="setting-loopback">
+                                        <option value="">(Auto / Default)</option>
+                                    </select>
+                                    <div class="setting-hint">Captures audio from other applications.</div>
+                                </div>
+                            </div>
+
+                            <div class="settings-section">
+                                <div class="settings-section-title">Speech Processing</div>
+                                
+                                <div class="setting-row">
+                                    <div class="setting-row-info">
+                                        <div class="setting-row-label">Voice Activity Detection (VAD)</div>
+                                        <div class="setting-row-desc">Only transcribe when speech is detected</div>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="setting-vad-enabled" checked>
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+
+                                <div class="setting-group">
+                                    <label>VAD Sensitivity</label>
+                                    <div class="setting-range">
+                                        <input type="range" id="setting-vad-threshold" min="0.1" max="0.9" step="0.05" value="0.5">
+                                        <span class="range-value" id="vad-threshold-value">0.50</span>
+                                    </div>
+                                    <div class="setting-hint">Lower = more sensitive (catches quiet speech), Higher = less sensitive (ignores background noise).</div>
+                                </div>
+
+                                <div class="setting-row">
+                                    <div class="setting-row-info">
+                                        <div class="setting-row-label">Noise Reduction</div>
+                                        <div class="setting-row-desc">Filter background noise from audio</div>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="setting-denoise-enabled">
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+
+                                <div class="setting-group">
+                                    <label>Noise Reduction Strength</label>
+                                    <div class="setting-range">
+                                        <input type="range" id="setting-denoise-strength" min="0.1" max="1.0" step="0.1" value="0.8">
+                                        <span class="range-value" id="denoise-strength-value">0.8</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="settings-section">
+                                <div class="settings-section-title">Transcription</div>
+
+                                <div class="setting-group">
+                                    <label>Whisper Model (local)</label>
+                                    <select id="setting-whisper-model-size">
+                                        <option value="tiny">tiny (fastest)</option>
+                                        <option value="base">base</option>
+                                        <option value="small">small</option>
+                                        <option value="medium">medium</option>
+                                        <option value="large-v2">large-v2</option>
+                                        <option value="large-v3">large-v3 (best)</option>
+                                    </select>
+                                    <div class="setting-hint">Higher quality uses more CPU/RAM. Applies on next app start (model is loaded once per run).</div>
+                                </div>
+
+                                <div class="setting-group">
+                                    <label>Whisper Device</label>
+                                    <select id="setting-whisper-device">
+                                        <option value="cpu">CPU</option>
+                                        <option value="cuda">GPU (CUDA)</option>
+                                    </select>
+                                    <div class="setting-hint">Controls whether local transcription runs on CPU or NVIDIA GPU (CUDA). Applies on next app start.</div>
+                                </div>
+
+                                <div class="setting-row">
+                                    <div class="setting-row-info">
+                                        <div class="setting-row-label">Unique Third-Party Speakers</div>
+                                        <div class="setting-row-desc">Assign session-local Speaker IDs for system audio</div>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="setting-speaker-diarization">
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+                                
+                                <div class="setting-row">
+                                    <div class="setting-row-info">
+                                        <div class="setting-row-label">Whisper VAD Filter</div>
+                                        <div class="setting-row-desc">Use Whisper's built-in voice detection</div>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="setting-whisper-vad" checked>
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Policy Settings -->
+                        <div class="settings-panel hidden" id="settings-policy">
+                            <div class="settings-section">
+                                <div class="settings-section-title">Response Policy</div>
+                                
+                                <div class="setting-row">
+                                    <div class="setting-row-info">
+                                        <div class="setting-row-label">Enable Policy Gate</div>
+                                        <div class="setting-row-desc">AI decides when to respond based on context</div>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="setting-policy-enabled" checked>
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+
+                                <div class="setting-group">
+                                    <label>Policy Prompt</label>
+                                    <textarea id="setting-policy-prompt" rows="6">Only respond when it is clearly helpful or strategically appropriate. If the user is in an argument, respond only at a suitable time with a concise, de-escalatory defense based on what was said. If it's not the right moment, do not respond.</textarea>
+                                    <div class="setting-hint">Rules for when the AI should speak up vs stay silent.</div>
+                                </div>
+
+                                <div class="setting-row">
+                                    <div class="setting-row-info">
+                                        <div class="setting-row-label">Show Withheld Notifications</div>
+                                        <div class="setting-row-desc">Notify when AI chose not to respond</div>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="setting-policy-show-withheld" checked>
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+
+                                <div class="setting-group">
+                                    <label>Policy Evaluation Interval (seconds)</label>
+                                    <div class="setting-range">
+                                        <input type="range" id="setting-policy-interval" min="1" max="15" value="4">
+                                        <span class="range-value" id="policy-interval-value">4s</span>
+                                    </div>
+                                    <div class="setting-hint">Minimum time between policy checks.</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Advanced Settings -->
+                        <div class="settings-panel hidden" id="settings-advanced">
+                            <div class="settings-section">
+                                <div class="settings-section-title">Session Management</div>
+                                
+                                <div class="setting-row">
+                                    <div class="setting-row-info">
+                                        <div class="setting-row-label">Auto-save Sessions</div>
+                                        <div class="setting-row-desc">Automatically save session transcripts and notes</div>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="setting-autosave" checked>
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+
+                                <div class="setting-group">
+                                    <label>Session Timeout (minutes)</label>
+                                    <div class="setting-range">
+                                        <input type="range" id="setting-session-timeout" min="5" max="120" value="30">
+                                        <span class="range-value" id="session-timeout-value">30m</span>
+                                    </div>
+                                    <div class="setting-hint">Start new session after this period of inactivity.</div>
+                                </div>
+                            </div>
+
+                            <div class="settings-section">
+                                <div class="settings-section-title">Data</div>
+                                
+                                <div class="btn-row">
+                                    <button class="secondary-btn" id="export-data-btn">
+                                        <i class="fa-solid fa-download"></i> Export All Data
+                                    </button>
+                                    <button class="action-btn danger" id="clear-history-btn">
+                                        <i class="fa-solid fa-trash-can"></i> Clear History
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div class="settings-section">
+                                <div class="settings-section-title">Presets</div>
+
+                                <div class="setting-group">
+                                    <label>Preset</label>
+                                    <select id="preset-select">
+                                        <option value="">(Select preset)</option>
+                                    </select>
+                                    <div class="setting-hint">Save and quickly switch between complete settings profiles.</div>
+                                </div>
+
+                                <div class="setting-group">
+                                    <label>New Preset Name</label>
+                                    <input type="text" id="preset-name" placeholder="e.g. Work, Gaming, Meetings">
+                                </div>
+
+                                <div class="setting-row">
+                                    <div class="setting-row-info">
+                                        <div class="setting-row-label">Include API Key</div>
+                                        <div class="setting-row-desc">Store the API key inside the preset file</div>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="preset-include-api-key">
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+
+                                <div class="btn-row">
+                                    <button class="primary-btn" id="preset-save-btn">Save Preset</button>
+                                    <button class="secondary-btn" id="preset-apply-btn">Apply</button>
+                                    <button class="secondary-btn" id="preset-delete-btn">Delete</button>
+                                </div>
+                            </div>
+
+                            <div class="settings-section">
+                                <div class="settings-section-title">Debug</div>
+                                
+                                <div class="setting-row">
+                                    <div class="setting-row-info">
+                                        <div class="setting-row-label">Verbose Logging</div>
+                                        <div class="setting-row-desc">Show detailed logs in browser console</div>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="setting-verbose">
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+                            </div>
+
+                            <div class="settings-section">
+                                <div class="settings-section-title">Transcript</div>
+
+                                <div class="setting-row">
+                                    <div class="setting-row-info">
+                                        <div class="setting-row-label">Merge Transcript Segments</div>
+                                        <div class="setting-row-desc">Combine short back-to-back transcript chunks into one message</div>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="setting-transcript-merge" checked>
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+
+                                <div class="setting-group">
+                                    <label>Merge Window (seconds)</label>
+                                    <div class="setting-range">
+                                        <input type="range" id="setting-transcript-merge-window" min="0" max="10" value="4">
+                                        <span class="range-value" id="transcript-merge-window-value">4s</span>
+                                    </div>
+                                    <div class="setting-hint">Only merge chunks that arrive within this time window.</div>
+                                </div>
+
+                                <div class="setting-group">
+                                    <label>AI Transcript Rewrite</label>
+                                    <select id="setting-transcript-ai-mode">
+                                        <option value="off">Off</option>
+                                        <option value="cleanup">Cleanup (punctuation/fluency)</option>
+                                        <option value="paraphrase">Paraphrase (what they meant)</option>
+                                    </select>
+                                    <div class="setting-hint">Controls whether an AI-processed version is generated for You/Third-Party messages (never AI replies).</div>
+                                </div>
+
+                                <div class="setting-group">
+                                    <label>Transcript Display</label>
+                                    <select id="setting-transcript-display">
+                                        <option value="raw">Raw (verbatim)</option>
+                                        <option value="clean">AI-Processed</option>
+                                    </select>
+                                    <div class="setting-hint">Controls what you see in the chat. Requires AI Transcript Rewrite to be enabled.</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="js/app.js"></script>
+</body>
+
+</html>

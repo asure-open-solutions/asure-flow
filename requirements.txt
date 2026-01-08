@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+soundcard
+pyaudiowpatch
+numpy
+openai
+websockets
+pywebview
+faster-whisper
+onnxruntime
+cffi
+python-multipart
+# For soundcard on windows, ensure you have C++ build tools if needed, but wheel should exist.
