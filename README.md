@@ -1,4 +1,4 @@
-# AsureFlow (AI Assistant)
+# AsuréFlow (AI Assistant)
 
 Real-time transcription + AI notes in a lightweight local web app (FastAPI + WebSockets).
 
