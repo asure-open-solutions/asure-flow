@@ -36,6 +36,10 @@ Common env vars:
 - `AI_ASSISTANT_USE_WEBVIEW` = `0` / `1` (embed UI in a WebView window)
 - `AI_ASSISTANT_CONFIG_PATH` = path to a config file (optional)
 
+Transcription settings (in the UI Settings panel):
+- `whisper_model_size`: `tiny`/`base`/`small`/`medium`/`large-v2`/`large-v3`
+- `whisper_device`: `cpu` or `cuda` (GPU requires CUDA runtime DLLs on PATH, e.g. `cublas64_12.dll`; if missing, the app falls back to CPU)
+
 ## Repo layout
 - `main.py`: FastAPI app + UI server + orchestration
 - `backend/`: audio, transcription, diarization, LLM helpers

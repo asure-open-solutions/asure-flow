@@ -3,11 +3,46 @@ import numpy as np
 import threading
 import logging
 from dataclasses import dataclass
+import os
+import ctypes
 
 logger = logging.getLogger(__name__)
 
 from backend.speech_processing import SpeechPreprocessConfig, preprocess_audio
 from backend.diarization import compute_voiceprint
+
+
+def _looks_like_missing_cuda_runtime(exc: BaseException) -> bool:
+    msg = str(exc or "").casefold()
+    if not msg:
+        return False
+
+    # Common Windows CUDA runtime failures when ctranslate2 is built for CUDA but the
+    # CUDA runtime isn't installed / not on PATH.
+    if ".dll" in msg and ("not found" in msg or "cannot be loaded" in msg):
+        if any(tok in msg for tok in ("cublas", "cudart", "cufft", "curand", "cusolver", "cusparse")):
+            return True
+        if msg.startswith("library ") and " is not found" in msg:
+            return True
+
+    return False
+
+
+def _windows_cuda_dlls_available() -> bool:
+    if os.name != "nt":
+        return True
+
+    # Most common dependency for CUDA-enabled ctranslate2/faster-whisper wheels on Windows.
+    candidates = ("cublas64_12.dll", "cublas64_11.dll")
+    for dll in candidates:
+        try:
+            ctypes.WinDLL(dll)
+            return True
+        except OSError:
+            continue
+
+    return False
+
 
 @dataclass(frozen=True)
 class TranscriptionChunk:
@@ -25,30 +60,70 @@ class TranscriptionEngine:
         preprocess: SpeechPreprocessConfig | None = None,
         whisper_vad_filter: bool = True,
     ):
+        self._lock = threading.Lock()
+        self.model_size = str(model_size or "tiny").strip() or "tiny"
+
         device = (str(device or "cpu").strip().lower() or "cpu")
         if device in ("gpu", "cuda"):
             device = "cuda"
         if device not in ("cpu", "cuda"):
             device = "cpu"
 
+        if device == "cuda":
+            try:
+                if not _windows_cuda_dlls_available():
+                    raise RuntimeError("Missing CUDA runtime DLLs (e.g. cublas64_12.dll)")
+
+                import ctranslate2
+
+                get_count = getattr(ctranslate2, "get_cuda_device_count", None)
+                if callable(get_count) and int(get_count() or 0) <= 0:
+                    raise RuntimeError("No CUDA devices detected")
+            except Exception as e:
+                logger.warning(f"CUDA not available ({e}); using CPU for transcription.")
+                device = "cpu"
+
         if compute_type is None:
             compute_type = "float16" if device == "cuda" else "int8"
         compute_type = str(compute_type or "").strip().lower() or ("float16" if device == "cuda" else "int8")
 
-        logger.info(f"Loading Whisper model: {model_size} on {device} ({compute_type})...")
-        try:
-            self.model = WhisperModel(model_size, device=device, compute_type=compute_type)
-        except Exception as e:
-            if device != "cpu":
-                logger.warning(f"Failed to load Whisper on {device}; falling back to CPU: {e}")
-                self.model = WhisperModel(model_size, device="cpu", compute_type="int8")
-            else:
-                raise
-        self._lock = threading.Lock()
+        self.device = device
+        self.compute_type = compute_type
+        self._load_model(device=self.device, compute_type=self.compute_type)
         self.sample_rate = int(sample_rate)
         self.preprocess = preprocess or SpeechPreprocessConfig()
         self.whisper_vad_filter = bool(whisper_vad_filter)
         logger.info("Whisper model loaded.")
+
+    def _load_model(self, *, device: str, compute_type: str) -> None:
+        logger.info(f"Loading Whisper model: {self.model_size} on {device} ({compute_type})...")
+        try:
+            self.model = WhisperModel(self.model_size, device=device, compute_type=compute_type)
+            self.device = device
+            self.compute_type = compute_type
+        except Exception as e:
+            if device != "cpu":
+                logger.warning(f"Failed to load Whisper on {device}; falling back to CPU: {e}")
+                self.model = WhisperModel(self.model_size, device="cpu", compute_type="int8")
+                self.device = "cpu"
+                self.compute_type = "int8"
+            else:
+                raise
+
+    def _transcribe_with_fallback(self, audio: np.ndarray):
+        with self._lock:
+            try:
+                segments, info = self.model.transcribe(audio, beam_size=5, vad_filter=self.whisper_vad_filter)
+                return list(segments), info
+            except RuntimeError as e:
+                if self.device == "cuda" and _looks_like_missing_cuda_runtime(e):
+                    logger.warning(
+                        "CUDA runtime libraries are missing (e.g. cublas64_12.dll). Falling back to CPU transcription."
+                    )
+                    self._load_model(device="cpu", compute_type="int8")
+                    segments, info = self.model.transcribe(audio, beam_size=5, vad_filter=self.whisper_vad_filter)
+                    return list(segments), info
+                raise
 
     def transcribe_stream(self, audio_generator, *, return_voiceprint: bool = False):
         """
@@ -88,9 +163,9 @@ class TranscriptionEngine:
                     else:
                         buffer = np.array([], dtype=np.float32)
                     continue
-                # Transcribe the current buffer
-                with self._lock:
-                    segments, info = self.model.transcribe(audio, beam_size=5, vad_filter=self.whisper_vad_filter)
+
+                # Transcribe the current buffer (with CUDA->CPU fallback if needed).
+                segments, info = self._transcribe_with_fallback(audio)
                 
                 text_accumulated = ""
                 for segment in segments:

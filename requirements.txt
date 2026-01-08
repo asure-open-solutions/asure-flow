@@ -1,7 +1,7 @@
 fastapi
 uvicorn
-soundcard
-pyaudiowpatch
+soundcard; platform_system != "Windows"
+pyaudiowpatch; platform_system == "Windows"
 numpy
 openai
 websockets

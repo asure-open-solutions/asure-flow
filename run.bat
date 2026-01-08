@@ -1,8 +1,8 @@
 @echo off
-title AI Assistant
+title Asuré Flow Launcher
 cd /d "%~dp0"
 
-echo Starting AI Assistant...
+echo Starting Asuré Flow...
 
 set "PY=%~dp0.venv\Scripts\python.exe"
 
@@ -28,7 +28,7 @@ echo Browser will open automatically when the server is ready...
 
 echo.
 echo ========================================
-echo   AI Assistant is running!
+echo   Asuré Flow is running!
 echo   Close this window to stop the server.
 echo ========================================
 echo.
