@@ -48,6 +48,11 @@ class TestTranscriptionTextNormalization(unittest.TestCase):
         out = TranscriptionEngine._normalize_transcript_text(text)
         self.assertEqual(out, "it will be when everyone plugs in at once and overloads the grid.")
 
+    def test_drops_chopped_stem_before_sentence_seam(self):
+        text = "Lifecycle assessments are by. biased, though."
+        out = TranscriptionEngine._normalize_transcript_text(text)
+        self.assertEqual(out, "Lifecycle assessments are biased, though.")
+
 
 if __name__ == "__main__":
     unittest.main()

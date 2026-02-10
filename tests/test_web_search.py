@@ -104,6 +104,24 @@ class TestWebSearch(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Query: electric cars lifecycle emissions", ctx)
         self.assertIn("Lifecycle emissions comparison", ctx)
 
+    async def test_decider_handles_malformed_llm_response_without_crash(self):
+        main.config["web_search_mode"] = "auto"
+
+        class _MalformedResp:
+            choices = None
+
+        class _DummyLLM:
+            async def chat_create(self, **kwargs):
+                return _MalformedResp()
+
+        main.llm_client = _DummyLLM()
+        should, query = await main._decide_web_search(
+            seed_text="latest EV battery fire statistics",
+            purpose="response_generate",
+        )
+        self.assertFalse(should)
+        self.assertEqual(query, "latest EV battery fire statistics")
+
 
 if __name__ == "__main__":
     unittest.main()

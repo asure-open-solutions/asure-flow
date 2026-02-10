@@ -357,6 +357,12 @@ body {
     border-color: var(--accent-primary);
 }
 
+.icon-btn.danger:hover {
+    background: rgba(181, 90, 90, 0.12);
+    border-color: rgba(181, 90, 90, 0.4);
+    color: var(--accent-error);
+}
+
 /* Action button with label */
 .action-btn {
     display: flex;
@@ -792,6 +798,11 @@ body {
     color: var(--text-faint);
     margin-top: 6px;
     font-family: var(--font-mono);
+}
+
+.note-content {
+    white-space: pre-wrap;
+    word-break: break-word;
 }
 
 /* Manual note input */
@@ -1307,6 +1318,17 @@ input[type="text"]::placeholder {
     appearance: none;
 }
 
+.setting-range input[type="number"] {
+    width: 110px;
+    padding: 6px 8px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-color);
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    font-family: var(--font-mono);
+}
+
 .setting-range input[type="range"]::-webkit-slider-thumb {
     -webkit-appearance: none;
     width: 16px;
@@ -1404,6 +1426,26 @@ input[type="text"]::placeholder {
     font-size: 0.85rem;
 }
 
+.history-toolbar {
+    margin-top: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.history-count {
+    font-size: 0.72rem;
+    color: var(--text-faint);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.history-toolbar-actions {
+    display: flex;
+    gap: 6px;
+}
+
 .history-list {
     flex: 1;
     overflow-y: auto;
@@ -1411,35 +1453,85 @@ input[type="text"]::placeholder {
 }
 
 .history-item {
-    padding: 12px 14px;
+    padding: 12px;
     border-radius: var(--radius);
     cursor: pointer;
     transition: all 0.15s;
     margin-bottom: 4px;
+    border: 1px solid transparent;
 }
 
 .history-item:hover {
     background: var(--bg-hover);
+    border-color: var(--border-default);
 }
 
 .history-item.active {
     background: var(--bg-active);
+    border-color: var(--border-strong);
+}
+
+.history-item-top {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
 }
 
 .history-item-title {
     font-size: 0.85rem;
     color: var(--text-main);
-    margin-bottom: 4px;
+    font-weight: 600;
+    margin-bottom: 2px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }
 
+.history-item-subtitle {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+}
+
 .history-item-meta {
-    font-size: 0.7rem;
+    font-size: 0.68rem;
     color: var(--text-faint);
     display: flex;
+    flex-wrap: wrap;
     gap: 8px;
+}
+
+.history-pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 7px;
+    border: 1px solid var(--border-default);
+    border-radius: 999px;
+    background: var(--bg-dark);
+    color: var(--text-faint);
+    line-height: 1.2;
+}
+
+.history-item-delete {
+    width: 24px;
+    height: 24px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-faint);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: all 0.15s;
+}
+
+.history-item-delete:hover {
+    color: var(--accent-error);
+    border-color: rgba(181, 90, 90, 0.35);
+    background: rgba(181, 90, 90, 0.12);
 }
 
 .history-content {
@@ -1451,7 +1543,7 @@ input[type="text"]::placeholder {
 .history-detail-header {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 8px;
     margin-bottom: 18px;
 }
 
@@ -1459,6 +1551,12 @@ input[type="text"]::placeholder {
     display: flex;
     gap: 10px;
     margin-top: 6px;
+}
+
+.history-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
 }
 
 .history-section {
@@ -1490,6 +1588,20 @@ input[type="text"]::placeholder {
 
 .history-empty p {
     font-size: 0.9rem;
+}
+
+@media (max-width: 980px) {
+    .history-layout {
+        flex-direction: column;
+    }
+
+    .history-sidebar {
+        width: 100%;
+        min-width: 0;
+        max-height: 42%;
+        border-right: none;
+        border-bottom: 1px solid var(--border-default);
+    }
 }
 
 /* ============================================
@@ -1525,6 +1637,7 @@ input[type="text"]::placeholder {
 .notes-full-toolbar {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 10px;
     padding: 12px 24px;
     border-bottom: 1px solid var(--border-subtle);
@@ -1551,6 +1664,22 @@ input[type="text"]::placeholder {
     background: var(--bg-active);
     color: var(--text-main);
     border-color: var(--border-default);
+}
+
+.notes-search {
+    width: 220px;
+    min-width: 180px;
+    max-width: 280px;
+}
+
+.notes-sort-select {
+    background: var(--bg-dark);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius);
+    color: var(--text-main);
+    font-size: 0.8rem;
+    padding: 7px 10px;
+    min-width: 150px;
 }
 
 .notes-full-content {

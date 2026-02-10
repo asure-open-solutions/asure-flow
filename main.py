@@ -98,6 +98,8 @@ _TRANSCRIPT_LAST_UPDATE_TS: dict[str, float] = {}
 _TRANSCRIPT_CLEANUP_LAST_TS: float = 0.0
 _TRANSCRIPT_ACTIVITY_SEQ: int = 0
 _AI_TRIGGER_BASELINE_TEXT: dict[str, str] = {}
+_PYTEXTRANK_NLP: Any = None
+_PYTEXTRANK_INIT_ATTEMPTED: bool = False
 
 
 # ============================================
@@ -250,11 +252,18 @@ DEFAULT_CONFIG = {
     "auto_respond": False,
     "response_enabled": True,
     "response_context_messages": 14,
+    "response_context_max_chars": 36000,
     "response_max_items": 20,
     "response_require_policy_gate": True,
     "response_policy_min_confidence": 0.58,
+    # While live STT is still updating text, hold AI calls and coalesce to latest.
+    "ai_transcript_settle_seconds": 1.8,
+    "ai_transcript_settle_max_wait_seconds": 18.0,
     "response_prompt": (
         "Generate a strategic, fact-based response the user can say in an argument or legal-style dispute. "
+        "You are always aligned with the user; never argue against, scold, or fact-check the user directly. "
+        "If the latest message is from the user, strengthen or reframe it into a safer defense instead of countering it. "
+        "Prefer responding to counterparty claims when available. "
         "Use only information grounded in the transcript/context. Be concise, calm, and defensible. "
         "Do not invent facts."
     ),
@@ -264,6 +273,9 @@ DEFAULT_CONFIG = {
     "web_search_timeout_seconds": 6.0,
     "web_search_cache_ttl_seconds": 180.0,
     "web_search_min_interval_seconds": 6.0,
+    # Local/free context compression for long sessions.
+    "context_local_summary_enabled": True,
+    "context_local_summary_method": "pytextrank",  # "pytextrank", "heuristic", "auto"
     
     # Policy
     "policy_enabled": True,
@@ -293,12 +305,13 @@ DEFAULT_CONFIG = {
 
     # Fact Check
     "fact_check_enabled": True,
-    "fact_check_interval_seconds": 25,
+    "fact_check_interval_seconds": 15,
     "fact_check_on_interaction_only": False,
     "fact_check_live_on_message": True,
-    "fact_check_debounce_seconds": 2.5,
-    "fact_check_trigger_min_interval_seconds": 10.0,
+    "fact_check_debounce_seconds": 1.0,
+    "fact_check_trigger_min_interval_seconds": 4.0,
     "fact_check_context_messages": 18,
+    "fact_check_context_max_chars": 42000,
     "fact_check_max_items": 12,
     "fact_check_prompt": (
         "Identify key claims in the conversation and classify each as supported, contradicted, or uncertain "
@@ -326,7 +339,7 @@ DEFAULT_CONFIG = {
     "transcription_chunk_overlap_seconds": 0.16,
     # "auto" chooses profile based on whisper_device.
     # "manual" uses whisper_beam_size/chunk_duration/chunk_overlap as provided.
-    # cpu_realtime|cpu_accuracy|gpu_realtime|gpu_balanced|gpu_quality apply tuned defaults.
+    # cpu_realtime|cpu_accuracy|gpu_realtime|gpu_accuracy apply tuned defaults.
     "transcription_profile": "auto",
     "whisper_model_size": "tiny",
     "whisper_device": "cpu",  # "cpu" or "cuda"
@@ -701,7 +714,14 @@ def _sanitize_config_values(raw: dict | None, *, base: dict | None = None) -> di
     out["ai_min_interval_seconds"] = _coerce_float_in_range(src.get("ai_min_interval_seconds"), 8.0, min_v=0.0, max_v=120.0)
     out["auto_respond"] = _coerce_bool(src.get("auto_respond"), bool(DEFAULT_CONFIG["auto_respond"]))
     out["response_enabled"] = _coerce_bool(src.get("response_enabled"), bool(DEFAULT_CONFIG["response_enabled"]))
-    out["response_context_messages"] = _coerce_int_in_range(src.get("response_context_messages"), 14, min_v=4, max_v=120)
+    # 0 means "use all available messages".
+    out["response_context_messages"] = _coerce_int_in_range(src.get("response_context_messages"), 14, min_v=0, max_v=5000)
+    out["response_context_max_chars"] = _coerce_int_in_range(
+        src.get("response_context_max_chars"),
+        int(DEFAULT_CONFIG["response_context_max_chars"]),
+        min_v=4000,
+        max_v=250000,
+    )
     out["response_max_items"] = _coerce_int_in_range(src.get("response_max_items"), 20, min_v=1, max_v=100)
     out["response_require_policy_gate"] = _coerce_bool(
         src.get("response_require_policy_gate"),
@@ -712,6 +732,18 @@ def _sanitize_config_values(raw: dict | None, *, base: dict | None = None) -> di
         0.58,
         min_v=0.0,
         max_v=1.0,
+    )
+    out["ai_transcript_settle_seconds"] = _coerce_float_in_range(
+        src.get("ai_transcript_settle_seconds"),
+        float(DEFAULT_CONFIG["ai_transcript_settle_seconds"]),
+        min_v=0.0,
+        max_v=20.0,
+    )
+    out["ai_transcript_settle_max_wait_seconds"] = _coerce_float_in_range(
+        src.get("ai_transcript_settle_max_wait_seconds"),
+        float(DEFAULT_CONFIG["ai_transcript_settle_max_wait_seconds"]),
+        min_v=0.2,
+        max_v=120.0,
     )
     out["response_prompt"] = response_prompt_raw
     out["web_search_enabled"] = _coerce_bool(src.get("web_search_enabled"), bool(DEFAULT_CONFIG["web_search_enabled"]))
@@ -734,6 +766,15 @@ def _sanitize_config_values(raw: dict | None, *, base: dict | None = None) -> di
         min_v=0.0,
         max_v=300.0,
     )
+    out["context_local_summary_enabled"] = _coerce_bool(
+        src.get("context_local_summary_enabled"),
+        bool(DEFAULT_CONFIG["context_local_summary_enabled"]),
+    )
+    out["context_local_summary_method"] = _coerce_choice(
+        src.get("context_local_summary_method"),
+        {"pytextrank", "heuristic", "auto"},
+        str(DEFAULT_CONFIG["context_local_summary_method"]),
+    )
 
     out["policy_enabled"] = _coerce_bool(src.get("policy_enabled"), bool(DEFAULT_CONFIG["policy_enabled"]))
     out["policy_prompt"] = _coerce_str(src.get("policy_prompt"), str(DEFAULT_CONFIG["policy_prompt"]), max_len=12000)
@@ -752,7 +793,8 @@ def _sanitize_config_values(raw: dict | None, *, base: dict | None = None) -> di
         str(DEFAULT_CONFIG["notes_format"]),
     )
     out["notes_prompt"] = _coerce_str(src.get("notes_prompt"), str(DEFAULT_CONFIG["notes_prompt"]), max_len=12000)
-    out["notes_context_messages"] = _coerce_int_in_range(src.get("notes_context_messages"), 10, min_v=3, max_v=120)
+    # 0 means "use all available messages".
+    out["notes_context_messages"] = _coerce_int_in_range(src.get("notes_context_messages"), 10, min_v=0, max_v=5000)
     out["notes_max_chars"] = _coerce_int_in_range(src.get("notes_max_chars"), 24000, min_v=2000, max_v=200000)
     out["notes_live_on_message"] = _coerce_bool(src.get("notes_live_on_message"), bool(DEFAULT_CONFIG["notes_live_on_message"]))
     out["notes_debounce_seconds"] = _coerce_float_in_range(src.get("notes_debounce_seconds"), 2.5, min_v=0.2, max_v=10.0)
@@ -783,7 +825,7 @@ def _sanitize_config_values(raw: dict | None, *, base: dict | None = None) -> di
     out["notes_extract_facts"] = _coerce_bool(src.get("notes_extract_facts"), bool(DEFAULT_CONFIG["notes_extract_facts"]))
 
     out["fact_check_enabled"] = _coerce_bool(src.get("fact_check_enabled"), bool(DEFAULT_CONFIG["fact_check_enabled"]))
-    out["fact_check_interval_seconds"] = _coerce_int_in_range(src.get("fact_check_interval_seconds"), 25, min_v=5, max_v=600)
+    out["fact_check_interval_seconds"] = _coerce_int_in_range(src.get("fact_check_interval_seconds"), 15, min_v=5, max_v=600)
     out["fact_check_on_interaction_only"] = _coerce_bool(
         src.get("fact_check_on_interaction_only"),
         bool(DEFAULT_CONFIG["fact_check_on_interaction_only"]),
@@ -794,17 +836,24 @@ def _sanitize_config_values(raw: dict | None, *, base: dict | None = None) -> di
     )
     out["fact_check_debounce_seconds"] = _coerce_float_in_range(
         src.get("fact_check_debounce_seconds"),
-        2.5,
+        1.0,
         min_v=0.2,
         max_v=10.0,
     )
     out["fact_check_trigger_min_interval_seconds"] = _coerce_float_in_range(
         src.get("fact_check_trigger_min_interval_seconds"),
-        10.0,
+        4.0,
         min_v=0.0,
         max_v=300.0,
     )
-    out["fact_check_context_messages"] = _coerce_int_in_range(src.get("fact_check_context_messages"), 18, min_v=3, max_v=120)
+    # 0 means "use all available messages".
+    out["fact_check_context_messages"] = _coerce_int_in_range(src.get("fact_check_context_messages"), 18, min_v=0, max_v=5000)
+    out["fact_check_context_max_chars"] = _coerce_int_in_range(
+        src.get("fact_check_context_max_chars"),
+        int(DEFAULT_CONFIG["fact_check_context_max_chars"]),
+        min_v=4000,
+        max_v=250000,
+    )
     out["fact_check_max_items"] = _coerce_int_in_range(src.get("fact_check_max_items"), 12, min_v=1, max_v=100)
     out["fact_check_prompt"] = _coerce_str(src.get("fact_check_prompt"), str(DEFAULT_CONFIG["fact_check_prompt"]), max_len=12000)
 
@@ -826,9 +875,11 @@ def _sanitize_config_values(raw: dict | None, *, base: dict | None = None) -> di
     out["whisper_beam_size"] = _coerce_int_in_range(src.get("whisper_beam_size"), 1, min_v=1, max_v=8)
     out["transcription_profile"] = _coerce_choice(
         src.get("transcription_profile"),
-        {"auto", "manual", "cpu_realtime", "cpu_accuracy", "gpu_realtime", "gpu_balanced", "gpu_quality"},
+        {"auto", "manual", "cpu_realtime", "cpu_accuracy", "gpu_realtime", "gpu_accuracy", "gpu_balanced", "gpu_quality"},
         str(DEFAULT_CONFIG["transcription_profile"]),
     )
+    if out["transcription_profile"] in ("gpu_balanced", "gpu_quality"):
+        out["transcription_profile"] = "gpu_accuracy"
     out["transcription_chunk_duration_seconds"] = _coerce_float_in_range(
         src.get("transcription_chunk_duration_seconds"),
         3.2,
@@ -851,6 +902,20 @@ def _sanitize_config_values(raw: dict | None, *, base: dict | None = None) -> di
         if raw_dur is not None and raw_ovr is not None and abs(raw_dur - 2.4) < 1e-6 and abs(raw_ovr - 0.24) < 1e-6:
             out["transcription_chunk_duration_seconds"] = 3.2
             out["transcription_chunk_overlap_seconds"] = 0.16
+    except Exception:
+        pass
+    # Back-compat responsiveness migration:
+    # if older fact-check defaults were persisted explicitly, lift to faster defaults.
+    try:
+        raw_fc_interval = int(raw_dict.get("fact_check_interval_seconds")) if "fact_check_interval_seconds" in raw_dict else None
+        raw_fc_debounce = float(raw_dict.get("fact_check_debounce_seconds")) if "fact_check_debounce_seconds" in raw_dict else None
+        raw_fc_min = float(raw_dict.get("fact_check_trigger_min_interval_seconds")) if "fact_check_trigger_min_interval_seconds" in raw_dict else None
+        if raw_fc_interval is not None and raw_fc_interval == 25:
+            out["fact_check_interval_seconds"] = 15
+        if raw_fc_debounce is not None and abs(raw_fc_debounce - 2.5) < 1e-6:
+            out["fact_check_debounce_seconds"] = 1.0
+        if raw_fc_min is not None and abs(raw_fc_min - 10.0) < 1e-6:
+            out["fact_check_trigger_min_interval_seconds"] = 4.0
     except Exception:
         pass
     out["whisper_model_size"] = _coerce_str(src.get("whisper_model_size"), str(DEFAULT_CONFIG["whisper_model_size"]), max_len=64)
@@ -1209,8 +1274,18 @@ def _find_transcript_index_by_id(session: Session, message_id: str) -> int:
     return -1
 
 
+def _is_active_session(session_id: str | None) -> bool:
+    sid = (session_id or "").strip()
+    if not sid:
+        return False
+    try:
+        return bool(current_session is not None and str(current_session.id or "") == sid)
+    except Exception:
+        return False
+
+
 def create_new_session() -> Session:
-    global current_session, third_party_diarizer
+    global current_session, third_party_diarizer, _TRANSCRIPT_CLEANUP_LAST_TS
     
     # End previous session
     if current_session:
@@ -1224,6 +1299,13 @@ def create_new_session() -> Session:
         started_at=datetime.now().isoformat(),
         title=f"Session {datetime.now().strftime('%Y-%m-%d %H:%M')}",
     )
+
+    # Reset transient AI/transcript state so old-session jobs/context cannot bleed through.
+    _TRANSCRIPT_LAST_UPDATE_TS.clear()
+    _AI_TRIGGER_BASELINE_TEXT.clear()
+    _TRANSCRIPT_CLEANUP_LAST_TS = 0.0
+    _rebuild_llm_history_from_session(current_session)
+
     third_party_diarizer = None
     log_important("session.new", session_id=session_id, title=current_session.title)
     return current_session
@@ -1285,45 +1367,44 @@ def _whisper_device_from_config(cfg: dict) -> str:
 def _resolve_transcription_runtime_config(cfg: dict) -> dict[str, object]:
     device = _whisper_device_from_config(cfg)
     requested = str(cfg.get("transcription_profile", "auto") or "auto").strip().lower()
-    valid = {"auto", "manual", "cpu_realtime", "cpu_accuracy", "gpu_realtime", "gpu_balanced", "gpu_quality"}
+    valid = {"auto", "manual", "cpu_realtime", "cpu_accuracy", "gpu_realtime", "gpu_accuracy", "gpu_balanced", "gpu_quality"}
     if requested not in valid:
         requested = "auto"
+    if requested in ("gpu_balanced", "gpu_quality"):
+        requested = "gpu_accuracy"
 
     resolved = requested
     if resolved == "auto":
-        resolved = "gpu_balanced" if device == "cuda" else "cpu_realtime"
+        resolved = "gpu_accuracy" if device == "cuda" else "cpu_realtime"
     if device != "cuda" and resolved.startswith("gpu_"):
-        resolved = "cpu_accuracy" if resolved == "gpu_quality" else "cpu_realtime"
+        resolved = "cpu_realtime" if resolved == "gpu_realtime" else "cpu_accuracy"
+    if device == "cuda" and resolved.startswith("cpu_"):
+        resolved = "gpu_realtime" if resolved == "cpu_realtime" else "gpu_accuracy"
 
     profile_defaults: dict[str, dict[str, object]] = {
         "cpu_realtime": {
             "beam_size": 1,
             "chunk_duration_s": 3.8,
-            "chunk_overlap_s": 0.12,
+            "chunk_overlap_s": 0.14,
             "condition_on_previous_text": False,
         },
         "cpu_accuracy": {
             "beam_size": 2,
-            "chunk_duration_s": 3.0,
-            "chunk_overlap_s": 0.18,
-            "condition_on_previous_text": False,
+            "chunk_duration_s": 3.4,
+            "chunk_overlap_s": 0.24,
+            "condition_on_previous_text": True,
         },
         "gpu_realtime": {
             "beam_size": 1,
-            "chunk_duration_s": 2.2,
-            "chunk_overlap_s": 0.10,
+            "chunk_duration_s": 2.4,
+            "chunk_overlap_s": 0.14,
             "condition_on_previous_text": False,
         },
-        "gpu_balanced": {
-            "beam_size": 2,
-            "chunk_duration_s": 2.6,
-            "chunk_overlap_s": 0.12,
-            "condition_on_previous_text": False,
-        },
-        "gpu_quality": {
-            "beam_size": 3,
-            "chunk_duration_s": 2.2,
-            "chunk_overlap_s": 0.22,
+        "gpu_accuracy": {
+            # Prioritize transcript stability for long-form speech on CUDA.
+            "beam_size": 4,
+            "chunk_duration_s": 4.2,
+            "chunk_overlap_s": 0.36,
             "condition_on_previous_text": True,
         },
     }
@@ -1998,7 +2079,7 @@ async def api_add_note(request: Request):
     except Exception:
         return JSONResponse({"status": "error", "message": "Invalid JSON"}, status_code=400)
     
-    content = data.get("content", "").strip()
+    content = _normalize_note_content(data.get("content", ""), max_chars=1500)
     if not content:
         return JSONResponse({"status": "error", "message": "Note content required"}, status_code=400)
     
@@ -2006,9 +2087,9 @@ async def api_add_note(request: Request):
         id=str(uuid.uuid4())[:8],
         content=content,
         timestamp=datetime.now().strftime("%H:%M:%S"),
-        source=data.get("source", "manual"),
-        category=data.get("category", "general"),
-        pinned=data.get("pinned", False),
+        source=_normalize_note_source(data.get("source", "manual"), default="manual"),
+        category=_normalize_note_category(data.get("category", "general")),
+        pinned=bool(data.get("pinned", False)),
         session_id=current_session.id if current_session else None,
     )
     
@@ -2030,13 +2111,15 @@ async def api_update_note(note_id: str, request: Request):
         for note in current_session.notes:
             if note.id == note_id:
                 if "content" in data:
-                    note.content = data["content"]
+                    normalized = _normalize_note_content(data.get("content"), max_chars=1500)
+                    if normalized:
+                        note.content = normalized
                 if "pinned" in data:
-                    note.pinned = data["pinned"]
+                    note.pinned = bool(data["pinned"])
                 if "completed" in data:
-                    note.completed = data["completed"]
+                    note.completed = bool(data["completed"])
                 if "category" in data:
-                    note.category = data["category"]
+                    note.category = _normalize_note_category(data.get("category"))
                 save_session(current_session)
                 return {"status": "ok", "note": asdict(note)}
     
@@ -2131,6 +2214,15 @@ async def websocket_endpoint(websocket: WebSocket):
 
         return "Audio: ready (capture idle). Both mic and system audio toggles are off."
 
+    def _drain_queue(q: asyncio.Queue | None) -> None:
+        if q is None:
+            return
+        while True:
+            try:
+                q.get_nowait()
+            except Exception:
+                break
+
     await _ws_send_json(websocket, {"type": "status", "message": _audio_snapshot_status()}, send_lock)
     
     global transcription_model
@@ -2194,12 +2286,14 @@ async def websocket_endpoint(websocket: WebSocket):
                 chunk_duration_s=float(runtime_cfg.get("chunk_duration_s") or 3.2),
                 chunk_overlap_s=float(runtime_cfg.get("chunk_overlap_s") or 0.16),
                 condition_on_previous_text=bool(runtime_cfg.get("condition_on_previous_text")),
+                runtime_profile=str(runtime_cfg.get("resolved_profile") or "manual"),
             )
             log_important(
                 "transcription.backend",
                 model=model_size,
                 device=getattr(transcription_model, "device", "unknown"),
                 compute=getattr(transcription_model, "compute_type", "unknown"),
+                requested_profile=str(runtime_cfg.get("requested_profile") or "auto"),
                 profile=str(runtime_cfg.get("resolved_profile") or "manual"),
                 beam=int(runtime_cfg.get("beam_size") or 1),
                 chunk_s=f"{float(runtime_cfg.get('chunk_duration_s') or 0.0):.2f}",
@@ -2377,6 +2471,14 @@ async def websocket_endpoint(websocket: WebSocket):
                 elif msg_type == "stop_audio":
                     await stop_audio_capture()
                 elif msg_type == "new_session":
+                    # Drop pending jobs from previous session before switching.
+                    _drain_queue(response_queue)
+                    _drain_queue(notes_trigger_queue)
+                    _drain_queue(fact_check_trigger_queue)
+                    _drain_queue(transcript_cleanup_queue)
+                    state.last_policy_eval_ts = 0.0
+                    state.last_response_ts = 0.0
+                    state.last_fact_check_ts = 0.0
                     session = create_new_session()
                     await _ws_send_json(websocket, {
                         "type": "session_info",
@@ -2550,13 +2652,15 @@ async def websocket_endpoint(websocket: WebSocket):
                         )
                 elif msg_type == "add_note":
                     # Manual note from UI
-                    content = msg.get("content", "").strip()
+                    content = _normalize_note_content(msg.get("content", ""), max_chars=1500)
                     if content and current_session:
                         note = NoteItem(
                             id=str(uuid.uuid4())[:8],
                             content=content,
                             timestamp=datetime.now().strftime("%H:%M:%S"),
                             source="manual",
+                            category=_normalize_note_category(msg.get("category", "general")),
+                            pinned=bool(msg.get("pinned", False)),
                             session_id=current_session.id,
                         )
                         current_session.notes.append(note)
@@ -2576,11 +2680,15 @@ async def websocket_endpoint(websocket: WebSocket):
                         for note in current_session.notes:
                             if note.id == note_id:
                                 if "pinned" in updates:
-                                    note.pinned = updates["pinned"]
+                                    note.pinned = bool(updates["pinned"])
                                 if "completed" in updates:
-                                    note.completed = updates["completed"]
+                                    note.completed = bool(updates["completed"])
                                 if "content" in updates:
-                                    note.content = updates["content"]
+                                    normalized = _normalize_note_content(updates.get("content"), max_chars=1500)
+                                    if normalized:
+                                        note.content = normalized
+                                if "category" in updates:
+                                    note.category = _normalize_note_category(updates.get("category"))
                                 save_session(current_session)
                                 await _ws_send_json(websocket, {
                                     "type": "note_updated",
@@ -2741,6 +2849,22 @@ async def _llm_chat_create(**kwargs):
     # Back-compat fallback if client implementation is older.
     model = kwargs.pop("model", getattr(llm_client, "model", ""))
     return await llm_client.client.chat.completions.create(model=model, **kwargs)
+
+
+def _looks_like_context_overflow_error(error: Exception) -> bool:
+    t = " ".join(str(error or "").split()).casefold()
+    if not t:
+        return False
+    patterns = (
+        "maximum context length",
+        "context length exceeded",
+        "too many tokens",
+        "token limit",
+        "prompt is too long",
+        "request too large",
+        "context_window_exceeded",
+    )
+    return any(p in t for p in patterns)
 
 
 def _strip_html_tags(s: str) -> str:
@@ -2946,7 +3070,7 @@ async def _decide_web_search(
         response_format={"type": "json_object"},
     )
 
-    content = resp.choices[0].message.content or ""
+    content = _extract_chat_content_best_effort(resp)
 
     def _parse_json_best_effort(s: str) -> dict:
         if not isinstance(s, str):
@@ -3133,6 +3257,126 @@ async def _maybe_build_web_search_context(*, purpose: str, seed_text: str) -> Op
 # RESPONSE / FACT CHECK LOOPS (Non-blocking)
 # ============================================
 
+def _latest_transcript_update_ts() -> float:
+    try:
+        if not _TRANSCRIPT_LAST_UPDATE_TS:
+            return 0.0
+        return max(float(v or 0.0) for v in _TRANSCRIPT_LAST_UPDATE_TS.values())
+    except Exception:
+        return 0.0
+
+
+def _seconds_since_latest_transcript_update(now_ts: float | None = None) -> float:
+    now = float(now_ts if now_ts is not None else time.time())
+    last_ts = _latest_transcript_update_ts()
+    if last_ts <= 0.0:
+        return 1e9
+    return max(0.0, now - last_ts)
+
+
+async def _wait_for_transcript_settle(*, queue: asyncio.Queue | None = None) -> None:
+    quiet_s = _cfg_float(
+        config.get("ai_transcript_settle_seconds"),
+        float(DEFAULT_CONFIG["ai_transcript_settle_seconds"]),
+        min_v=0.0,
+        max_v=20.0,
+    )
+    if quiet_s <= 0.0:
+        return
+
+    max_wait_s = _cfg_float(
+        config.get("ai_transcript_settle_max_wait_seconds"),
+        float(DEFAULT_CONFIG["ai_transcript_settle_max_wait_seconds"]),
+        min_v=0.2,
+        max_v=120.0,
+    )
+    deadline = time.time() + max_wait_s
+
+    while True:
+        now_ts = time.time()
+        since_last = _seconds_since_latest_transcript_update(now_ts)
+        if since_last >= quiet_s:
+            return
+        if now_ts >= deadline:
+            return
+
+        wait_s = min(
+            0.35,
+            max(0.05, quiet_s - since_last),
+            max(0.05, deadline - now_ts),
+        )
+        if queue is None:
+            await asyncio.sleep(wait_s)
+            continue
+        try:
+            await asyncio.wait_for(queue.get(), timeout=wait_s)
+        except asyncio.TimeoutError:
+            continue
+        # Keep queue coalesced while waiting.
+        while True:
+            try:
+                queue.get_nowait()
+            except Exception:
+                break
+
+
+async def _wait_for_transcript_settle_response(req: dict, response_queue: asyncio.Queue) -> dict:
+    quiet_s = _cfg_float(
+        config.get("ai_transcript_settle_seconds"),
+        float(DEFAULT_CONFIG["ai_transcript_settle_seconds"]),
+        min_v=0.0,
+        max_v=20.0,
+    )
+    if quiet_s <= 0.0:
+        return req
+
+    max_wait_s = _cfg_float(
+        config.get("ai_transcript_settle_max_wait_seconds"),
+        float(DEFAULT_CONFIG["ai_transcript_settle_max_wait_seconds"]),
+        min_v=0.2,
+        max_v=120.0,
+    )
+    deadline = time.time() + max_wait_s
+    latest_req = req
+
+    while True:
+        now_ts = time.time()
+        since_last = _seconds_since_latest_transcript_update(now_ts)
+        if since_last >= quiet_s:
+            return latest_req
+        if now_ts >= deadline:
+            return latest_req
+
+        wait_s = min(
+            0.35,
+            max(0.05, quiet_s - since_last),
+            max(0.05, deadline - now_ts),
+        )
+
+        try:
+            nxt = await asyncio.wait_for(response_queue.get(), timeout=wait_s)
+            if isinstance(nxt, dict):
+                latest_req = nxt
+                nxt_trigger = str(latest_req.get("trigger") or "").strip().lower()
+                if nxt_trigger in ("manual", "run_now"):
+                    # Respect explicit user-triggered runs immediately.
+                    return latest_req
+        except asyncio.TimeoutError:
+            continue
+
+        # Coalesce queued requests to latest.
+        while True:
+            try:
+                nxt = response_queue.get_nowait()
+            except Exception:
+                break
+            if isinstance(nxt, dict):
+                latest_req = nxt
+                nxt_trigger = str(latest_req.get("trigger") or "").strip().lower()
+                if nxt_trigger in ("manual", "run_now"):
+                    return latest_req
+
+
 def _enqueue_response_request(response_queue: asyncio.Queue, payload: dict) -> None:
     try:
         response_queue.put_nowait(payload)
@@ -3203,6 +3447,8 @@ async def run_notes_trigger_loop(
         if not config.get("notes_enabled", True):
             continue
 
+        await _wait_for_transcript_settle(queue=notes_queue)
+
         min_interval = _cfg_float(config.get("notes_trigger_min_interval_seconds"), 10.0, min_v=0.0, max_v=300.0)
         min_interval = max(0.0, min(300.0, min_interval))
         now_ts = time.time()
@@ -3222,10 +3468,21 @@ async def run_fact_check_trigger_loop(
 ):
     last_generated_ts = 0.0
 
+    async def _coalesce_fact_check_triggers(wait_s: float) -> None:
+        deadline = time.time() + max(0.0, float(wait_s))
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            try:
+                await asyncio.wait_for(fact_check_queue.get(), timeout=remaining)
+            except asyncio.TimeoutError:
+                break
+
     while True:
         await fact_check_queue.get()
 
-        debounce = _cfg_float(config.get("fact_check_debounce_seconds"), 2.5, min_v=0.2, max_v=10.0)
+        debounce = _cfg_float(config.get("fact_check_debounce_seconds"), 1.0, min_v=0.2, max_v=10.0)
         debounce = max(0.2, min(10.0, debounce))
 
         # Debounce: keep waiting while triggers continue.
@@ -3242,11 +3499,16 @@ async def run_fact_check_trigger_loop(
         if not config.get("fact_check_enabled", True):
             continue
 
-        min_interval = _cfg_float(config.get("fact_check_trigger_min_interval_seconds"), 10.0, min_v=0.0, max_v=300.0)
+        await _wait_for_transcript_settle(queue=fact_check_queue)
+
+        min_interval = _cfg_float(config.get("fact_check_trigger_min_interval_seconds"), 4.0, min_v=0.0, max_v=300.0)
         min_interval = max(0.0, min(300.0, min_interval))
         now_ts = time.time()
         if now_ts - last_generated_ts < min_interval:
-            continue
+            await _coalesce_fact_check_triggers(min_interval - (now_ts - last_generated_ts))
+            now_ts = time.time()
+            if now_ts - last_generated_ts < min_interval:
+                continue
 
         ok = await generate_fact_checks(websocket, send_lock, fact_check_lock=fact_check_lock)
         if ok:
@@ -3294,6 +3556,105 @@ def _latest_non_assistant_transcript() -> Optional[tuple[str, str, str, str, str
     return None
 
 
+def _normalize_response_source(source: str) -> str:
+    s = (source or "").strip().lower()
+    if s in ("third_party", "third-party", "loopback"):
+        return "third_party"
+    if s in ("user", "you"):
+        return "user"
+    if s == "assistant":
+        return "assistant"
+    return s
+
+
+def _is_counterparty_source(source: str) -> bool:
+    return _normalize_response_source(source) == "third_party"
+
+
+def _resolve_response_target(
+    *,
+    seed_text: str,
+    source: str,
+    target_timestamp: str,
+    target_speaker: str,
+    target_message_id: str,
+) -> tuple[str, str, str, str, str]:
+    """
+    Pick the best transcript anchor for response generation.
+    If the latest trigger came from the user, prefer the most recent third-party claim nearby
+    so response cards reference what the user should answer.
+    """
+    base_text = " ".join((seed_text or "").split()).strip()
+    base_source = (source or "user").strip() or "user"
+    base_timestamp = (target_timestamp or "").strip()
+    base_speaker = (target_speaker or "").strip()
+    base_id = (target_message_id or "").strip()
+
+    if not current_session or not (current_session.transcript or []):
+        return base_text, base_source, base_timestamp, base_speaker, base_id
+
+    transcript = current_session.transcript or []
+    src_kind = _normalize_response_source(base_source)
+    if src_kind == "third_party":
+        return base_text, base_source, base_timestamp, base_speaker, base_id
+
+    anchor_idx = -1
+    if base_id:
+        for i in range(len(transcript) - 1, -1, -1):
+            if str(getattr(transcript[i], "id", "") or "") == base_id:
+                anchor_idx = i
+                break
+
+    if anchor_idx < 0:
+        if base_text:
+            for i in range(len(transcript) - 1, -1, -1):
+                tm_text = " ".join((getattr(transcript[i], "text", "") or "").split()).strip()
+                if not tm_text:
+                    continue
+                if _normalize_response_source(str(getattr(transcript[i], "source", "") or "")) != src_kind:
+                    continue
+                if tm_text == base_text:
+                    anchor_idx = i
+                    break
+        if anchor_idx < 0:
+            anchor_idx = len(transcript) - 1
+
+    candidate = None
+    left = max(0, anchor_idx - 12)
+    for i in range(anchor_idx - 1, left - 1, -1):
+        tm = transcript[i]
+        if not _is_counterparty_source(str(getattr(tm, "source", "") or "")):
+            continue
+        tm_text = " ".join((getattr(tm, "text", "") or "").split()).strip()
+        if tm_text:
+            candidate = tm
+            break
+
+    if candidate is None:
+        for tm in reversed(transcript[-20:]):
+            if not _is_counterparty_source(str(getattr(tm, "source", "") or "")):
+                continue
+            tm_text = " ".join((getattr(tm, "text", "") or "").split()).strip()
+            if tm_text:
+                candidate = tm
+                break
+
+    if candidate is None:
+        return base_text, base_source, base_timestamp, base_speaker, base_id
+
+    chosen_text = " ".join((getattr(candidate, "text", "") or "").split()).strip()
+    if not chosen_text:
+        return base_text, base_source, base_timestamp, base_speaker, base_id
+
+    return (
+        chosen_text,
+        str(getattr(candidate, "source", "third_party") or "third_party"),
+        str(getattr(candidate, "timestamp", "") or ""),
+        str(getattr(candidate, "speaker_label", "") or ""),
+        str(getattr(candidate, "id", "") or ""),
+    )
+
+
 async def run_response_loop(
     websocket: WebSocket,
     state: ConnectionState,
@@ -3301,122 +3662,227 @@ async def run_response_loop(
     response_lock: asyncio.Lock,
     response_queue: asyncio.Queue,
 ):
+    async def _coalesce_latest_request(initial_req: dict, wait_s: float) -> dict:
+        latest_req = initial_req
+        deadline = time.time() + max(0.0, float(wait_s))
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            try:
+                nxt = await asyncio.wait_for(response_queue.get(), timeout=remaining)
+            except asyncio.TimeoutError:
+                break
+            if isinstance(nxt, dict):
+                latest_req = nxt
+        return latest_req
+
     while True:
         req = await response_queue.get()
-        trigger = (req.get("trigger") or "").strip().lower()
+        while True:
+            trigger = (req.get("trigger") or "").strip().lower()
 
-        # For high-frequency audio triggers, prefer the newest queued context.
-        if trigger == "audio" and not response_queue.empty():
-            continue
+            if trigger == "audio":
+                req = await _wait_for_transcript_settle_response(req, response_queue)
+                trigger = (req.get("trigger") or "").strip().lower()
 
-        if not config.get("ai_enabled", False):
-            continue
+            # For high-frequency audio triggers, prefer the newest queued context.
+            if trigger == "audio" and not response_queue.empty():
+                break
 
-        if not config.get("response_enabled", True):
-            continue
+            if not config.get("ai_enabled", False):
+                break
 
-        if llm_client is None:
-            if not state.llm_not_configured_warned:
-                state.llm_not_configured_warned = True
-                await _ws_send_json(websocket, {"type": "error", "message": "LLM not configured. Check settings."}, send_lock)
-            continue
+            if not config.get("response_enabled", True):
+                break
 
-        now_ts = time.time()
+            if llm_client is None:
+                if not state.llm_not_configured_warned:
+                    state.llm_not_configured_warned = True
+                    await _ws_send_json(websocket, {"type": "error", "message": "LLM not configured. Check settings."}, send_lock)
+                break
 
-        text = (req.get("text") or "").strip()
-        source = (req.get("source") or "user").strip() or "user"
-        target_timestamp = (req.get("timestamp") or "").strip() if isinstance(req.get("timestamp"), str) else ""
-        target_speaker = (req.get("speaker_label") or "").strip() if isinstance(req.get("speaker_label"), str) else ""
-        target_id = (req.get("message_id") or "").strip() if isinstance(req.get("message_id"), str) else ""
-        if (not text) and trigger == "run_now":
-            latest = _latest_non_assistant_transcript()
-            if latest:
-                text, source, target_timestamp, target_speaker, target_id = latest
+            now_ts = time.time()
 
-        if not text:
-            continue
+            # Audio auto-response cooldown:
+            # defer and coalesce pending triggers instead of dropping valid requests.
+            if trigger == "audio":
+                min_ai_interval = _cfg_float(config.get("ai_min_interval_seconds"), 0.0, min_v=0.0, max_v=120.0)
+                since_last = now_ts - state.last_response_ts
+                if since_last < min_ai_interval:
+                    req = await _coalesce_latest_request(req, min_ai_interval - since_last)
+                    continue
 
-        # Hard override: if user explicitly asked for no response, do not generate response guidance.
-        if text and _text_requests_no_response(text):
-            await _ws_send_json(
-                websocket,
-                {
-                    "type": "assistant_policy",
-                    "allow": False,
-                    "urgency": "wait",
-                    "reason": "User requested no response",
-                    "confidence": 1.0,
-                    "show_withheld": bool(config.get("policy_show_withheld", True)),
-                },
-                send_lock,
+            text = (req.get("text") or "").strip()
+            source = (req.get("source") or "user").strip() or "user"
+            target_timestamp = (req.get("timestamp") or "").strip() if isinstance(req.get("timestamp"), str) else ""
+            target_speaker = (req.get("speaker_label") or "").strip() if isinstance(req.get("speaker_label"), str) else ""
+            target_id = (req.get("message_id") or "").strip() if isinstance(req.get("message_id"), str) else ""
+            if (not text) and trigger == "run_now":
+                latest = _latest_non_assistant_transcript()
+                if latest:
+                    text, source, target_timestamp, target_speaker, target_id = latest
+
+            if not text:
+                break
+
+            # Hard override: if user explicitly asked for no response, do not generate response guidance.
+            if text and _text_requests_no_response(text):
+                await _ws_send_json(
+                    websocket,
+                    {
+                        "type": "assistant_policy",
+                        "allow": False,
+                        "urgency": "wait",
+                        "reason": "User requested no response",
+                        "confidence": 1.0,
+                        "show_withheld": bool(config.get("policy_show_withheld", True)),
+                    },
+                    send_lock,
+                )
+                break
+
+            resolved_text, resolved_source, resolved_ts, resolved_speaker, resolved_id = _resolve_response_target(
+                seed_text=text,
+                source=source,
+                target_timestamp=target_timestamp,
+                target_speaker=target_speaker,
+                target_message_id=target_id,
             )
-            continue
+            if resolved_text:
+                source = resolved_source or source
+                text = resolved_text
+                target_timestamp = resolved_ts
+                target_speaker = resolved_speaker
+                target_id = resolved_id
 
-        # Policy gate (applies to manual, audio, and run-now).
-        require_policy = bool(config.get("response_require_policy_gate", True))
-        use_policy = bool(config.get("policy_enabled", False)) or require_policy
-        if use_policy:
-            min_policy_interval = _cfg_float(config.get("policy_min_interval_seconds"), 0.0, min_v=0.0, max_v=60.0)
-            # Manual + run-now should evaluate immediately (don't skip on interval).
-            if trigger in ("manual", "run_now"):
-                min_policy_interval = 0.0
+            # Policy gate (applies to manual, audio, and run-now).
+            require_policy = bool(config.get("response_require_policy_gate", True))
+            use_policy = bool(config.get("policy_enabled", False)) or require_policy
+            if use_policy:
+                min_policy_interval = _cfg_float(config.get("policy_min_interval_seconds"), 0.0, min_v=0.0, max_v=60.0)
+                # Manual + run-now should evaluate immediately (don't skip on interval).
+                if trigger in ("manual", "run_now"):
+                    min_policy_interval = 0.0
 
-            if now_ts - state.last_policy_eval_ts < min_policy_interval:
-                continue
+                since_policy = now_ts - state.last_policy_eval_ts
+                if since_policy < min_policy_interval:
+                    if trigger == "audio":
+                        req = await _coalesce_latest_request(req, min_policy_interval - since_policy)
+                        continue
+                    break
 
-            state.last_policy_eval_ts = now_ts
-            decision = await _policy_should_respond(text=text, source=source)
-            if not await _ws_send_json(
+                state.last_policy_eval_ts = now_ts
+                decision = await _policy_should_respond(text=text, source=source)
+                if not await _ws_send_json(
+                    websocket,
+                    {
+                        "type": "assistant_policy",
+                        "allow": bool(decision.get("allow")),
+                        "urgency": decision.get("urgency"),
+                        "reason": decision.get("reason"),
+                        "confidence": decision.get("confidence"),
+                        "show_withheld": bool(config.get("policy_show_withheld", True)),
+                    },
+                    send_lock,
+                ):
+                    break
+
+                min_conf = _cfg_float(config.get("response_policy_min_confidence"), 0.58, min_v=0.0, max_v=1.0)
+                min_conf = max(0.0, min(1.0, min_conf))
+                decision_conf = float(decision.get("confidence") or 0.0)
+                if not decision.get("allow") or decision.get("urgency") != "now" or decision_conf < min_conf:
+                    if decision_conf < min_conf and decision.get("allow") and decision.get("urgency") == "now":
+                        await _ws_send_json(
+                            websocket,
+                            {
+                                "type": "assistant_policy",
+                                "allow": False,
+                                "urgency": "wait",
+                                "reason": "Low policy confidence",
+                                "confidence": decision_conf,
+                                "show_withheld": bool(config.get("policy_show_withheld", True)),
+                            },
+                            send_lock,
+                        )
+                    break
+
+            ok = await generate_response(
                 websocket,
-                {
-                    "type": "assistant_policy",
-                    "allow": bool(decision.get("allow")),
-                    "urgency": decision.get("urgency"),
-                    "reason": decision.get("reason"),
-                    "confidence": decision.get("confidence"),
-                    "show_withheld": bool(config.get("policy_show_withheld", True)),
-                },
                 send_lock,
-            ):
-                continue
+                response_lock=response_lock,
+                seed_text=text,
+                source=source,
+                target_timestamp=target_timestamp,
+                target_speaker=target_speaker,
+                target_message_id=target_id,
+            )
+            if ok:
+                state.last_response_ts = time.time()
+            break
 
-            min_conf = _cfg_float(config.get("response_policy_min_confidence"), 0.58, min_v=0.0, max_v=1.0)
-            min_conf = max(0.0, min(1.0, min_conf))
-            decision_conf = float(decision.get("confidence") or 0.0)
-            if not decision.get("allow") or decision.get("urgency") != "now" or decision_conf < min_conf:
-                if decision_conf < min_conf and decision.get("allow") and decision.get("urgency") == "now":
-                    await _ws_send_json(
-                        websocket,
-                        {
-                            "type": "assistant_policy",
-                            "allow": False,
-                            "urgency": "wait",
-                            "reason": "Low policy confidence",
-                            "confidence": decision_conf,
-                            "show_withheld": bool(config.get("policy_show_withheld", True)),
-                        },
-                        send_lock,
-                    )
-                continue
 
-        # Rate limit only for audio-driven auto generation; manual + run-now should run immediately.
-        if trigger == "audio":
-            min_ai_interval = _cfg_float(config.get("ai_min_interval_seconds"), 0.0, min_v=0.0, max_v=120.0)
-            if now_ts - state.last_response_ts < min_ai_interval:
-                continue
+def _extract_chat_content_best_effort(response_obj: Any) -> str:
+    def _extract_from_content_value(content_val: Any) -> str:
+        if isinstance(content_val, str):
+            return content_val
+        if not isinstance(content_val, list):
+            return ""
 
-        ok = await generate_response(
-            websocket,
-            send_lock,
-            response_lock=response_lock,
-            seed_text=text,
-            source=source,
-            target_timestamp=target_timestamp,
-            target_speaker=target_speaker,
-            target_message_id=target_id,
-        )
-        if ok:
-            state.last_response_ts = time.time()
+        parts: list[str] = []
+        for item in content_val:
+            if isinstance(item, str):
+                parts.append(item)
+                continue
+            if not isinstance(item, dict):
+                continue
+            txt = item.get("text")
+            if isinstance(txt, str) and txt.strip():
+                parts.append(txt)
+                continue
+            # Some SDK/providers nest text payloads under content blocks.
+            maybe_nested = item.get("content")
+            if isinstance(maybe_nested, str) and maybe_nested.strip():
+                parts.append(maybe_nested)
+        return "\n".join(p for p in parts if p).strip()
+
+    try:
+        choices = getattr(response_obj, "choices", None)
+        if isinstance(choices, list) and choices:
+            first = choices[0]
+            if isinstance(first, dict):
+                msg = first.get("message")
+                if isinstance(msg, dict):
+                    content_val = msg.get("content")
+                else:
+                    content_val = getattr(msg, "content", None)
+            else:
+                msg = getattr(first, "message", None)
+                if isinstance(msg, dict):
+                    content_val = msg.get("content")
+                else:
+                    content_val = getattr(msg, "content", None)
+            out = _extract_from_content_value(content_val)
+            if out:
+                return out
+    except Exception:
+        pass
+
+    if isinstance(response_obj, dict):
+        try:
+            choices = response_obj.get("choices")
+            if isinstance(choices, list) and choices:
+                first = choices[0] or {}
+                if isinstance(first, dict):
+                    msg = first.get("message")
+                    if isinstance(msg, dict):
+                        out = _extract_from_content_value(msg.get("content"))
+                        if out:
+                            return out
+        except Exception:
+            pass
+
+    return ""
 
 
 def _parse_json_object_best_effort(value: Any) -> dict:
@@ -3535,6 +4001,8 @@ Requirements:
 - Do not invent evidence, names, dates, or laws.
 - Prefer short, defensible language the user can actually say out loud.
 - The response must clearly reference the specific statement/event it addresses.
+- Never create a response against the user; the user is your client.
+- Never reply to the user. Only generate a response the user can use in the conversation.
 
 Output ONLY valid JSON with this exact shape:
 {{
@@ -3555,6 +4023,8 @@ Task:
 - For each claim, decide verdict: supported, contradicted, or uncertain.
 - Explain briefly using only transcript/context facts (and web results if present).
 - If evidence is weak, say uncertain instead of guessing.
+- If factual claims are present, return at least 1 check (do not return an empty list just because confidence is low).
+- Prefer checking concrete, disputed statements first.
 
 Output ONLY valid JSON with this exact shape:
 {{
@@ -3588,6 +4058,10 @@ async def generate_response(
         return False
     if llm_client is None or current_session is None:
         return False
+    session = current_session
+    session_id = str(getattr(session, "id", "") or "").strip()
+    if not session_id:
+        return False
 
     locked = False
     try:
@@ -3595,9 +4069,15 @@ async def generate_response(
             await response_lock.acquire()
             locked = True
 
-        context_size = int(config.get("response_context_messages", 14) or 14)
-        context_size = max(6, min(60, context_size))
-        conversation_text = llm_client.format_recent_history(limit=context_size)
+        context_size = _cfg_int(config.get("response_context_messages"), 14, min_v=0, max_v=5000)
+        context_limit = None if context_size <= 0 else context_size
+        context_max_chars = _cfg_int(
+            config.get("response_context_max_chars"),
+            int(DEFAULT_CONFIG["response_context_max_chars"]),
+            min_v=4000,
+            max_v=250000,
+        )
+        conversation_text = _format_recent_history_bounded(limit=context_limit, max_chars=context_max_chars)
         if not conversation_text.strip():
             return False
 
@@ -3620,25 +4100,45 @@ async def generate_response(
             "conversation": conversation_text,
         }
 
-        resp = await _llm_chat_create(
-            messages=[
-                {"role": "system", "content": _build_response_prompt()},
-                *extra_messages,
-                {"role": "user", "content": json.dumps(payload)},
-            ],
-            stream=False,
-            temperature=0.25,
-            max_tokens=700,
-            response_format={"type": "json_object"},
-        )
+        request_messages = [
+            {"role": "system", "content": _build_response_prompt()},
+            *extra_messages,
+            {"role": "user", "content": json.dumps(payload)},
+        ]
+        try:
+            resp = await _llm_chat_create(
+                messages=request_messages,
+                stream=False,
+                temperature=0.25,
+                max_tokens=700,
+                response_format={"type": "json_object"},
+            )
+        except Exception as e:
+            if not _looks_like_context_overflow_error(e):
+                raise
+            compact_max = max(4000, min(18000, int(context_max_chars * 0.5)))
+            compact_text = _format_recent_history_bounded(limit=context_limit, max_chars=compact_max)
+            if not compact_text or compact_text == conversation_text:
+                raise
+            payload["conversation"] = compact_text
+            request_messages[-1] = {"role": "user", "content": json.dumps(payload)}
+            resp = await _llm_chat_create(
+                messages=request_messages,
+                stream=False,
+                temperature=0.25,
+                max_tokens=700,
+                response_format={"type": "json_object"},
+            )
 
-        data = _parse_json_object_best_effort(resp.choices[0].message.content or "")
+        data = _parse_json_object_best_effort(_extract_chat_content_best_effort(resp))
 
         content = (data.get("response") or "").strip()
         if not content:
             content = (data.get("recommended_response") or "").strip()
         content = " ".join(content.split())[:1400].strip()
         if not content:
+            return False
+        if not _is_active_session(session_id):
             return False
 
         source_label = _response_source_label(source, target_speaker)
@@ -3664,10 +4164,10 @@ async def generate_response(
             cautions=cautions,
             confidence=confidence,
             source="ai",
-            session_id=current_session.id,
+            session_id=session_id,
         )
 
-        current = list(current_session.responses or [])
+        current = list(session.responses or [])
         if current and _response_signature(current[-1]) == _response_signature(item):
             return True
         if not current or (current[-1].content or "").strip().casefold() != content.casefold():
@@ -3678,15 +4178,17 @@ async def generate_response(
 
         max_items = int(config.get("response_max_items", 20) or 20)
         max_items = max(1, min(80, max_items))
-        current_session.responses = current[-max_items:]
-        save_session_throttled(current_session)
+        session.responses = current[-max_items:]
+        save_session_throttled(session)
+        if not _is_active_session(session_id):
+            return False
 
-        latest = current_session.responses[-1] if current_session.responses else None
+        latest = session.responses[-1] if session.responses else None
         await _ws_send_json(
             websocket,
             {
                 "type": "response_update",
-                "responses": [asdict(r) for r in current_session.responses],
+                "responses": [asdict(r) for r in session.responses],
                 "latest": asdict(latest) if latest else None,
             },
             send_lock,
@@ -3697,7 +4199,7 @@ async def generate_response(
             confidence=(confidence or "-"),
             facts=len(basis_facts),
             cautions=len(cautions),
-            total=len(current_session.responses),
+            total=len(session.responses),
         )
         return True
     except Exception as e:
@@ -3721,6 +4223,10 @@ async def generate_fact_checks(
         return False
     if llm_client is None or current_session is None:
         return False
+    session = current_session
+    session_id = str(getattr(session, "id", "") or "").strip()
+    if not session_id:
+        return False
 
     locked = False
     try:
@@ -3728,12 +4234,20 @@ async def generate_fact_checks(
             await fact_check_lock.acquire()
             locked = True
 
-        context_size = int(config.get("fact_check_context_messages", 18) or 18)
-        context_size = max(6, min(80, context_size))
-        conversation_text = llm_client.format_recent_history(limit=context_size)
+        context_size = _cfg_int(config.get("fact_check_context_messages"), 18, min_v=0, max_v=5000)
+        context_limit = None if context_size <= 0 else context_size
+        context_max_chars = _cfg_int(
+            config.get("fact_check_context_max_chars"),
+            int(DEFAULT_CONFIG["fact_check_context_max_chars"]),
+            min_v=4000,
+            max_v=250000,
+        )
+        conversation_text = _format_recent_history_bounded(limit=context_limit, max_chars=context_max_chars)
         if not conversation_text.strip():
-            current_session.fact_checks = []
-            save_session_throttled(current_session)
+            if not _is_active_session(session_id):
+                return False
+            session.fact_checks = []
+            save_session_throttled(session)
             await _ws_send_json(websocket, {"type": "fact_checks_update", "fact_checks": []}, send_lock)
             return True
 
@@ -3747,15 +4261,31 @@ async def generate_fact_checks(
             messages.append({"role": "system", "content": f"Session context:\n{session_ctx[:4000]}"})
         messages.append({"role": "user", "content": conversation_text})
 
-        resp = await _llm_chat_create(
-            messages=messages,
-            stream=False,
-            temperature=0,
-            max_tokens=900,
-            response_format={"type": "json_object"},
-        )
+        try:
+            resp = await _llm_chat_create(
+                messages=messages,
+                stream=False,
+                temperature=0,
+                max_tokens=900,
+                response_format={"type": "json_object"},
+            )
+        except Exception as e:
+            if not _looks_like_context_overflow_error(e):
+                raise
+            compact_max = max(4000, min(20000, int(context_max_chars * 0.5)))
+            compact_text = _format_recent_history_bounded(limit=context_limit, max_chars=compact_max)
+            if not compact_text or compact_text == conversation_text:
+                raise
+            messages[-1] = {"role": "user", "content": compact_text}
+            resp = await _llm_chat_create(
+                messages=messages,
+                stream=False,
+                temperature=0,
+                max_tokens=900,
+                response_format={"type": "json_object"},
+            )
 
-        data = _parse_json_object_best_effort(resp.choices[0].message.content or "")
+        data = _parse_json_object_best_effort(_extract_chat_content_best_effort(resp))
         checks_raw = data.get("checks", [])
         if not isinstance(checks_raw, list):
             checks_raw = []
@@ -3793,11 +4323,14 @@ async def generate_fact_checks(
                     timestamp=datetime.now().strftime("%H:%M:%S"),
                     evidence=evidence,
                     confidence=_normalize_confidence(entry.get("confidence")),
-                    session_id=current_session.id,
+                    session_id=session_id,
                 )
             )
 
-        existing = list(current_session.fact_checks or [])
+        if not _is_active_session(session_id):
+            return False
+
+        existing = list(session.fact_checks or [])
         if len(existing) == len(normalized):
             same = True
             for i in range(len(normalized)):
@@ -3808,11 +4341,13 @@ async def generate_fact_checks(
                 return True
 
         # Keep newest run as the current fact-check snapshot.
-        current_session.fact_checks = normalized
-        save_session_throttled(current_session)
+        session.fact_checks = normalized
+        save_session_throttled(session)
+        if not _is_active_session(session_id):
+            return False
         await _ws_send_json(
             websocket,
-            {"type": "fact_checks_update", "fact_checks": [asdict(fc) for fc in current_session.fact_checks]},
+            {"type": "fact_checks_update", "fact_checks": [asdict(fc) for fc in session.fact_checks]},
             send_lock,
         )
         supported = sum(1 for fc in normalized if (fc.verdict or "").lower() == "supported")
@@ -3852,6 +4387,8 @@ def _build_notes_prompt() -> str:
         categories.append("risks")
     if config.get("notes_extract_facts", True):
         categories.append("key_facts")
+    if not categories:
+        categories = ["general context"]
     
     notes_format = config.get("notes_format", "bullets")
     
@@ -3866,6 +4403,16 @@ Only include categories that have relevant content. Each item should be concise 
 
 Return a JSON object with a single key "summary" containing a brief paragraph summarizing the key points.
 Focus on: {', '.join(categories)}."""
+    
+    elif notes_format == "custom":
+        return f"""You are a note-taking assistant. {base_prompt}
+
+Return a JSON object with key "notes" as an array.
+Each entry can be either:
+- a string note, or
+- an object: {{"content":"...", "category":"decision|action|risk|fact|general"}}
+
+Keep notes concise and actionable. Focus on: {', '.join(categories)}."""
     
     else:  # bullets (default)
         return f"""You are a note-taking assistant. {base_prompt}
@@ -3896,31 +4443,135 @@ Constraints:
 """
 
 
-def _dedupe_note_dicts(notes: list[dict], *, max_items: int) -> list[dict]:
+def _normalize_note_category(category: Any) -> str:
+    raw = str(category or "").strip().lower().replace("-", "_").replace(" ", "_")
+    category_map = {
+        "decision": "decision",
+        "decisions": "decision",
+        "action": "action",
+        "actions": "action",
+        "action_item": "action",
+        "action_items": "action",
+        "risk": "risk",
+        "risks": "risk",
+        "fact": "fact",
+        "facts": "fact",
+        "key_fact": "fact",
+        "key_facts": "fact",
+        "general": "general",
+        "summary": "general",
+    }
+    return category_map.get(raw, "general")
+
+
+def _normalize_note_source(source: Any, *, default: str = "manual") -> str:
+    raw = str(source or "").strip().lower()
+    if raw == "ai":
+        return "ai"
+    if raw in ("manual", "user", "human"):
+        return "manual"
+    return default
+
+
+def _normalize_note_content(content: Any, *, max_chars: int = 220) -> str:
+    if content is None:
+        return ""
+    if not isinstance(content, str):
+        content = str(content)
+    out = " ".join(content.replace("\r", " ").replace("\n", " ").split()).strip()
+    if not out:
+        return ""
+    return out[:max_chars].strip()
+
+
+def _note_content_key(content: Any) -> str:
+    return _normalize_note_content(content, max_chars=4000).casefold()
+
+
+def _coerce_note_dict_list(value: Any, *, default_category: str = "general") -> list[dict]:
     out: list[dict] = []
-    seen: set[str] = set()
+    if value is None:
+        return out
+
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, dict):
+                content = item.get("content")
+                if not content:
+                    content = item.get("text")
+                if not content:
+                    content = item.get("note")
+                if not content:
+                    content = item.get("summary")
+                out.append(
+                    {
+                        "content": content,
+                        "category": item.get("category", default_category),
+                    }
+                )
+            else:
+                out.append({"content": item, "category": default_category})
+        return out
+
+    if isinstance(value, dict):
+        if "notes" in value:
+            return _coerce_note_dict_list(value.get("notes"), default_category=default_category)
+        return _coerce_note_dict_list([value], default_category=default_category)
+
+    return [{"content": item, "category": default_category} for item in _coerce_string_list(value)]
+
+
+def _extract_note_candidates_from_model_output(data: dict, *, notes_format: str) -> list[dict]:
+    candidates: list[dict] = []
+    if notes_format == "structured":
+        cat_map = {
+            "decisions": "decision",
+            "action_items": "action",
+            "risks": "risk",
+            "key_facts": "fact",
+        }
+        for category in ("decisions", "action_items", "risks", "key_facts"):
+            items = _coerce_string_list(data.get(category, []))
+            for item in items:
+                candidates.append({"content": item, "category": cat_map.get(category, "general")})
+        return candidates
+
+    if notes_format == "summary":
+        summary = data.get("summary", "")
+        if summary is not None and not isinstance(summary, str):
+            summary = str(summary)
+        summary = (summary or "").strip()
+        if summary:
+            candidates.append({"content": summary, "category": "general"})
+        return candidates
+
+    if notes_format == "custom":
+        return _coerce_note_dict_list(data.get("notes", []), default_category="general")
+
+    points = _coerce_string_list(data.get("key_points", []))
+    if not points:
+        # Fallback for models that return {"notes":[...]} even in bullets mode.
+        return _coerce_note_dict_list(data.get("notes", []), default_category="general")
+    return [{"content": p, "category": "general"} for p in points]
+
+
+def _dedupe_note_dicts(notes: list[dict], *, max_items: int, seen_keys: set[str] | None = None) -> list[dict]:
+    out: list[dict] = []
+    seen: set[str] = set(seen_keys or set())
     for n in notes:
         if len(out) >= max_items:
             break
         if not isinstance(n, dict):
             continue
-        content = (n.get("content") or "")
-        if not isinstance(content, str):
-            content = str(content)
-        content = " ".join(content.split()).strip()
+        content = _normalize_note_content(n.get("content"), max_chars=220)
         if not content:
             continue
-        key = content.casefold()
+        key = _note_content_key(content)
         if key in seen:
             continue
         seen.add(key)
-        category = (n.get("category") or "general")
-        if not isinstance(category, str):
-            category = str(category)
-        category = category.strip().lower() or "general"
-        if category not in ("decision", "action", "risk", "fact", "general"):
-            category = "general"
-        out.append({"content": content[:220].strip(), "category": category})
+        category = _normalize_note_category(n.get("category", "general"))
+        out.append({"content": content, "category": category})
     return out
 
 
@@ -3974,13 +4625,13 @@ async def _smart_maintain_ai_notes(
         response_format={"type": "json_object"},
     )
 
-    content = response.choices[0].message.content
-    data = json.loads(content)
+    content = _extract_chat_content_best_effort(response)
+    data = _parse_json_object_best_effort(content)
     notes_raw = data.get("notes", [])
-    if not isinstance(notes_raw, list):
-        notes_raw = []
-
-    cleaned = _dedupe_note_dicts(notes_raw, max_items=max_count)
+    cleaned = _dedupe_note_dicts(
+        _coerce_note_dict_list(notes_raw, default_category="general"),
+        max_items=max_count,
+    )
     timestamp = datetime.now().strftime("%H:%M:%S")
     new_notes: list[NoteItem] = []
     for item in cleaned:
@@ -4011,7 +4662,7 @@ async def generate_notes(websocket: WebSocket, send_lock: asyncio.Lock, notes_lo
         if notes_lock is not None:
             await notes_lock.acquire()
 
-        context_size = int(config.get("notes_context_messages", 10))
+        context_size = _cfg_int(config.get("notes_context_messages"), 10, min_v=0, max_v=5000)
         max_chars = int(config.get("notes_max_chars", 24000) or 24000)
         conversation_text = _format_recent_history_bounded(limit=context_size, max_chars=max_chars)
         if not conversation_text:
@@ -4059,6 +4710,20 @@ async def generate_notes(websocket: WebSocket, send_lock: asyncio.Lock, notes_lo
                 log_important("notes.smart.error", level=logging.ERROR, error=e)
                 maintained = []
 
+            if not maintained and existing_ai:
+                # If model output is empty/invalid, keep existing AI notes rather than wiping.
+                fallback: list[NoteItem] = []
+                seen_existing: set[str] = set()
+                for n in existing_ai:
+                    key = _note_content_key(getattr(n, "content", ""))
+                    if not key or key in seen_existing:
+                        continue
+                    seen_existing.add(key)
+                    fallback.append(n)
+                    if len(fallback) >= max_count:
+                        break
+                maintained = fallback
+
             before = [asdict(n) for n in (current_session.notes or [])]
             current_session.notes = list(protected) + list(maintained)
             save_session(current_session)
@@ -4100,61 +4765,29 @@ async def generate_notes(websocket: WebSocket, send_lock: asyncio.Lock, notes_lo
             response_format={"type": "json_object"}
         )
         
-        content = response.choices[0].message.content
-        data = json.loads(content)
+        content = _extract_chat_content_best_effort(response)
+        data = _parse_json_object_best_effort(content)
         
-        notes_format = config.get("notes_format", "bullets")
+        notes_format = str(config.get("notes_format", "bullets") or "bullets").strip().lower()
+        candidates = _extract_note_candidates_from_model_output(data, notes_format=notes_format)
+        existing_keys = {
+            _note_content_key(getattr(n, "content", ""))
+            for n in (current_session.notes or [])
+            if _normalize_note_content(getattr(n, "content", ""), max_chars=4000)
+        }
+        cleaned = _dedupe_note_dicts(candidates, max_items=60, seen_keys=existing_keys)
         timestamp = datetime.now().strftime("%H:%M:%S")
-        new_notes = []
-        
-        if notes_format == "structured":
-            # Handle structured format with categories
-            for category in ["decisions", "action_items", "risks", "key_facts"]:
-                items = _coerce_string_list(data.get(category, []))
-                cat_map = {
-                    "decisions": "decision",
-                    "action_items": "action",
-                    "risks": "risk",
-                    "key_facts": "fact",
-                }
-                for item in items:
-                    note = NoteItem(
-                        id=str(uuid.uuid4())[:8],
-                        content=item.strip(),
-                        timestamp=timestamp,
-                        source="ai",
-                        category=cat_map.get(category, "general"),
-                        session_id=current_session.id,
-                    )
-                    new_notes.append(note)
-        
-        elif notes_format == "summary":
-            summary = data.get("summary", "")
-            if summary is not None and not isinstance(summary, str):
-                summary = str(summary)
-            summary = (summary or "").strip()
-            if summary:
-                note = NoteItem(
-                    id=str(uuid.uuid4())[:8],
-                    content=summary,
-                    timestamp=timestamp,
-                    source="ai",
-                    category="summary",
-                    session_id=current_session.id,
-                )
-                new_notes.append(note)
-        
-        else:  # bullets
-            points = _coerce_string_list(data.get("key_points", []))
-            for point in points:
-                note = NoteItem(
-                    id=str(uuid.uuid4())[:8],
-                    content=point.strip(),
-                    timestamp=timestamp,
-                    source="ai",
-                    session_id=current_session.id,
-                )
-                new_notes.append(note)
+        new_notes = [
+            NoteItem(
+                id=str(uuid.uuid4())[:8],
+                content=item["content"],
+                timestamp=timestamp,
+                source="ai",
+                category=item.get("category", "general") or "general",
+                session_id=current_session.id,
+            )
+            for item in cleaned
+        ]
         
         if new_notes:
             current_session.notes.extend(new_notes)
@@ -4188,7 +4821,297 @@ async def generate_notes(websocket: WebSocket, send_lock: asyncio.Lock, notes_lo
     return False
 
 
-def _format_recent_history_bounded(*, limit: int = 10, max_chars: int = 24000) -> str:
+def _label_from_history_message(message: dict) -> str:
+    role = (message.get("role") or "").strip().lower()
+    if role == "assistant":
+        return "AI"
+    name_raw = message.get("name") or ""
+    name = name_raw.strip() if isinstance(name_raw, str) else str(name_raw).strip()
+    name_low = name.lower()
+    if name_low.startswith("third_party_") and name_low != "third_party":
+        suffix = name[len("third_party_") :]
+        if "__" in suffix:
+            label_part = suffix.split("__", 1)[0]
+            label = label_part.replace("_", " ").strip()
+            if label:
+                return label
+        if suffix.lower().startswith("spk"):
+            digits = "".join(ch for ch in suffix if ch.isdigit())
+            if digits:
+                return f"Speaker {digits}"
+    if name_low.startswith("third_party_spk"):
+        digits = "".join(ch for ch in name_low if ch.isdigit())
+        if digits:
+            return f"Speaker {digits}"
+        return "Third-Party"
+    if name_low == "third_party":
+        return "Third-Party"
+    if name_low == "you":
+        return "You"
+    return "User"
+
+
+def _history_lines_for_context(*, limit: int | None = None) -> list[str]:
+    if not llm_client:
+        return []
+    history = list(getattr(llm_client, "history", []) or [])
+    if limit is not None:
+        history = history[-int(limit) :]
+
+    lines: list[str] = []
+    for m in history:
+        if not isinstance(m, dict):
+            continue
+        content = (m.get("content") or "")
+        if not isinstance(content, str):
+            content = str(content)
+        content = " ".join(content.split()).strip()
+        if not content:
+            continue
+        lines.append(f"{_label_from_history_message(m)}: {content}")
+    return lines
+
+
+def _tail_lines_within_chars(lines: list[str], budget_chars: int) -> list[str]:
+    if budget_chars <= 0:
+        return []
+    out_rev: list[str] = []
+    used = 0
+    for line in reversed(lines):
+        line_len = len(line) + (1 if out_rev else 0)
+        if out_rev and used + line_len > budget_chars:
+            break
+        if (not out_rev) and len(line) > budget_chars:
+            keep = max(0, budget_chars - len(" ...[truncated]"))
+            out_rev.append((line[:keep] + " ...[truncated]").strip())
+            break
+        out_rev.append(line)
+        used += line_len
+    return list(reversed(out_rev))
+
+
+def _get_pytextrank_nlp() -> Any:
+    global _PYTEXTRANK_NLP, _PYTEXTRANK_INIT_ATTEMPTED
+    if _PYTEXTRANK_INIT_ATTEMPTED:
+        return _PYTEXTRANK_NLP
+    _PYTEXTRANK_INIT_ATTEMPTED = True
+
+    try:
+        import spacy
+    except Exception as e:
+        logger.debug("PyTextRank unavailable (spacy import failed): %s", e)
+        return None
+
+    nlp = None
+    for model_name in ("en_core_web_sm", "en_core_web_md"):
+        try:
+            nlp = spacy.load(model_name)
+            break
+        except Exception:
+            continue
+
+    if nlp is None:
+        try:
+            # Keep a best-effort fallback path if no pre-trained model is installed.
+            nlp = spacy.blank("en")
+            if "sentencizer" not in nlp.pipe_names:
+                nlp.add_pipe("sentencizer")
+        except Exception as e:
+            logger.debug("PyTextRank unavailable (failed to init spaCy pipeline): %s", e)
+            return None
+
+    try:
+        import pytextrank  # noqa: F401
+        if "textrank" not in nlp.pipe_names:
+            nlp.add_pipe("textrank")
+    except Exception as e:
+        logger.debug("PyTextRank unavailable (component init failed): %s", e)
+        return None
+
+    _PYTEXTRANK_NLP = nlp
+    return _PYTEXTRANK_NLP
+
+
+def _build_local_context_summary_pytextrank(
+    older_lines: list[str],
+    *,
+    max_chars: int,
+    max_points: int = 14,
+) -> str:
+    if not older_lines or max_chars <= 0:
+        return ""
+
+    nlp = _get_pytextrank_nlp()
+    if nlp is None:
+        return ""
+
+    text = "\n".join(" ".join((ln or "").split()).strip() for ln in older_lines if str(ln or "").strip())
+    if not text:
+        return ""
+
+    try:
+        doc = nlp(text)
+        spans = list(
+            doc._.textrank.summary(  # type: ignore[attr-defined]
+                limit_phrases=max(20, int(max_points) * 2),
+                limit_sentences=max(1, int(max_points)),
+            )
+        )
+    except Exception:
+        return ""
+
+    points: list[str] = []
+    seen: set[str] = set()
+    for sp in spans:
+        s = " ".join(str(sp or "").split()).strip()
+        if len(s) < 20:
+            continue
+        sig = s.casefold()
+        if sig in seen:
+            continue
+        seen.add(sig)
+        points.append(s[:240])
+        if len(points) >= max(1, int(max_points)):
+            break
+
+    if not points:
+        return ""
+
+    summary_lines = [f"Earlier turns summarized: {len(older_lines)}", "Key points:"]
+    for p in points:
+        summary_lines.append(f"- {p}")
+
+    out: list[str] = []
+    used = 0
+    for line in summary_lines:
+        add = line if not out else ("\n" + line)
+        if used + len(add) > max_chars:
+            break
+        out.append(line)
+        used += len(add)
+
+    return "\n".join(out).strip()
+
+
+def _build_local_context_summary_heuristic(
+    older_lines: list[str],
+    *,
+    max_chars: int,
+    max_points: int = 14,
+) -> str:
+    import re
+
+    if not older_lines or max_chars <= 0:
+        return ""
+
+    speaker_counts: dict[str, int] = {}
+    points: list[tuple[int, int, str, str]] = []
+    seen: set[str] = set()
+    keyword_re = re.compile(
+        r"\b("
+        r"agree|agreed|decision|decide|plan|action|next step|deadline|must|should|need to|"
+        r"because|evidence|claim|risk|issue|problem|request|policy|law|contract|payment|date"
+        r")\b",
+        flags=re.I,
+    )
+
+    for idx, raw in enumerate(older_lines):
+        line = " ".join((raw or "").split()).strip()
+        if not line:
+            continue
+        if ":" in line:
+            speaker, body = line.split(":", 1)
+            speaker = speaker.strip() or "User"
+            body = body.strip()
+        else:
+            speaker = "User"
+            body = line
+        if not body:
+            continue
+        speaker_counts[speaker] = speaker_counts.get(speaker, 0) + 1
+
+        sentences = re.split(r"(?<=[.!?])\s+", body)
+        if not sentences:
+            sentences = [body]
+        for sent in sentences:
+            s = " ".join(sent.split()).strip(" -")
+            if len(s) < 24:
+                continue
+            score = 0
+            if any(ch.isdigit() for ch in s):
+                score += 2
+            if "?" in s:
+                score += 1
+            if keyword_re.search(s):
+                score += 2
+            if len(s) >= 120:
+                score += 1
+            if score <= 0:
+                continue
+
+            sig = re.sub(r"[^a-z0-9 ]+", "", s.casefold()).strip()
+            if not sig or sig in seen:
+                continue
+            seen.add(sig)
+            points.append((score, idx, speaker, s[:220]))
+
+    if not points:
+        for idx, raw in enumerate(older_lines[-6:]):
+            line = " ".join((raw or "").split()).strip()
+            if not line:
+                continue
+            points.append((1, idx, "Context", line[:180]))
+
+    selected = sorted(points, key=lambda x: (-x[0], -x[1]))[: max(1, int(max_points))]
+    selected.sort(key=lambda x: x[1])
+
+    speaker_meta = ", ".join(f"{k} {v}" for k, v in sorted(speaker_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:4])
+    summary_lines = [f"Earlier turns summarized: {len(older_lines)}"]
+    if speaker_meta:
+        summary_lines.append(f"Speaker activity: {speaker_meta}")
+    summary_lines.append("Key points:")
+    for _, _, speaker, text in selected:
+        summary_lines.append(f"- {speaker}: {text}")
+
+    out: list[str] = []
+    used = 0
+    for line in summary_lines:
+        add = line if not out else ("\n" + line)
+        if used + len(add) > max_chars:
+            break
+        out.append(line)
+        used += len(add)
+
+    return "\n".join(out).strip()
+
+
+def _build_local_context_summary(
+    older_lines: list[str],
+    *,
+    max_chars: int,
+    max_points: int = 14,
+) -> str:
+    method = str(config.get("context_local_summary_method", DEFAULT_CONFIG["context_local_summary_method"]) or "").strip().lower()
+    if method not in ("pytextrank", "heuristic", "auto"):
+        method = str(DEFAULT_CONFIG["context_local_summary_method"])
+
+    if method in ("pytextrank", "auto"):
+        out = _build_local_context_summary_pytextrank(
+            older_lines,
+            max_chars=max_chars,
+            max_points=max_points,
+        )
+        if out:
+            return out
+
+    return _build_local_context_summary_heuristic(
+        older_lines,
+        max_chars=max_chars,
+        max_points=max_points,
+    )
+
+
+def _format_recent_history_bounded(*, limit: int | None = 10, max_chars: int = 24000) -> str:
     if not llm_client:
         return ""
 
@@ -4199,81 +5122,56 @@ def _format_recent_history_bounded(*, limit: int = 10, max_chars: int = 24000) -
     max_chars = max(2000, min(250000, max_chars))
 
     try:
-        limit = int(limit)
+        limit_n = int(limit) if limit is not None else None
     except Exception:
-        limit = 10
-    limit = max(1, min(200, limit))
+        limit_n = 10
+    if limit_n is not None:
+        # 0 or negative means "all available messages".
+        if limit_n <= 0:
+            limit_n = None
+        else:
+            limit_n = max(1, min(5000, limit_n))
 
-    def _label_from_message(message: dict) -> str:
-        role = (message.get("role") or "").strip().lower()
-        if role == "assistant":
-            return "AI"
-        name_raw = message.get("name") or ""
-        name = name_raw.strip() if isinstance(name_raw, str) else str(name_raw).strip()
-        name_low = name.lower()
-        if name_low.startswith("third_party_") and name_low != "third_party":
-            suffix = name[len("third_party_") :]
-            if "__" in suffix:
-                label_part = suffix.split("__", 1)[0]
-                label = label_part.replace("_", " ").strip()
-                if label:
-                    return label
-            if suffix.lower().startswith("spk"):
-                digits = "".join(ch for ch in suffix if ch.isdigit())
-                if digits:
-                    return f"Speaker {digits}"
-        if name_low.startswith("third_party_spk"):
-            digits = "".join(ch for ch in name_low if ch.isdigit())
-            if digits:
-                return f"Speaker {digits}"
-            return "Third-Party"
-        if name_low == "third_party":
-            return "Third-Party"
-        if name_low == "you":
-            return "You"
-        return "User"
+    lines = _history_lines_for_context(limit=limit_n)
+    if not lines:
+        return ""
 
-    out_rev: list[str] = []
-    used = 0
-    taken = 0
+    full = "\n".join(lines).strip()
+    if len(full) <= max_chars:
+        return full
 
-    for m in reversed(getattr(llm_client, "history", []) or []):
-        if taken >= limit:
-            break
+    # Fallback mode: keep newest verbatim lines when local summary is disabled.
+    if not bool(config.get("context_local_summary_enabled", True)):
+        return "\n".join(_tail_lines_within_chars(lines, max_chars)).strip()
 
-        if not isinstance(m, dict):
-            continue
+    tail_budget = max(1200, min(max_chars - 700, int(max_chars * 0.68)))
+    recent_lines = _tail_lines_within_chars(lines, tail_budget)
+    if not recent_lines:
+        recent_lines = _tail_lines_within_chars(lines, max_chars)
+    recent_text = "\n".join(recent_lines).strip()
+    if not recent_text:
+        return ""
 
-        content = (m.get("content") or "")
-        if not isinstance(content, str):
-            content = str(content)
-        content = " ".join(content.split())
-        if not content:
-            continue
+    older_count = max(0, len(lines) - len(recent_lines))
+    if older_count <= 0:
+        return recent_text[:max_chars].strip()
 
-        label = _label_from_message(m)
-        line = f"{label}: {content}"
+    older_lines = lines[:older_count]
+    summary_budget = max(450, max_chars - len(recent_text) - 80)
+    summary = _build_local_context_summary(older_lines, max_chars=summary_budget)
+    if not summary:
+        return recent_text[:max_chars].strip()
 
-        remaining = max_chars - used
-        if remaining <= 0:
-            break
+    composed = (
+        "Earlier context summary (local, non-LLM):\n"
+        f"{summary}\n\n"
+        "Recent context (verbatim):\n"
+        f"{recent_text}"
+    ).strip()
+    if len(composed) <= max_chars:
+        return composed
 
-        if len(line) > remaining:
-            suffix = " ...[truncated]"
-            keep = max(0, remaining - len(suffix))
-            line = (line[:keep] + suffix).strip()
-
-        if not line:
-            break
-
-        out_rev.append(line)
-        used += len(line) + 1
-        taken += 1
-
-        if used >= max_chars:
-            break
-
-    return "\n".join(reversed(out_rev)).strip()
+    return composed[:max_chars].rstrip()
 
 
 def _get_session_context(*, max_chars: int = 4000) -> str:
@@ -4361,6 +5259,8 @@ async def run_notes_loop(websocket: WebSocket, send_lock: asyncio.Lock, notes_lo
         if current_seq == last_generated_activity_seq:
             continue
 
+        await _wait_for_transcript_settle()
+
         ok = await generate_notes(websocket, send_lock, notes_lock)
         if ok:
             last_generated_activity_seq = current_seq
@@ -4372,7 +5272,7 @@ async def run_fact_check_loop(websocket: WebSocket, send_lock: asyncio.Lock, fac
     last_generated_activity_seq = -1
 
     while True:
-        interval = _cfg_int(config.get("fact_check_interval_seconds"), 25, min_v=5, max_v=600)
+        interval = _cfg_int(config.get("fact_check_interval_seconds"), 15, min_v=5, max_v=600)
         await asyncio.sleep(interval)
 
         if not config.get("ai_enabled", False):
@@ -4387,6 +5287,8 @@ async def run_fact_check_loop(websocket: WebSocket, send_lock: asyncio.Lock, fac
         current_seq = int(_TRANSCRIPT_ACTIVITY_SEQ)
         if current_seq == last_generated_activity_seq:
             continue
+
+        await _wait_for_transcript_settle()
 
         ok = await generate_fact_checks(websocket, send_lock, fact_check_lock=fact_check_lock)
         if ok:
@@ -4599,6 +5501,23 @@ def _merge_transcript_text(prev_text: str, new_text: str) -> str:
             trimmed = _strip_prefix_word_tokens(b, 1).strip()
             if trimmed:
                 b = trimmed
+        elif (
+            len(tail) >= 2
+            and len(tail) <= 4
+            and len(head) >= 4
+            and head.startswith(tail)
+            and tail != head
+            and (len(head) - len(tail)) <= 8
+        ):
+            # Chopped stem seam: "by. biased" -> "biased"
+            a = re.sub(rf"\b{re.escape(tail)}[.?!]\s*$", "", a, flags=re.I).rstrip()
+        elif (
+            tail in {"at", "by", "for", "from", "in", "of", "on", "with"}
+            and len(head) >= 4
+            and head[:1] == tail[:1]
+        ):
+            # Orphan connector seam: "by. biased" -> "biased"
+            a = re.sub(rf"\b{re.escape(tail)}[.?!]\s*$", "", a, flags=re.I).rstrip()
 
     if not b:
         return a
@@ -4701,13 +5620,26 @@ def _should_enqueue_ai_from_transcript_update(
     delta_words = _count_word_tokens(delta)
     full_chars = len(cur)
     full_words = _count_word_tokens(cur)
+    is_cleanup = (feature == "transcript_cleanup")
 
     # New transcript chunks need stronger evidence before triggering downstream AI.
-    if not reference:
+    if is_cleanup and not reference:
+        substantive = (
+            full_chars >= 18
+            or full_words >= 3
+            or (full_words >= 2 and ends_sentence)
+        )
+    elif not reference:
         substantive = (
             full_chars >= 42
             or full_words >= 8
             or (full_words >= 5 and ends_sentence)
+        )
+    elif is_cleanup:
+        substantive = (
+            delta_chars >= 10
+            or delta_words >= 2
+            or (delta_words >= 1 and ends_sentence)
         )
     else:
         substantive = (
@@ -4715,8 +5647,46 @@ def _should_enqueue_ai_from_transcript_update(
             or delta_words >= 6
             or (delta_words >= 4 and ends_sentence)
         )
+        if not substantive and feature in ("response", "fact_check"):
+            # Response/fact-check generation should not starve when STT appends tiny deltas.
+            # If the cumulative transcript became substantive, allow one trigger.
+            non_trivial_delta = (
+                delta_chars >= 14
+                or delta_words >= 3
+                or (delta_words >= 2 and ends_sentence)
+            )
+            if non_trivial_delta:
+                substantive = (
+                    full_chars >= 56
+                    or full_words >= 10
+                    or (full_words >= 6 and ends_sentence)
+                )
+
+    if not substantive and feature in ("response", "fact_check", "notes"):
+        # On merged STT updates, avoid starvation when growth happens in very small chunks.
+        # If this message has never triggered before and is now clearly substantive,
+        # allow one trigger even when the latest delta is tiny.
+        if merged and not baseline:
+            substantive = (
+                full_chars >= 56
+                or full_words >= 10
+                or (full_words >= 6 and ends_sentence)
+            )
+    if not substantive and is_cleanup:
+        # Cleanup/paraphrase should keep up with merged incremental STT chunks.
+        if merged and not baseline:
+            substantive = (
+                full_chars >= 30
+                or full_words >= 5
+                or (full_words >= 4 and ends_sentence)
+            )
 
     if not substantive:
+        # Keep an initial anchor for this message so future merged deltas can be
+        # evaluated cumulatively instead of only against the immediately prior chunk.
+        if kind != "manual" and not baseline:
+            _AI_TRIGGER_BASELINE_TEXT[key] = (prev or cur)
+            _prune_ai_trigger_baseline_cache()
         return False
 
     _AI_TRIGGER_BASELINE_TEXT[key] = cur
@@ -4725,12 +5695,13 @@ def _should_enqueue_ai_from_transcript_update(
 
 
 async def _transcript_cleanup_text(text: str) -> str:
-    if not llm_client:
-        return ""
-
     t = " ".join((text or "").split()).strip()
     if not t:
         return ""
+    fallback = _local_transcript_rewrite_fallback(t, mode="cleanup")
+
+    if not llm_client:
+        return fallback
 
     system_prompt = (
         "You clean up speech-to-text transcript fragments for readability.\n"
@@ -4752,12 +5723,8 @@ async def _transcript_cleanup_text(text: str) -> str:
         max_tokens=220,
         response_format={"type": "json_object"},
     )
-    data = json.loads(resp.choices[0].message.content)
-    cleaned = data.get("clean_text", "")
-    if cleaned is not None and not isinstance(cleaned, str):
-        cleaned = str(cleaned)
-    cleaned = " ".join((cleaned or "").split()).strip()
-    return cleaned
+    out = _extract_transcript_rewrite_text(resp, fallback_input=t)
+    return out or fallback
 
 
 def _get_transcript_ai_mode(cfg: dict) -> str:
@@ -4784,12 +5751,13 @@ async def _transcript_ai_rewrite(text: str, *, mode: str) -> str:
     if mode != "paraphrase":
         return ""
 
-    if not llm_client:
-        return ""
-
     t = " ".join((text or "").split()).strip()
     if not t:
         return ""
+    fallback = _local_transcript_rewrite_fallback(t, mode="paraphrase")
+
+    if not llm_client:
+        return fallback
 
     system_prompt = (
         "You rewrite speech-to-text transcript fragments into a clearer paraphrase of what the speaker likely meant.\n"
@@ -4810,12 +5778,131 @@ async def _transcript_ai_rewrite(text: str, *, mode: str) -> str:
         max_tokens=220,
         response_format={"type": "json_object"},
     )
-    data = json.loads(resp.choices[0].message.content)
-    cleaned = data.get("clean_text", "")
-    if cleaned is not None and not isinstance(cleaned, str):
-        cleaned = str(cleaned)
-    cleaned = " ".join((cleaned or "").split()).strip()
-    return cleaned
+    out = _extract_transcript_rewrite_text(resp, fallback_input=t)
+    return out or fallback
+
+
+def _local_transcript_rewrite_fallback(text: str, *, mode: str) -> str:
+    import re
+
+    t = " ".join((text or "").split()).strip()
+    if not t:
+        return ""
+
+    # Remove obvious adjacent duplicated words from STT seams.
+    words = t.split(" ")
+    out_words: list[str] = []
+    prev_norm = ""
+    for w in words:
+        norm = re.sub(r"[^a-z0-9']+", "", (w or "").casefold())
+        if norm and norm == prev_norm:
+            continue
+        out_words.append(w)
+        if norm:
+            prev_norm = norm
+    s = " ".join(out_words).strip()
+
+    s = re.sub(r"\s+([,.;:!?])", r"\1", s)
+    s = re.sub(r"\(\s+", "(", s)
+    s = re.sub(r"\s+\)", ")", s)
+    s = s.strip()
+    if not s:
+        return ""
+
+    # Conservative readability touch only (no paraphrase/fact changes).
+    first_alpha = re.search(r"[A-Za-z]", s)
+    if first_alpha:
+        i = first_alpha.start()
+        s = s[:i] + s[i].upper() + s[i + 1 :]
+
+    # Keep punctuation as-is; do not force sentence endings for partial chunks.
+    return s
+
+
+def _extract_transcript_rewrite_text(response_obj: Any, *, fallback_input: str = "") -> str:
+    import re
+
+    def _as_clean_str(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, (list, tuple)):
+            parts: list[str] = []
+            for item in value:
+                s = str(item or "").strip()
+                if s:
+                    parts.append(s)
+            return " ".join(parts).strip()
+        return str(value).strip()
+
+    def _normalize(text: str) -> str:
+        s = str(text or "").strip()
+        if not s:
+            return ""
+        # Strip common wrappers from provider outputs.
+        if s.startswith("```"):
+            s = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", s).strip()
+            if s.endswith("```"):
+                s = s[:-3].strip()
+        s = re.sub(r"^\s*(clean(?:ed)?_?text|rewrite|paraphrase)\s*:\s*", "", s, flags=re.I).strip()
+        s = s.strip("`")
+        if len(s) >= 2 and ((s[0] == '"' and s[-1] == '"') or (s[0] == "'" and s[-1] == "'")):
+            s = s[1:-1].strip()
+        s = s.replace("\\n", " ").replace("\\t", " ").replace('\\"', '"').replace("\\'", "'")
+        return " ".join(s.split()).strip()
+
+    baseline = " ".join((fallback_input or "").split()).strip()
+    raw = _extract_chat_content_best_effort(response_obj)
+    raw = str(raw or "").strip()
+    if (not raw) and isinstance(response_obj, dict):
+        for key in ("output_text", "text", "content"):
+            if key in response_obj:
+                raw = str(response_obj.get(key) or "").strip()
+                if raw:
+                    break
+    if not raw:
+        return ""
+
+    parsed = _parse_json_object_best_effort(raw)
+    key_candidates = ("clean_text", "cleanText", "text", "rewrite", "paraphrase", "output")
+    for k in key_candidates:
+        if k in parsed:
+            out = _normalize(_as_clean_str(parsed.get(k)))
+            if out:
+                return out
+    nested = parsed.get("data") if isinstance(parsed.get("data"), dict) else None
+    if isinstance(nested, dict):
+        for k in key_candidates:
+            if k in nested:
+                out = _normalize(_as_clean_str(nested.get(k)))
+                if out:
+                    return out
+
+    # Handle malformed JSON-like responses from providers that ignore strict json_object mode.
+    for k in ("clean_text", "cleanText", "text", "rewrite", "paraphrase", "output"):
+        m = re.search(rf"""['"]{re.escape(k)}['"]\s*:\s*(['"])(.+?)\1""", raw, flags=re.I | re.S)
+        if m:
+            out = _normalize(m.group(2))
+            if out:
+                return out
+
+    normalized_raw = _normalize(raw)
+    if not normalized_raw:
+        return ""
+    if not re.search(r"[A-Za-z0-9]", normalized_raw):
+        return ""
+    if baseline:
+        max_reasonable = min(2400, max(260, int(len(baseline) * 3.2)))
+        if len(normalized_raw) > max_reasonable:
+            return ""
+
+    # Last-resort fallback: accept plain text if it doesn't look like a JSON blob.
+    if not ((normalized_raw.startswith("{") and normalized_raw.endswith("}")) or (normalized_raw.startswith("[") and normalized_raw.endswith("]"))):
+        return normalized_raw
+
+    # If still JSON-like and unparsable, fail closed (no rewrite).
+    return ""
 
 
 def _enqueue_transcript_cleanup(q: asyncio.Queue, msg_id: str) -> None:
@@ -4862,11 +5949,27 @@ async def run_transcript_cleanup_loop(
         if llm_client is None or current_session is None:
             continue
 
+        await _wait_for_transcript_settle(queue=cleanup_queue)
+        while True:
+            try:
+                msg_id = cleanup_queue.get_nowait()
+            except Exception:
+                break
+
         min_interval = float(config.get("transcript_ai_cleanup_min_interval_seconds", 3.0) or 3.0)
         min_interval = max(0.0, min(30.0, min_interval))
         now_ts = time.time()
-        if now_ts - float(_TRANSCRIPT_CLEANUP_LAST_TS or 0.0) < min_interval:
-            continue
+        since_last = now_ts - float(_TRANSCRIPT_CLEANUP_LAST_TS or 0.0)
+        if since_last < min_interval:
+            wait_s = max(0.0, min_interval - since_last)
+            if wait_s > 0:
+                await asyncio.sleep(wait_s)
+            # Prefer newest pending message after cooldown.
+            while True:
+                try:
+                    msg_id = cleanup_queue.get_nowait()
+                except Exception:
+                    break
 
         target = None
         for m in reversed(current_session.transcript or []):
@@ -4883,9 +5986,13 @@ async def run_transcript_cleanup_loop(
                 cleaned = await _transcript_ai_rewrite(getattr(target, "text", "") or "", mode=mode)
         except Exception:
             logger.exception("Transcript cleanup failed")
-            continue
+            cleaned = _local_transcript_rewrite_fallback(getattr(target, "text", "") or "", mode=mode)
 
-        if not cleaned or cleaned == (getattr(target, "text", "") or ""):
+        if not cleaned:
+            cleaned = _local_transcript_rewrite_fallback(getattr(target, "text", "") or "", mode=mode)
+        if not cleaned:
+            continue
+        if cleaned == (getattr(target, "clean_text", None) or ""):
             continue
 
         target.clean_text = cleaned
@@ -4943,7 +6050,7 @@ async def _policy_should_respond(text: str, source: str) -> dict:
             stream=False,
             response_format={"type": "json_object"},
         )
-        content = resp.choices[0].message.content
+        content = _extract_chat_content_best_effort(resp)
         data = _parse_json_object_best_effort(content)
         allow = bool(data.get("allow"))
         urgency = data.get("urgency")
@@ -5263,6 +6370,7 @@ if __name__ == "__main__":
             chunk_duration_s=float(runtime_cfg.get("chunk_duration_s") or 3.2),
             chunk_overlap_s=float(runtime_cfg.get("chunk_overlap_s") or 0.16),
             condition_on_previous_text=bool(runtime_cfg.get("condition_on_previous_text")),
+            runtime_profile=str(runtime_cfg.get("resolved_profile") or "manual"),
         )
         logger.info("Model loaded.")
         log_important(
@@ -5270,6 +6378,7 @@ if __name__ == "__main__":
             model=model_size,
             device=getattr(transcription_model, "device", "unknown"),
             compute=getattr(transcription_model, "compute_type", "unknown"),
+            requested_profile=str(runtime_cfg.get("requested_profile") or "auto"),
             profile=str(runtime_cfg.get("resolved_profile") or "manual"),
             beam=int(runtime_cfg.get("beam_size") or 1),
             chunk_s=f"{float(runtime_cfg.get('chunk_duration_s') or 0.0):.2f}",
@@ -5319,4 +6428,3 @@ if __name__ == "__main__":
         print("Press Enter to exit...")
         input()
         sys.exit(1)
-

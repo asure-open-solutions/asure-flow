@@ -81,6 +81,61 @@ class TestAiTriggerGating(unittest.TestCase):
         )
         self.assertTrue(ok)
 
+    def test_response_merged_tiny_delta_can_trigger_from_cumulative_text(self):
+        prev = (
+            "Electric cars are obviously worse for the environment because batteries are toxic bricks"
+        )
+        cur = prev + " for decades."
+        ok = main._should_enqueue_ai_from_transcript_update(
+            "response",
+            message_id="m6",
+            previous_text=prev,
+            current_text=cur,
+            merged=True,
+            message_kind="audio",
+        )
+        self.assertTrue(ok)
+
+    def test_fact_check_merged_tiny_delta_can_trigger_from_cumulative_text(self):
+        prev = (
+            "Electric cars are obviously worse for the environment because batteries are toxic bricks"
+        )
+        cur = prev + " for decades."
+        ok = main._should_enqueue_ai_from_transcript_update(
+            "fact_check",
+            message_id="m7",
+            previous_text=prev,
+            current_text=cur,
+            merged=True,
+            message_kind="audio",
+        )
+        self.assertTrue(ok)
+
+    def test_notes_merged_tiny_chunks_eventually_trigger(self):
+        self.assertFalse(
+            main._should_enqueue_ai_from_transcript_update(
+                "notes",
+                message_id="m8",
+                current_text="okay",
+                message_kind="audio",
+            )
+        )
+
+        prev = "okay"
+        cur = (
+            "okay electric cars are obviously worse for the environment "
+            "because the battery production is harmful"
+        )
+        ok = main._should_enqueue_ai_from_transcript_update(
+            "notes",
+            message_id="m8",
+            previous_text=prev,
+            current_text=cur,
+            merged=True,
+            message_kind="audio",
+        )
+        self.assertTrue(ok)
+
 
 if __name__ == "__main__":
     unittest.main()

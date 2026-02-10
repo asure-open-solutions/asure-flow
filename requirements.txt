@@ -11,3 +11,8 @@ onnxruntime
 cffi
 python-multipart
 # For soundcard on windows, ensure you have C++ build tools if needed, but wheel should exist.
+
+# Optional: higher-quality local context summaries (no API cost)
+# Install these and run: python -m spacy download en_core_web_sm
+# spacy
+# pytextrank

@@ -69,6 +69,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const notesExportBtn = document.getElementById('notes-export-btn');
     const notesGrid = document.getElementById('notes-grid');
     const notesFullEmpty = document.getElementById('notes-full-empty');
+    const notesSearchInput = document.getElementById('notes-search-input');
+    const notesSortSelect = document.getElementById('notes-sort-select');
+    const notesSummaryText = document.getElementById('notes-summary-text');
+    const notesRefreshFullBtn = document.getElementById('notes-refresh-full-btn');
+    const notesClearFullBtn = document.getElementById('notes-clear-full-btn');
     const responsesSessionList = document.getElementById('responses-session-list');
     const responsesEmptyState = document.getElementById('responses-empty-state');
     const responsesFullList = document.getElementById('responses-full-list');
@@ -445,12 +450,90 @@ document.addEventListener('DOMContentLoaded', () => {
     // NOTES RENDERING
     // ============================================
     
+    function noteTimestampScore(note) {
+        const ts = String(note?.timestamp || '').trim();
+        if (!ts) return 0;
+        const [h, m, s] = ts.split(':').map(v => Number.parseInt(v, 10));
+        if (!Number.isFinite(h) || !Number.isFinite(m) || !Number.isFinite(s)) return 0;
+        return (h * 3600) + (m * 60) + s;
+    }
+
+    function filterAndSortNotes(notes, {
+        filter = 'all',
+        query = '',
+        sortMode = 'newest',
+    } = {}) {
+        const q = String(query || '').trim().toLowerCase();
+        let out = [...(Array.isArray(notes) ? notes : [])];
+
+        if (filter === 'ai') {
+            out = out.filter(n => n.source === 'ai');
+        } else if (filter === 'manual') {
+            out = out.filter(n => n.source === 'manual');
+        } else if (filter === 'pinned') {
+            out = out.filter(n => !!n.pinned);
+        } else if (filter === 'completed') {
+            out = out.filter(n => !!n.completed);
+        }
+
+        if (q) {
+            out = out.filter(n => {
+                const content = String(n?.content || '').toLowerCase();
+                const category = String(n?.category || '').toLowerCase();
+                const source = String(n?.source || '').toLowerCase();
+                return content.includes(q) || category.includes(q) || source.includes(q);
+            });
+        }
+
+        const byTimeDesc = (a, b) => {
+            const ta = noteTimestampScore(a);
+            const tb = noteTimestampScore(b);
+            if (tb !== ta) return tb - ta;
+            return String(b?.id || '').localeCompare(String(a?.id || ''));
+        };
+
+        if (sortMode === 'oldest') {
+            out.sort((a, b) => byTimeDesc(b, a));
+        } else if (sortMode === 'pinned_first') {
+            out.sort((a, b) => {
+                const pa = a?.pinned ? 1 : 0;
+                const pb = b?.pinned ? 1 : 0;
+                if (pb !== pa) return pb - pa;
+                return byTimeDesc(a, b);
+            });
+        } else if (sortMode === 'active_first') {
+            out.sort((a, b) => {
+                const ca = a?.completed ? 0 : 1;
+                const cb = b?.completed ? 0 : 1;
+                if (cb !== ca) return cb - ca;
+                return byTimeDesc(a, b);
+            });
+        } else {
+            out.sort(byTimeDesc);
+        }
+
+        return out;
+    }
+
+    function updateNotesSummary() {
+        if (!notesSummaryText) return;
+        const total = allNotes.length;
+        const aiCount = allNotes.filter(n => n.source === 'ai').length;
+        const manualCount = allNotes.filter(n => n.source === 'manual').length;
+        const pinnedCount = allNotes.filter(n => n.pinned).length;
+        const doneCount = allNotes.filter(n => n.completed).length;
+        notesSummaryText.textContent = `${total} total | ${aiCount} AI | ${manualCount} manual | ${pinnedCount} pinned | ${doneCount} completed`;
+    }
+
     function renderNotes() {
-        // Session sidebar notes
+        updateNotesSummary();
+
+        // Session sidebar notes (active/incomplete by default, pinned first)
         if (notesPointsSession) {
             notesPointsSession.innerHTML = '';
-            const sessionNotes = allNotes.filter(n => !n.completed);
-            
+            const sessionNotes = filterAndSortNotes(allNotes, { filter: 'all', sortMode: 'pinned_first' })
+                .filter(n => !n.completed);
+
             if (sessionNotes.length === 0) {
                 if (notesEmptyState) notesEmptyState.classList.remove('hidden');
             } else {
@@ -462,27 +545,25 @@ document.addEventListener('DOMContentLoaded', () => {
                 notesPointsSession.appendChild(frag);
             }
         }
-        
-        // Full notes grid
+
+        // Full notes grid (filter + search + sort)
         if (notesGrid) {
             const activeFilter = document.querySelector('.notes-filter-btn.active')?.dataset.filter || 'all';
-            let filteredNotes = allNotes;
-            
-            if (activeFilter === 'ai') {
-                filteredNotes = allNotes.filter(n => n.source === 'ai');
-            } else if (activeFilter === 'manual') {
-                filteredNotes = allNotes.filter(n => n.source === 'manual');
-            } else if (activeFilter === 'pinned') {
-                filteredNotes = allNotes.filter(n => n.pinned);
-            }
-            
+            const searchQuery = notesSearchInput?.value || '';
+            const sortMode = notesSortSelect?.value || 'newest';
+            const shown = filterAndSortNotes(allNotes, {
+                filter: activeFilter,
+                query: searchQuery,
+                sortMode,
+            });
+
             notesGrid.innerHTML = '';
-            if (filteredNotes.length === 0) {
+            if (shown.length === 0) {
                 if (notesFullEmpty) notesFullEmpty.classList.remove('hidden');
             } else {
                 if (notesFullEmpty) notesFullEmpty.classList.add('hidden');
                 const frag = document.createDocumentFragment();
-                filteredNotes.forEach(note => {
+                shown.forEach(note => {
                     frag.appendChild(createNoteElement(note, false));
                 });
                 notesGrid.appendChild(frag);
@@ -678,12 +759,12 @@ document.addEventListener('DOMContentLoaded', () => {
         // Timestamp and category
         const meta = document.createElement('div');
         meta.className = 'note-timestamp';
-        let metaText = note.timestamp;
+        let metaText = String(note.timestamp || '');
         if (note.category && note.category !== 'general') {
-            metaText += ` • ${note.category}`;
+            metaText += ` | ${note.category}`;
         }
         if (note.source === 'ai') {
-            metaText += ' • AI';
+            metaText += ' | AI';
         }
         meta.textContent = metaText;
         div.appendChild(meta);
@@ -1106,6 +1187,70 @@ document.addEventListener('DOMContentLoaded', () => {
         );
     }
 
+    const TRANSCRIPTION_PROFILE_OPTIONS = {
+        cpu: [
+            { value: 'cpu_realtime', label: 'CPU - Realtime' },
+            { value: 'cpu_accuracy', label: 'CPU - Accuracy' },
+        ],
+        cuda: [
+            { value: 'gpu_realtime', label: 'GPU - Realtime' },
+            { value: 'gpu_accuracy', label: 'GPU - Accuracy' },
+        ],
+    };
+
+    function normalizeWhisperDeviceValue(value) {
+        const d = String(value || 'cpu').trim().toLowerCase();
+        return (d === 'cuda' || d === 'gpu') ? 'cuda' : 'cpu';
+    }
+
+    function normalizeTranscriptionProfileValue(value) {
+        const raw = String(value || 'auto').trim().toLowerCase();
+        if (raw === 'gpu_balanced' || raw === 'gpu_quality') return 'gpu_accuracy';
+        return raw || 'auto';
+    }
+
+    function mapTranscriptionProfileForDevice(profile, device) {
+        const p = normalizeTranscriptionProfileValue(profile);
+        if (p === 'auto' || p === 'manual') return p;
+
+        if (device === 'cuda') {
+            if (p === 'cpu_realtime') return 'gpu_realtime';
+            if (p === 'cpu_accuracy') return 'gpu_accuracy';
+            return p;
+        }
+
+        if (p === 'gpu_realtime') return 'cpu_realtime';
+        if (p === 'gpu_accuracy') return 'cpu_accuracy';
+        return p;
+    }
+
+    function syncTranscriptionProfileOptions(preferredProfile = null) {
+        const whisperDeviceEl = document.getElementById('setting-whisper-device');
+        const transcriptionProfileEl = document.getElementById('setting-transcription-profile');
+        if (!transcriptionProfileEl) return;
+
+        const device = normalizeWhisperDeviceValue(whisperDeviceEl?.value);
+        const requested = preferredProfile === null ? transcriptionProfileEl.value : preferredProfile;
+        const nextProfile = mapTranscriptionProfileForDevice(requested, device);
+        const deviceProfiles = TRANSCRIPTION_PROFILE_OPTIONS[device] || TRANSCRIPTION_PROFILE_OPTIONS.cpu;
+        const options = [
+            { value: 'auto', label: 'Auto (recommended)' },
+            { value: 'manual', label: 'Manual (use advanced values)' },
+            ...deviceProfiles,
+        ];
+
+        const allowed = new Set(options.map(o => o.value));
+        transcriptionProfileEl.innerHTML = '';
+        options.forEach((opt) => {
+            const option = document.createElement('option');
+            option.value = opt.value;
+            option.textContent = opt.label;
+            transcriptionProfileEl.appendChild(option);
+        });
+
+        transcriptionProfileEl.value = allowed.has(nextProfile) ? nextProfile : 'auto';
+    }
+
     function scrollToBottom() {
         chatContainer.scrollTop = chatContainer.scrollHeight;
     }
@@ -1193,24 +1338,24 @@ document.addEventListener('DOMContentLoaded', () => {
             response_prompt: document.getElementById('setting-response-prompt')?.value,
             auto_respond: !!document.getElementById('setting-auto-respond')?.checked,
             web_search_enabled: !!document.getElementById('setting-web-search')?.checked,
-            response_context_messages: parseInt(document.getElementById('setting-response-context')?.value) || 14,
-            ai_min_interval_seconds: parseFloat(document.getElementById('setting-ai-interval')?.value) || 8,
+            response_context_messages: parseNumericWithDefault(document.getElementById('setting-response-context')?.value, 14),
+            ai_min_interval_seconds: parseNumericWithDefault(document.getElementById('setting-ai-interval')?.value, 8, { allowFloat: true }),
             fact_check_enabled: !!document.getElementById('setting-fact-check-enabled')?.checked,
             fact_check_live_on_message: !!document.getElementById('setting-fact-check-live-on-message')?.checked,
             fact_check_on_interaction_only: !!document.getElementById('setting-fact-check-interaction-only')?.checked,
-            fact_check_interval_seconds: parseInt(document.getElementById('setting-fact-check-interval')?.value) || 25,
-            fact_check_context_messages: parseInt(document.getElementById('setting-fact-check-context')?.value) || 18,
+            fact_check_interval_seconds: parseNumericWithDefault(document.getElementById('setting-fact-check-interval')?.value, 25),
+            fact_check_context_messages: parseNumericWithDefault(document.getElementById('setting-fact-check-context')?.value, 18),
             fact_check_prompt: document.getElementById('setting-fact-check-prompt')?.value,
 
             // Notes
             notes_enabled: !!document.getElementById('setting-notes-enabled')?.checked,
-            notes_interval_seconds: parseInt(document.getElementById('setting-notes-interval')?.value) || 30,
+            notes_interval_seconds: parseNumericWithDefault(document.getElementById('setting-notes-interval')?.value, 30),
             notes_on_interaction_only: !!document.getElementById('setting-notes-interaction-only')?.checked,
             notes_format: document.getElementById('setting-notes-format')?.value,
             notes_prompt: document.getElementById('setting-notes-prompt')?.value,
-            notes_context_messages: parseInt(document.getElementById('setting-notes-context')?.value) || 10,
+            notes_context_messages: parseNumericWithDefault(document.getElementById('setting-notes-context')?.value, 10),
             notes_smart_enabled: !!document.getElementById('setting-notes-smart')?.checked,
-            notes_smart_max_ai_notes: parseInt(document.getElementById('setting-notes-max-ai')?.value) || 18,
+            notes_smart_max_ai_notes: parseNumericWithDefault(document.getElementById('setting-notes-max-ai')?.value, 18),
             notes_extract_decisions: !!document.getElementById('setting-notes-decisions')?.checked,
             notes_extract_actions: !!document.getElementById('setting-notes-actions')?.checked,
             notes_extract_risks: !!document.getElementById('setting-notes-risks')?.checked,
@@ -1218,7 +1363,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // Transcript
             transcript_merge_enabled: !!document.getElementById('setting-transcript-merge')?.checked,
-            transcript_merge_window_seconds: parseFloat(document.getElementById('setting-transcript-merge-window')?.value) || 4,
+            transcript_merge_window_seconds: parseNumericWithDefault(document.getElementById('setting-transcript-merge-window')?.value, 4, { allowFloat: true }),
             transcript_ai_mode: document.getElementById('setting-transcript-ai-mode')?.value,
             transcript_display_mode: document.getElementById('setting-transcript-display')?.value,
 
@@ -1226,9 +1371,9 @@ document.addEventListener('DOMContentLoaded', () => {
             mic_device: getSelectedMicDeviceForCompareAndSave(),
             loopback_device: getSelectedLoopbackDeviceForCompareAndSave(),
             speech_vad_enabled: !!document.getElementById('setting-vad-enabled')?.checked,
-            speech_vad_threshold: parseFloat(document.getElementById('setting-vad-threshold')?.value) || 0.5,
+            speech_vad_threshold: parseNumericWithDefault(document.getElementById('setting-vad-threshold')?.value, 0.5, { allowFloat: true }),
             speech_denoise_enabled: !!document.getElementById('setting-denoise-enabled')?.checked,
-            speech_denoise_strength: parseFloat(document.getElementById('setting-denoise-strength')?.value) || 0.8,
+            speech_denoise_strength: parseNumericWithDefault(document.getElementById('setting-denoise-strength')?.value, 0.8, { allowFloat: true }),
             whisper_vad_filter: !!document.getElementById('setting-whisper-vad')?.checked,
             whisper_model_size: document.getElementById('setting-whisper-model-size')?.value,
             whisper_device: document.getElementById('setting-whisper-device')?.value,
@@ -1468,6 +1613,9 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
+    notesSearchInput?.addEventListener('input', () => renderNotes());
+    notesSortSelect?.addEventListener('change', () => renderNotes());
+
     // ============================================
     // MANUAL INPUT
     // ============================================
@@ -1515,6 +1663,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     notesExportBtn?.addEventListener('click', exportNotes);
     document.getElementById('export-all-notes-btn')?.addEventListener('click', exportNotes);
+    notesRefreshFullBtn?.addEventListener('click', () => notesRefreshBtn?.click());
+    notesClearFullBtn?.addEventListener('click', () => notesClearBtn?.click());
     document.getElementById('response-refresh-btn')?.addEventListener('click', refreshResponsesNow);
     document.getElementById('response-clear-btn')?.addEventListener('click', clearResponsesNow);
     document.getElementById('responses-refresh-full-btn')?.addEventListener('click', refreshResponsesNow);
@@ -1557,40 +1707,40 @@ document.addEventListener('DOMContentLoaded', () => {
             notify('warning', 'No notes to export');
             return;
         }
-        
+
         let markdown = `# Session Notes\n\n`;
         markdown += `**Session:** ${currentSessionId || 'Unknown'}\n`;
         markdown += `**Date:** ${new Date().toLocaleString()}\n\n`;
         markdown += `---\n\n`;
-        
+
         const pinnedNotes = allNotes.filter(n => n.pinned);
         const regularNotes = allNotes.filter(n => !n.pinned && !n.completed);
         const completedNotes = allNotes.filter(n => n.completed);
-        
+
         if (pinnedNotes.length > 0) {
-            markdown += `## 📌 Pinned\n\n`;
+            markdown += `## Pinned\n\n`;
             pinnedNotes.forEach(n => {
                 markdown += `- ${n.content}\n`;
             });
             markdown += `\n`;
         }
-        
+
         if (regularNotes.length > 0) {
             markdown += `## Notes\n\n`;
             regularNotes.forEach(n => {
-                const prefix = n.source === 'ai' ? '🤖 ' : '';
+                const prefix = n.source === 'ai' ? '[AI] ' : '';
                 markdown += `- ${prefix}${n.content}\n`;
             });
             markdown += `\n`;
         }
-        
+
         if (completedNotes.length > 0) {
-            markdown += `## ✓ Completed\n\n`;
+            markdown += `## Completed\n\n`;
             completedNotes.forEach(n => {
                 markdown += `- ~~${n.content}~~\n`;
             });
         }
-        
+
         const blob = new Blob([markdown], { type: 'text/markdown' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -1598,7 +1748,7 @@ document.addEventListener('DOMContentLoaded', () => {
         a.download = `notes-${currentSessionId || 'session'}.md`;
         a.click();
         URL.revokeObjectURL(url);
-        
+
         notify('success', 'Notes exported');
     }
 
@@ -1732,13 +1882,22 @@ document.addEventListener('DOMContentLoaded', () => {
             });
         }
     }
+
+    function parseNumericWithDefault(rawValue, fallback, { allowFloat = false } = {}) {
+        const n = allowFloat ? Number.parseFloat(rawValue) : Number.parseInt(rawValue, 10);
+        return Number.isFinite(n) ? n : fallback;
+    }
+
+    function contextWindowLabel(v) {
+        return Number.parseInt(v, 10) === 0 ? 'All' : String(v);
+    }
     
     setupRangeSlider('setting-ai-interval', 'ai-interval-value', 's');
-    setupRangeSlider('setting-response-context', 'response-context-value');
+    setupRangeSlider('setting-response-context', 'response-context-value', '', contextWindowLabel);
     setupRangeSlider('setting-notes-interval', 'notes-interval-value', 's');
-    setupRangeSlider('setting-notes-context', 'notes-context-value');
+    setupRangeSlider('setting-notes-context', 'notes-context-value', '', contextWindowLabel);
     setupRangeSlider('setting-fact-check-interval', 'fact-check-interval-value', 's');
-    setupRangeSlider('setting-fact-check-context', 'fact-check-context-value');
+    setupRangeSlider('setting-fact-check-context', 'fact-check-context-value', '', contextWindowLabel);
     setupRangeSlider('setting-transcript-merge-window', 'transcript-merge-window-value', 's');
     setupRangeSlider('setting-vad-threshold', 'vad-threshold-value', '', v => parseFloat(v).toFixed(2));
     setupRangeSlider('setting-denoise-strength', 'denoise-strength-value');
@@ -1988,23 +2147,23 @@ document.addEventListener('DOMContentLoaded', () => {
             if (autoRespondEl) autoRespondEl.checked = !!cfg.auto_respond;
             if (webSearchEl) webSearchEl.checked = !!cfg.web_search_enabled;
             if (responseContextEl) {
-                responseContextEl.value = cfg.response_context_messages || 14;
-                document.getElementById('response-context-value')?.textContent && (document.getElementById('response-context-value').textContent = String(responseContextEl.value));
+                responseContextEl.value = parseNumericWithDefault(cfg.response_context_messages, 14);
+                document.getElementById('response-context-value')?.textContent && (document.getElementById('response-context-value').textContent = contextWindowLabel(responseContextEl.value));
             }
             if (aiIntervalEl) {
-                aiIntervalEl.value = cfg.ai_min_interval_seconds || 8;
+                aiIntervalEl.value = parseNumericWithDefault(cfg.ai_min_interval_seconds, 8, { allowFloat: true });
                 document.getElementById('ai-interval-value')?.textContent && (document.getElementById('ai-interval-value').textContent = aiIntervalEl.value + 's');
             }
             if (factCheckEnabledEl) factCheckEnabledEl.checked = cfg.fact_check_enabled !== false;
             if (factCheckLiveEl) factCheckLiveEl.checked = cfg.fact_check_live_on_message !== false;
             if (factCheckInteractionOnlyEl) factCheckInteractionOnlyEl.checked = cfg.fact_check_on_interaction_only === true;
             if (factCheckIntervalEl) {
-                factCheckIntervalEl.value = cfg.fact_check_interval_seconds || 25;
+                factCheckIntervalEl.value = parseNumericWithDefault(cfg.fact_check_interval_seconds, 25);
                 document.getElementById('fact-check-interval-value')?.textContent && (document.getElementById('fact-check-interval-value').textContent = factCheckIntervalEl.value + 's');
             }
             if (factCheckContextEl) {
-                factCheckContextEl.value = cfg.fact_check_context_messages || 18;
-                document.getElementById('fact-check-context-value')?.textContent && (document.getElementById('fact-check-context-value').textContent = String(factCheckContextEl.value));
+                factCheckContextEl.value = parseNumericWithDefault(cfg.fact_check_context_messages, 18);
+                document.getElementById('fact-check-context-value')?.textContent && (document.getElementById('fact-check-context-value').textContent = contextWindowLabel(factCheckContextEl.value));
             }
             if (factCheckPromptEl) factCheckPromptEl.value = cfg.fact_check_prompt || '';
 
@@ -2024,19 +2183,19 @@ document.addEventListener('DOMContentLoaded', () => {
             
             if (notesEnabledEl) notesEnabledEl.checked = cfg.notes_enabled !== false;
             if (notesIntervalEl) {
-                notesIntervalEl.value = cfg.notes_interval_seconds || 30;
+                notesIntervalEl.value = parseNumericWithDefault(cfg.notes_interval_seconds, 30);
                 document.getElementById('notes-interval-value')?.textContent && (document.getElementById('notes-interval-value').textContent = notesIntervalEl.value + 's');
             }
             if (notesInteractionOnlyEl) notesInteractionOnlyEl.checked = cfg.notes_on_interaction_only === true;
             if (notesFormatEl) notesFormatEl.value = cfg.notes_format || 'bullets';
             if (notesPromptEl) notesPromptEl.value = cfg.notes_prompt || '';
             if (notesContextEl) {
-                notesContextEl.value = cfg.notes_context_messages || 10;
-                document.getElementById('notes-context-value')?.textContent && (document.getElementById('notes-context-value').textContent = notesContextEl.value);
+                notesContextEl.value = parseNumericWithDefault(cfg.notes_context_messages, 10);
+                document.getElementById('notes-context-value')?.textContent && (document.getElementById('notes-context-value').textContent = contextWindowLabel(notesContextEl.value));
             }
             if (notesSmartEl) notesSmartEl.checked = cfg.notes_smart_enabled !== false;
             if (notesMaxAiEl) {
-                notesMaxAiEl.value = cfg.notes_smart_max_ai_notes || 18;
+                notesMaxAiEl.value = parseNumericWithDefault(cfg.notes_smart_max_ai_notes, 18);
                 document.getElementById('notes-max-ai-value')?.textContent && (document.getElementById('notes-max-ai-value').textContent = notesMaxAiEl.value);
             }
             if (notesDecisionsEl) notesDecisionsEl.checked = cfg.notes_extract_decisions !== false;
@@ -2098,13 +2257,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 whisperModelSizeEl.value = desired;
             }
             if (whisperDeviceEl) {
-                const d = String(cfg.whisper_device || 'cpu').trim().toLowerCase();
-                whisperDeviceEl.value = (d === 'cuda' || d === 'gpu') ? 'cuda' : 'cpu';
+                whisperDeviceEl.value = normalizeWhisperDeviceValue(cfg.whisper_device);
             }
             if (transcriptionProfileEl) {
-                const p = String(cfg.transcription_profile || 'auto').trim().toLowerCase();
-                const allowed = new Set(['auto', 'manual', 'cpu_realtime', 'cpu_accuracy', 'gpu_realtime', 'gpu_balanced', 'gpu_quality']);
-                transcriptionProfileEl.value = allowed.has(p) ? p : 'auto';
+                syncTranscriptionProfileOptions(cfg.transcription_profile || 'auto');
             }
             if (speakerDiarizationEl) speakerDiarizationEl.checked = !!cfg.speaker_diarization_enabled;
             if (whisperVadEl) whisperVadEl.checked = cfg.whisper_vad_filter !== false;
@@ -2177,6 +2333,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('setting-transcript-display')?.addEventListener('change', (e) => {
         setTranscriptDisplayMode(String(e?.target?.value || 'raw'));
+    });
+
+    document.getElementById('setting-whisper-device')?.addEventListener('change', () => {
+        syncTranscriptionProfileOptions();
     });
 
     [
@@ -2427,14 +2587,66 @@ document.addEventListener('DOMContentLoaded', () => {
     const historyList = document.getElementById('history-list');
     const historyContent = document.getElementById('history-content');
     const historySearch = document.getElementById('history-search');
+    const historyCountEl = document.getElementById('history-count');
+    const historyRefreshBtn = document.getElementById('history-refresh-btn');
+    const historyClearBtn = document.getElementById('history-clear-btn');
     let allSessions = [];
+    let activeHistorySessionId = '';
+
+    function renderHistoryEmptyState(message = 'Select a session from the list to view transcript, notes, responses, and fact checks') {
+        if (!historyContent) return;
+        historyContent.innerHTML = `<div class="history-empty"><i class="fa-solid fa-clock-rotate-left"></i><p>${message}</p></div>`;
+    }
+
+    function formatHistoryDateTime(rawDate) {
+        if (!rawDate) return 'Unknown date';
+        const d = new Date(rawDate);
+        if (Number.isNaN(d.getTime())) return 'Unknown date';
+        return d.toLocaleString(undefined, {
+            year: 'numeric',
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+        });
+    }
+
+    function createHistoryPill(text) {
+        const pill = document.createElement('span');
+        pill.className = 'history-pill';
+        pill.textContent = text;
+        return pill;
+    }
+
+    function filterHistorySessions(filter = '') {
+        const q = String(filter || '').trim().toLowerCase();
+        const sorted = [...allSessions].sort((a, b) => {
+            const ta = new Date(a?.started_at || 0).getTime();
+            const tb = new Date(b?.started_at || 0).getTime();
+            return tb - ta;
+        });
+        if (!q) return sorted;
+        return sorted.filter((s) => {
+            const title = String(s?.title || '').toLowerCase();
+            const started = String(s?.started_at || '').toLowerCase();
+            const metaBlob = `${s?.message_count || 0} ${s?.note_count || 0} ${s?.response_count || 0} ${s?.fact_check_count || 0}`;
+            return title.includes(q) || started.includes(q) || metaBlob.includes(q);
+        });
+    }
 
     async function loadHistory() {
         try {
             const res = await fetch('/api/sessions');
             const data = await res.json();
             allSessions = data.sessions || [];
-            renderHistoryList();
+            const hasActive = !!activeHistorySessionId && allSessions.some(s => s.id === activeHistorySessionId);
+            if (!hasActive) {
+                activeHistorySessionId = '';
+                renderHistoryList(historySearch?.value || '');
+                if (allSessions.length === 0) renderHistoryEmptyState();
+                return;
+            }
+            await loadSessionDetail(activeHistorySessionId);
         } catch (e) {
             console.error('Failed to load history', e);
         }
@@ -2444,9 +2656,10 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!historyList) return;
         
         historyList.innerHTML = '';
-        const filtered = filter 
-            ? allSessions.filter(s => s.title.toLowerCase().includes(filter.toLowerCase()))
-            : allSessions;
+        const filtered = filterHistorySessions(filter);
+        if (historyCountEl) {
+            historyCountEl.textContent = `${filtered.length} / ${allSessions.length} sessions`;
+        }
         
         if (filtered.length === 0) {
             historyList.innerHTML = '<div class="empty-state"><p>No sessions found</p></div>';
@@ -2458,17 +2671,41 @@ document.addEventListener('DOMContentLoaded', () => {
             const item = document.createElement('div');
             item.className = 'history-item';
             item.dataset.sessionId = session.id;
+            if (session.id === activeHistorySessionId) item.classList.add('active');
+
+            const top = document.createElement('div');
+            top.className = 'history-item-top';
             
             const title = document.createElement('div');
             title.className = 'history-item-title';
-            title.textContent = session.title;
+            title.textContent = session.title || 'Untitled Session';
+
+            const deleteBtn = document.createElement('button');
+            deleteBtn.className = 'history-item-delete';
+            deleteBtn.type = 'button';
+            deleteBtn.title = 'Delete session';
+            deleteBtn.innerHTML = '<i class="fa-solid fa-trash"></i>';
+            deleteBtn.addEventListener('click', async (ev) => {
+                ev.preventDefault();
+                ev.stopPropagation();
+                await deleteHistorySession(session.id);
+            });
+            top.appendChild(title);
+            top.appendChild(deleteBtn);
+
+            const subtitle = document.createElement('div');
+            subtitle.className = 'history-item-subtitle';
+            subtitle.textContent = formatHistoryDateTime(session.started_at);
             
             const meta = document.createElement('div');
             meta.className = 'history-item-meta';
-            const date = new Date(session.started_at);
-            meta.innerHTML = `<span>${date.toLocaleDateString()}</span><span>${session.message_count} messages</span><span>${session.note_count} notes</span><span>${session.response_count || 0} responses</span><span>${session.fact_check_count || 0} checks</span>`;
+            meta.appendChild(createHistoryPill(`${session.message_count || 0} msgs`));
+            meta.appendChild(createHistoryPill(`${session.note_count || 0} notes`));
+            meta.appendChild(createHistoryPill(`${session.response_count || 0} replies`));
+            meta.appendChild(createHistoryPill(`${session.fact_check_count || 0} checks`));
             
-            item.appendChild(title);
+            item.appendChild(top);
+            item.appendChild(subtitle);
             item.appendChild(meta);
             
             item.addEventListener('click', () => loadSessionDetail(session.id));
@@ -2483,16 +2720,68 @@ document.addEventListener('DOMContentLoaded', () => {
             const res = await fetch(`/api/sessions/${sessionId}`);
             const data = await res.json();
             
-            if (data.session) {
+            if (res.ok && data.session) {
+                activeHistorySessionId = sessionId;
                 renderSessionDetail(data.session);
-                
-                // Highlight active item
-                document.querySelectorAll('.history-item').forEach(el => {
-                    el.classList.toggle('active', el.dataset.sessionId === sessionId);
-                });
+                renderHistoryList(historySearch?.value || '');
+            } else {
+                notify('error', data?.message || 'Failed to load session', { durationMs: 3200 });
             }
         } catch (e) {
             console.error('Failed to load session', e);
+            notify('error', `Failed to load session: ${e?.message || e}`, { durationMs: 3200 });
+        }
+    }
+
+    async function deleteHistorySession(sessionId) {
+        const target = allSessions.find(s => s.id === sessionId);
+        const targetName = target?.title || sessionId;
+        if (!confirm(`Delete session "${targetName}"? This cannot be undone.`)) return false;
+
+        try {
+            const res = await fetch(`/api/sessions/${sessionId}`, { method: 'DELETE' });
+            const data = await res.json();
+            if (!res.ok || data.status !== 'ok') {
+                throw new Error(data?.message || `HTTP ${res.status}`);
+            }
+
+            allSessions = allSessions.filter(s => s.id !== sessionId);
+            const filtered = filterHistorySessions(historySearch?.value || '');
+            if (activeHistorySessionId === sessionId) {
+                activeHistorySessionId = '';
+                if (filtered.length > 0) {
+                    await loadSessionDetail(filtered[0].id);
+                } else {
+                    renderHistoryEmptyState();
+                }
+            } else {
+                renderHistoryList(historySearch?.value || '');
+            }
+            notify('success', 'Session deleted', { durationMs: 2000 });
+            return true;
+        } catch (e) {
+            notify('error', `Failed to delete session: ${e?.message || e}`, { durationMs: 3500 });
+            return false;
+        }
+    }
+
+    async function clearAllHistorySessions() {
+        if (!confirm('Delete ALL session history? This cannot be undone.')) return false;
+        try {
+            const res = await fetch('/api/sessions', { method: 'DELETE' });
+            const data = await res.json();
+            if (!res.ok || data.status !== 'ok') {
+                throw new Error(data?.message || `HTTP ${res.status}`);
+            }
+            allSessions = [];
+            activeHistorySessionId = '';
+            renderHistoryList(historySearch?.value || '');
+            renderHistoryEmptyState();
+            notify('success', `Cleared ${data.deleted || 0} session(s).`, { durationMs: 3000 });
+            return true;
+        } catch (e) {
+            notify('error', `Error clearing history: ${e?.message || e}`, { durationMs: 4200 });
+            return false;
         }
     }
 
@@ -2583,7 +2872,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const meta = document.createElement('p');
         meta.className = 'text-muted';
-        meta.textContent = session.started_at ? new Date(session.started_at).toLocaleString() : '';
+        meta.textContent = formatHistoryDateTime(session.started_at);
+
+        const stats = document.createElement('div');
+        stats.className = 'history-stats';
+        stats.appendChild(createHistoryPill(`${session.transcript?.length || 0} messages`));
+        stats.appendChild(createHistoryPill(`${session.notes?.length || 0} notes`));
+        stats.appendChild(createHistoryPill(`${session.responses?.length || 0} responses`));
+        stats.appendChild(createHistoryPill(`${session.fact_checks?.length || 0} fact checks`));
 
         const actions = document.createElement('div');
         actions.className = 'history-detail-actions';
@@ -2594,18 +2890,31 @@ document.addEventListener('DOMContentLoaded', () => {
         loadBtn.innerHTML = '<i class="fa-solid fa-arrow-right-to-bracket"></i> Load into Live';
         loadBtn.addEventListener('click', () => loadSessionIntoLive(session));
 
+        const deleteBtn = document.createElement('button');
+        deleteBtn.className = 'secondary-btn';
+        deleteBtn.type = 'button';
+        deleteBtn.innerHTML = '<i class="fa-solid fa-trash-can"></i> Delete Session';
+        deleteBtn.addEventListener('click', async () => {
+            await deleteHistorySession(session.id);
+        });
+
         actions.appendChild(loadBtn);
+        actions.appendChild(deleteBtn);
 
         header.appendChild(title);
         header.appendChild(meta);
+        header.appendChild(stats);
         header.appendChild(actions);
         historyContent.appendChild(header);
         
+        let hasAnySection = false;
+
         // Transcript
         if (session.transcript && session.transcript.length > 0) {
+            hasAnySection = true;
             const transcriptSection = document.createElement('div');
             transcriptSection.className = 'history-section';
-            transcriptSection.innerHTML = '<h4>Transcript</h4>';
+            transcriptSection.innerHTML = `<h4>Transcript (${session.transcript.length})</h4>`;
             
             const chatDiv = document.createElement('div');
             chatDiv.className = 'chat-container';
@@ -2654,9 +2963,10 @@ document.addEventListener('DOMContentLoaded', () => {
         
         // Notes
         if (session.notes && session.notes.length > 0) {
+            hasAnySection = true;
             const notesSection = document.createElement('div');
             notesSection.className = 'history-section';
-            notesSection.innerHTML = '<h4>Notes</h4>';
+            notesSection.innerHTML = `<h4>Notes (${session.notes.length})</h4>`;
             
             const notesList = document.createElement('ul');
             notesList.className = 'notes-list';
@@ -2674,9 +2984,10 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         if (session.responses && session.responses.length > 0) {
+            hasAnySection = true;
             const responseSection = document.createElement('div');
             responseSection.className = 'history-section';
-            responseSection.innerHTML = '<h4>Response Guidance</h4>';
+            responseSection.innerHTML = `<h4>Response Guidance (${session.responses.length})</h4>`;
 
             const list = document.createElement('div');
             list.className = 'analysis-list';
@@ -2695,9 +3006,10 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         if (session.fact_checks && session.fact_checks.length > 0) {
+            hasAnySection = true;
             const factSection = document.createElement('div');
             factSection.className = 'history-section';
-            factSection.innerHTML = '<h4>Fact Checks</h4>';
+            factSection.innerHTML = `<h4>Fact Checks (${session.fact_checks.length})</h4>`;
 
             const list = document.createElement('div');
             list.className = 'analysis-list';
@@ -2705,33 +3017,22 @@ document.addEventListener('DOMContentLoaded', () => {
             factSection.appendChild(list);
             historyContent.appendChild(factSection);
         }
+
+        if (!hasAnySection) {
+            const empty = document.createElement('div');
+            empty.className = 'history-empty';
+            empty.innerHTML = '<i class="fa-regular fa-folder-open"></i><p>This session has no transcript, notes, responses, or fact checks yet.</p>';
+            historyContent.appendChild(empty);
+        }
     }
 
     historySearch?.addEventListener('input', (e) => {
-        renderHistoryList(e.target.value);
+        renderHistoryList(e?.target?.value || '');
     });
 
-    // Clear history button
-    document.getElementById('clear-history-btn')?.addEventListener('click', async () => {
-        if (confirm('Delete ALL session history? This cannot be undone.')) {
-            try {
-                const res = await fetch('/api/sessions', { method: 'DELETE' });
-                const data = await res.json();
-                if (data.status === 'ok') {
-                    notify('success', `Cleared ${data.deleted} session(s).`, { durationMs: 3000 });
-                    allSessions = [];
-                    renderHistoryList();
-                    if (historyContent) {
-                        historyContent.innerHTML = '<div class="history-empty"><i class="fa-solid fa-clock-rotate-left"></i><p>Select a session from the list to view transcript, notes, responses, and fact checks</p></div>';
-                    }
-                } else {
-                    notify('error', data.message || 'Failed to clear history');
-                }
-            } catch (e) {
-                notify('error', `Error clearing history: ${e.message}`);
-            }
-        }
-    });
+    historyRefreshBtn?.addEventListener('click', loadHistory);
+    historyClearBtn?.addEventListener('click', clearAllHistorySessions);
+    document.getElementById('clear-history-btn')?.addEventListener('click', clearAllHistorySessions);
 
     // Export all data button
     document.getElementById('export-data-btn')?.addEventListener('click', async () => {

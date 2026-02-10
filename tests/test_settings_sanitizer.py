@@ -64,14 +64,27 @@ class TestSettingsSanitizer(unittest.TestCase):
         self.assertEqual(cfg["transcription_chunk_duration_seconds"], 3.2)
         self.assertEqual(cfg["transcription_chunk_overlap_seconds"], 0.16)
 
-    def test_transcription_profile_choice_is_sanitized(self):
+    def test_legacy_fact_check_defaults_are_migrated_to_faster_values(self):
         cfg = main._sanitize_config_values(
             {
-                "transcription_profile": "gpu_balanced",
+                "fact_check_interval_seconds": 25,
+                "fact_check_debounce_seconds": 2.5,
+                "fact_check_trigger_min_interval_seconds": 10.0,
             },
             base=main.DEFAULT_CONFIG,
         )
-        self.assertEqual(cfg["transcription_profile"], "gpu_balanced")
+        self.assertEqual(cfg["fact_check_interval_seconds"], 15)
+        self.assertEqual(cfg["fact_check_debounce_seconds"], 1.0)
+        self.assertEqual(cfg["fact_check_trigger_min_interval_seconds"], 4.0)
+
+    def test_transcription_profile_choice_is_sanitized(self):
+        cfg = main._sanitize_config_values(
+            {
+                "transcription_profile": "gpu_accuracy",
+            },
+            base=main.DEFAULT_CONFIG,
+        )
+        self.assertEqual(cfg["transcription_profile"], "gpu_accuracy")
 
         cfg_bad = main._sanitize_config_values(
             {
@@ -80,6 +93,23 @@ class TestSettingsSanitizer(unittest.TestCase):
             base=main.DEFAULT_CONFIG,
         )
         self.assertEqual(cfg_bad["transcription_profile"], "auto")
+
+    def test_legacy_gpu_profile_values_are_migrated(self):
+        cfg_bal = main._sanitize_config_values(
+            {
+                "transcription_profile": "gpu_balanced",
+            },
+            base=main.DEFAULT_CONFIG,
+        )
+        self.assertEqual(cfg_bal["transcription_profile"], "gpu_accuracy")
+
+        cfg_qual = main._sanitize_config_values(
+            {
+                "transcription_profile": "gpu_quality",
+            },
+            base=main.DEFAULT_CONFIG,
+        )
+        self.assertEqual(cfg_qual["transcription_profile"], "gpu_accuracy")
 
     def test_api_routes_are_sanitized(self):
         cfg = main._sanitize_config_values(
@@ -158,6 +188,56 @@ class TestSettingsSanitizer(unittest.TestCase):
     def test_model_id_match_handles_models_prefix(self):
         self.assertTrue(main._model_id_matches("gemini-2.5-flash", "models/gemini-2.5-flash"))
         self.assertTrue(main._model_id_matches("models/gemini-2.5-flash", "gemini-2.5-flash"))
+
+    def test_context_windows_allow_zero_for_all_messages(self):
+        cfg = main._sanitize_config_values(
+            {
+                "response_context_messages": 0,
+                "fact_check_context_messages": 0,
+                "notes_context_messages": 0,
+            },
+            base=main.DEFAULT_CONFIG,
+        )
+        self.assertEqual(cfg["response_context_messages"], 0)
+        self.assertEqual(cfg["fact_check_context_messages"], 0)
+        self.assertEqual(cfg["notes_context_messages"], 0)
+
+    def test_context_windows_clamp_high_values(self):
+        cfg = main._sanitize_config_values(
+            {
+                "response_context_messages": 99999,
+                "fact_check_context_messages": 99999,
+                "notes_context_messages": 99999,
+            },
+            base=main.DEFAULT_CONFIG,
+        )
+        self.assertEqual(cfg["response_context_messages"], 5000)
+        self.assertEqual(cfg["fact_check_context_messages"], 5000)
+        self.assertEqual(cfg["notes_context_messages"], 5000)
+
+    def test_context_summary_settings_are_sanitized(self):
+        cfg = main._sanitize_config_values(
+            {
+                "context_local_summary_enabled": "false",
+                "context_local_summary_method": "heuristic",
+                "response_context_max_chars": "999999",
+                "fact_check_context_max_chars": "1000",
+            },
+            base=main.DEFAULT_CONFIG,
+        )
+        self.assertFalse(cfg["context_local_summary_enabled"])
+        self.assertEqual(cfg["context_local_summary_method"], "heuristic")
+        self.assertEqual(cfg["response_context_max_chars"], 250000)
+        self.assertEqual(cfg["fact_check_context_max_chars"], 4000)
+
+    def test_context_summary_method_invalid_falls_back_to_default(self):
+        cfg = main._sanitize_config_values(
+            {
+                "context_local_summary_method": "invalid-method",
+            },
+            base=main.DEFAULT_CONFIG,
+        )
+        self.assertEqual(cfg["context_local_summary_method"], main.DEFAULT_CONFIG["context_local_summary_method"])
 
 
 if __name__ == "__main__":

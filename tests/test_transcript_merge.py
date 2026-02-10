@@ -64,6 +64,16 @@ class TestTranscriptMerge(unittest.IsolatedAsyncioTestCase):
             "it will be when everyone plugs in at once and overloads the grid.",
         )
 
+    def test_merge_transcript_text_drops_chopped_stem_before_seam(self):
+        merged = main._merge_transcript_text(
+            "Lifecycle assessments are by.",
+            "biased, though.",
+        )
+        self.assertEqual(
+            merged,
+            "Lifecycle assessments are biased, though.",
+        )
+
     async def test_strong_continuation_merges_beyond_base_window(self):
         main.config.update(
             {

@@ -5,6 +5,7 @@ import logging
 from dataclasses import dataclass
 import os
 import ctypes
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -157,6 +158,7 @@ class TranscriptionEngine:
         chunk_overlap_s: float = 0.24,
         beam_size: int | None = None,
         condition_on_previous_text: bool = False,
+        runtime_profile: str | None = None,
     ):
         self._lock = threading.Lock()
         self.model_size = str(model_size or "tiny").strip() or "tiny"
@@ -178,7 +180,11 @@ class TranscriptionEngine:
                 if callable(get_count) and int(get_count() or 0) <= 0:
                     raise RuntimeError("No CUDA devices detected")
             except Exception as e:
-                logger.warning(f"CUDA not available ({e}); using CPU for transcription.")
+                logger.warning(
+                    "Transcription device fallback: requested_device=%s reason=%s fallback_device=cpu",
+                    "cuda",
+                    e,
+                )
                 device = "cpu"
 
         if compute_type is None:
@@ -188,6 +194,7 @@ class TranscriptionEngine:
         self.device = device
         self.compute_type = compute_type
         self._load_model(device=self.device, compute_type=self.compute_type)
+        self.runtime_profile = str(runtime_profile or "manual").strip().lower() or "manual"
         self.sample_rate = int(sample_rate)
         self.preprocess = preprocess or SpeechPreprocessConfig()
         self.whisper_vad_filter = bool(whisper_vad_filter)
@@ -205,7 +212,22 @@ class TranscriptionEngine:
         self.vad_rescue_min_peak = 0.020
         self.language_lock_min_probability = 0.80
         self.detected_language: str | None = None
+        self._last_transcribe_used_whisper_vad = bool(self.whisper_vad_filter)
         logger.info("Whisper model loaded.")
+        logger.info(
+            "Transcription engine config: profile=%s model=%s device=%s compute=%s beam=%d chunk_s=%.2f overlap_s=%.2f cond_prev=%s preprocess=%s preprocess_vad=%s whisper_vad=%s",
+            self.runtime_profile,
+            self.model_size,
+            self.device,
+            self.compute_type,
+            int(self.beam_size),
+            float(self.chunk_duration_s),
+            float(self.chunk_overlap_s),
+            bool(self.condition_on_previous_text),
+            bool(getattr(self.preprocess, "enabled", False)),
+            bool(getattr(self.preprocess, "vad_enabled", False)),
+            bool(self.whisper_vad_filter),
+        )
 
     def _load_model(self, *, device: str, compute_type: str) -> None:
         logger.info(f"Loading Whisper model: {self.model_size} on {device} ({compute_type})...")
@@ -215,7 +237,12 @@ class TranscriptionEngine:
             self.compute_type = compute_type
         except Exception as e:
             if device != "cpu":
-                logger.warning(f"Failed to load Whisper on {device}; falling back to CPU: {e}")
+                logger.warning(
+                    "Failed to load Whisper model on %s (%s); falling back to cpu/int8: %s",
+                    device,
+                    compute_type,
+                    e,
+                )
                 self.model = WhisperModel(self.model_size, device="cpu", compute_type="int8")
                 self.device = "cpu"
                 self.compute_type = "int8"
@@ -232,6 +259,73 @@ class TranscriptionEngine:
         peak = float(np.max(np.abs(arr)))
         rms = float(np.sqrt(np.mean(arr * arr)))
         return rms, peak
+
+    @staticmethod
+    def _coerce_finite_float(value: object) -> float | None:
+        try:
+            if value is None:
+                return None
+            out = float(value)
+            if not np.isfinite(out):
+                return None
+            return out
+        except Exception:
+            return None
+
+    @staticmethod
+    def _format_metric(value: float | None, digits: int = 3) -> str:
+        if value is None:
+            return "na"
+        return f"{float(value):.{int(digits)}f}"
+
+    @classmethod
+    def _segment_metrics(cls, segments: list[object]) -> dict[str, float | int | None]:
+        seg_count = int(len(segments))
+        non_empty = 0
+        token_count = 0
+        seg_total_s = 0.0
+        avg_logprobs: list[float] = []
+        no_speech_probs: list[float] = []
+        compression_ratios: list[float] = []
+
+        for seg in segments:
+            text = str(getattr(seg, "text", "") or "").strip()
+            if text:
+                non_empty += 1
+
+            toks = getattr(seg, "tokens", None)
+            if isinstance(toks, (list, tuple)):
+                token_count += len(toks)
+
+            start = cls._coerce_finite_float(getattr(seg, "start", None))
+            end = cls._coerce_finite_float(getattr(seg, "end", None))
+            if start is not None and end is not None and end >= start:
+                seg_total_s += (end - start)
+
+            v = cls._coerce_finite_float(getattr(seg, "avg_logprob", None))
+            if v is not None:
+                avg_logprobs.append(v)
+            v = cls._coerce_finite_float(getattr(seg, "no_speech_prob", None))
+            if v is not None:
+                no_speech_probs.append(v)
+            v = cls._coerce_finite_float(getattr(seg, "compression_ratio", None))
+            if v is not None:
+                compression_ratios.append(v)
+
+        def _mean(vals: list[float]) -> float | None:
+            if not vals:
+                return None
+            return float(sum(vals) / len(vals))
+
+        return {
+            "segments": seg_count,
+            "non_empty_segments": int(non_empty),
+            "tokens": int(token_count),
+            "segment_audio_s": float(seg_total_s),
+            "avg_logprob": _mean(avg_logprobs),
+            "no_speech_prob": _mean(no_speech_probs),
+            "compression_ratio": _mean(compression_ratios),
+        }
 
     @staticmethod
     def _normalize_transcript_text(text: str) -> str:
@@ -284,6 +378,44 @@ class TranscriptionEngine:
             t = re.sub(
                 r"\b([a-z][a-z0-9']{2,5})\b[\s,.;:!?-]+([a-z][a-z0-9']{2,})\b",
                 _collapse_prefix_stutter,
+                t,
+                flags=re.I,
+            )
+
+        # Drop chopped stem carryover before sentence seams.
+        # Example: "are by. biased" -> "are biased"
+        def _drop_chopped_stem_before_seam(m):
+            prefix = m.group(1)
+            stem = m.group(2)
+            full = m.group(4)
+            stem_cf = stem.casefold()
+            full_cf = full.casefold()
+            connector_like = {
+                "at",
+                "by",
+                "for",
+                "from",
+                "in",
+                "of",
+                "on",
+                "with",
+            }
+            if full_cf == stem_cf:
+                return m.group(0)
+            if len(stem_cf) < 2 or len(stem_cf) > 4:
+                return m.group(0)
+            prefix_match = full_cf.startswith(stem_cf) and (len(full_cf) - len(stem_cf) <= 8)
+            connector_match = stem_cf in connector_like and full_cf[:1] == stem_cf[:1]
+            if not (prefix_match or connector_match):
+                return m.group(0)
+            return f"{prefix}{full}"
+
+        prev = None
+        while prev != t:
+            prev = t
+            t = re.sub(
+                r"\b([a-z][a-z0-9']+\s+)([a-z][a-z0-9']{1,3})\b([.?!])\s+([a-z][a-z0-9']{3,})\b",
+                _drop_chopped_stem_before_seam,
                 t,
                 flags=re.I,
             )
@@ -387,6 +519,7 @@ class TranscriptionEngine:
                 use_whisper_vad = False
         else:
             use_whisper_vad = bool(force_whisper_vad)
+        self._last_transcribe_used_whisper_vad = bool(use_whisper_vad)
 
         def _run_transcribe(input_audio: np.ndarray):
             kwargs = {
@@ -438,7 +571,13 @@ class TranscriptionEngine:
                 return _run_transcribe(audio)
             except RuntimeError as e:
                 if self.device == "cuda" and _looks_like_missing_cuda_runtime(e):
-                    logger.warning(f"CUDA runtime libraries are missing ({e}). Falling back to CPU transcription.")
+                    logger.warning(
+                        "Transcription runtime fallback: profile=%s reason=%s from=%s/%s to=cpu/int8",
+                        str(getattr(self, "runtime_profile", "manual") or "manual"),
+                        e,
+                        self.device,
+                        self.compute_type,
+                    )
                     self._load_model(device="cpu", compute_type="int8")
                     return _run_transcribe(audio)
                 raise
@@ -458,8 +597,21 @@ class TranscriptionEngine:
         BUFFER_THRESHOLD = int(self.sample_rate * float(self.chunk_duration_s))
         OVERLAP_SAMPLES = int(self.sample_rate * float(self.chunk_overlap_s))
         last_emitted_text = ""
+        profile = str(getattr(self, "runtime_profile", "manual") or "manual")
+        logger.info(
+            "Transcription stream start: profile=%s model=%s device=%s compute=%s beam=%d chunk_s=%.2f overlap_s=%.2f cond_prev=%s",
+            profile,
+            str(getattr(self, "model_size", "unknown") or "unknown"),
+            str(getattr(self, "device", "unknown") or "unknown"),
+            str(getattr(self, "compute_type", "unknown") or "unknown"),
+            int(getattr(self, "beam_size", 1) or 1),
+            float(getattr(self, "chunk_duration_s", 0.0) or 0.0),
+            float(getattr(self, "chunk_overlap_s", 0.0) or 0.0),
+            bool(getattr(self, "condition_on_previous_text", False)),
+        )
 
         chunks_received = 0
+        windows_processed = 0
         for chunk in audio_generator:
             if chunk is None:
                 continue
@@ -473,12 +625,19 @@ class TranscriptionEngine:
             buffer_samples += int(chunk.size)
             
             if buffer_samples >= BUFFER_THRESHOLD:
+                windows_processed += 1
+                window_started_at = time.perf_counter()
                 buffer = np.concatenate(buffer_parts).astype(np.float32, copy=False)
                 logger.info(f"Transcription: buffer full ({len(buffer)} samples), running whisper...")
+                buffer_s = float(len(buffer) / float(self.sample_rate))
+                buffer_rms, buffer_peak = self._audio_energy(buffer)
+                preprocess_started = time.perf_counter()
                 audio = preprocess_audio(buffer, sample_rate=self.sample_rate, cfg=self.preprocess)
+                preprocess_ms = (time.perf_counter() - preprocess_started) * 1000.0
+                preprocess_s = float(len(audio) / float(self.sample_rate)) if len(audio) else 0.0
                 rescued_from_empty_preprocess = False
                 if len(audio) == 0:
-                    rms, peak = self._audio_energy(buffer)
+                    rms, peak = buffer_rms, buffer_peak
                     should_rescue = (
                         bool(self.preprocess is not None)
                         and bool(getattr(self.preprocess, "enabled", False))
@@ -491,8 +650,20 @@ class TranscriptionEngine:
                             f"(rms={rms:.4f}, peak={peak:.4f})"
                         )
                         audio = buffer
+                        preprocess_s = buffer_s
                         rescued_from_empty_preprocess = True
                     else:
+                        logger.info(
+                            "Transcription telemetry: profile=%s window=%d device=%s compute=%s emitted=0 reason=preprocess-empty buffer_s=%.2f preprocess_s=0.00 preprocess_ms=%.1f rms=%.4f peak=%.4f rescue=0",
+                            profile,
+                            windows_processed,
+                            str(getattr(self, "device", "unknown") or "unknown"),
+                            str(getattr(self, "compute_type", "unknown") or "unknown"),
+                            buffer_s,
+                            preprocess_ms,
+                            rms,
+                            peak,
+                        )
                         logger.info("Transcription: no speech detected in buffer (preprocess removed all audio)")
                         # Keep overlap even when no speech is detected to avoid losing context.
                         if OVERLAP_SAMPLES > 0 and len(buffer) > OVERLAP_SAMPLES:
@@ -505,18 +676,61 @@ class TranscriptionEngine:
                         continue
 
                 # Transcribe the current buffer (with CUDA->CPU fallback if needed).
+                decode_started = time.perf_counter()
                 segments, info = self._transcribe_with_fallback(
                     audio,
                     force_whisper_vad=(True if rescued_from_empty_preprocess else None),
                 )
+                decode_ms = (time.perf_counter() - decode_started) * 1000.0
 
                 segment_texts = [str(getattr(segment, "text", "") or "") for segment in segments]
+                raw_text = " ".join(t.strip() for t in segment_texts if t and t.strip())
+                raw_chars = len(raw_text)
                 normalized = self._merge_segment_texts(segment_texts)
+                normalized_chars = len(normalized)
+                overlap_trimmed_chars = 0
                 if normalized:
                     if normalized and last_emitted_text:
+                        before_trim = normalized
                         normalized = self._trim_leading_overlap(last_emitted_text, normalized)
                         normalized = self._normalize_transcript_text(normalized)
+                        overlap_trimmed_chars = max(0, len(before_trim) - len(normalized))
                     if not normalized:
+                        total_ms = (time.perf_counter() - window_started_at) * 1000.0
+                        whisper_vad_used = bool(getattr(self, "_last_transcribe_used_whisper_vad", self.whisper_vad_filter))
+                        seg_metrics = self._segment_metrics(segments)
+                        input_s = float(len(audio) / float(self.sample_rate)) if len(audio) else 0.0
+                        rtf = (decode_ms / 1000.0) / input_s if input_s > 0 else None
+                        lang = str(getattr(info, "language", "") or "-")
+                        lang_p = self._coerce_finite_float(getattr(info, "language_probability", None))
+                        logger.info(
+                            "Transcription telemetry: profile=%s window=%d device=%s compute=%s emitted=0 reason=overlap-trim-empty buffer_s=%.2f input_s=%.2f preprocess_s=%.2f preprocess_ms=%.1f decode_ms=%.1f total_ms=%.1f rtf=%s beam=%d cond_prev=%s whisper_vad=%s rescue=%d segs=%d segs_non_empty=%d tokens=%d chars_raw=%d chars_out=0 overlap_trim_chars=%d lang=%s lang_p=%s avg_logprob=%s no_speech_prob=%s compression=%s",
+                            profile,
+                            windows_processed,
+                            str(getattr(self, "device", "unknown") or "unknown"),
+                            str(getattr(self, "compute_type", "unknown") or "unknown"),
+                            buffer_s,
+                            input_s,
+                            preprocess_s,
+                            preprocess_ms,
+                            decode_ms,
+                            total_ms,
+                            self._format_metric(rtf, 3),
+                            int(getattr(self, "beam_size", 1) or 1),
+                            bool(getattr(self, "condition_on_previous_text", False)),
+                            whisper_vad_used,
+                            1 if rescued_from_empty_preprocess else 0,
+                            int(seg_metrics.get("segments") or 0),
+                            int(seg_metrics.get("non_empty_segments") or 0),
+                            int(seg_metrics.get("tokens") or 0),
+                            raw_chars,
+                            overlap_trimmed_chars,
+                            lang,
+                            self._format_metric(lang_p, 2),
+                            self._format_metric(self._coerce_finite_float(seg_metrics.get("avg_logprob")), 3),
+                            self._format_metric(self._coerce_finite_float(seg_metrics.get("no_speech_prob")), 3),
+                            self._format_metric(self._coerce_finite_float(seg_metrics.get("compression_ratio")), 3),
+                        )
                         # Nothing new after overlap trimming; continue accumulating stream.
                         if OVERLAP_SAMPLES > 0 and len(buffer) > OVERLAP_SAMPLES:
                             tail = buffer[-OVERLAP_SAMPLES:].copy()
@@ -529,6 +743,43 @@ class TranscriptionEngine:
 
                     logger.info(f"Transcription: got text: {normalized[:80]}...")
                     last_emitted_text = normalized
+                    total_ms = (time.perf_counter() - window_started_at) * 1000.0
+                    whisper_vad_used = bool(getattr(self, "_last_transcribe_used_whisper_vad", self.whisper_vad_filter))
+                    seg_metrics = self._segment_metrics(segments)
+                    input_s = float(len(audio) / float(self.sample_rate)) if len(audio) else 0.0
+                    rtf = (decode_ms / 1000.0) / input_s if input_s > 0 else None
+                    lang = str(getattr(info, "language", "") or "-")
+                    lang_p = self._coerce_finite_float(getattr(info, "language_probability", None))
+                    logger.info(
+                        "Transcription telemetry: profile=%s window=%d device=%s compute=%s emitted=1 buffer_s=%.2f input_s=%.2f preprocess_s=%.2f preprocess_ms=%.1f decode_ms=%.1f total_ms=%.1f rtf=%s beam=%d cond_prev=%s whisper_vad=%s rescue=%d segs=%d segs_non_empty=%d tokens=%d chars_raw=%d chars_out=%d normalized_delta_chars=%d overlap_trim_chars=%d lang=%s lang_p=%s avg_logprob=%s no_speech_prob=%s compression=%s",
+                        profile,
+                        windows_processed,
+                        str(getattr(self, "device", "unknown") or "unknown"),
+                        str(getattr(self, "compute_type", "unknown") or "unknown"),
+                        buffer_s,
+                        input_s,
+                        preprocess_s,
+                        preprocess_ms,
+                        decode_ms,
+                        total_ms,
+                        self._format_metric(rtf, 3),
+                        int(getattr(self, "beam_size", 1) or 1),
+                        bool(getattr(self, "condition_on_previous_text", False)),
+                        whisper_vad_used,
+                        1 if rescued_from_empty_preprocess else 0,
+                        int(seg_metrics.get("segments") or 0),
+                        int(seg_metrics.get("non_empty_segments") or 0),
+                        int(seg_metrics.get("tokens") or 0),
+                        raw_chars,
+                        len(normalized),
+                        max(0, raw_chars - normalized_chars),
+                        overlap_trimmed_chars,
+                        lang,
+                        self._format_metric(lang_p, 2),
+                        self._format_metric(self._coerce_finite_float(seg_metrics.get("avg_logprob")), 3),
+                        self._format_metric(self._coerce_finite_float(seg_metrics.get("no_speech_prob")), 3),
+                        self._format_metric(self._coerce_finite_float(seg_metrics.get("compression_ratio")), 3),
+                    )
                     if return_voiceprint:
                         vp = None
                         try:
@@ -539,6 +790,40 @@ class TranscriptionEngine:
                     else:
                         yield normalized
                 else:
+                    total_ms = (time.perf_counter() - window_started_at) * 1000.0
+                    whisper_vad_used = bool(getattr(self, "_last_transcribe_used_whisper_vad", self.whisper_vad_filter))
+                    seg_metrics = self._segment_metrics(segments)
+                    input_s = float(len(audio) / float(self.sample_rate)) if len(audio) else 0.0
+                    rtf = (decode_ms / 1000.0) / input_s if input_s > 0 else None
+                    lang = str(getattr(info, "language", "") or "-")
+                    lang_p = self._coerce_finite_float(getattr(info, "language_probability", None))
+                    logger.info(
+                        "Transcription telemetry: profile=%s window=%d device=%s compute=%s emitted=0 reason=no-text buffer_s=%.2f input_s=%.2f preprocess_s=%.2f preprocess_ms=%.1f decode_ms=%.1f total_ms=%.1f rtf=%s beam=%d cond_prev=%s whisper_vad=%s rescue=%d segs=%d segs_non_empty=%d tokens=%d chars_raw=%d chars_out=0 lang=%s lang_p=%s avg_logprob=%s no_speech_prob=%s compression=%s",
+                        profile,
+                        windows_processed,
+                        str(getattr(self, "device", "unknown") or "unknown"),
+                        str(getattr(self, "compute_type", "unknown") or "unknown"),
+                        buffer_s,
+                        input_s,
+                        preprocess_s,
+                        preprocess_ms,
+                        decode_ms,
+                        total_ms,
+                        self._format_metric(rtf, 3),
+                        int(getattr(self, "beam_size", 1) or 1),
+                        bool(getattr(self, "condition_on_previous_text", False)),
+                        whisper_vad_used,
+                        1 if rescued_from_empty_preprocess else 0,
+                        int(seg_metrics.get("segments") or 0),
+                        int(seg_metrics.get("non_empty_segments") or 0),
+                        int(seg_metrics.get("tokens") or 0),
+                        raw_chars,
+                        lang,
+                        self._format_metric(lang_p, 2),
+                        self._format_metric(self._coerce_finite_float(seg_metrics.get("avg_logprob")), 3),
+                        self._format_metric(self._coerce_finite_float(seg_metrics.get("no_speech_prob")), 3),
+                        self._format_metric(self._coerce_finite_float(seg_metrics.get("compression_ratio")), 3),
+                    )
                     logger.info("Transcription: no speech detected in buffer (VAD filtered or silence)")
                 
                 # Keep overlap instead of clearing to reduce chopped words.

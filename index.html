@@ -254,14 +254,30 @@
                     <div class="notes-full-panel">
                         <div class="notes-full-header">
                             <h2>All Notes</h2>
-                            <span class="subtitle">Manage AI-generated and manual notes</span>
+                            <span class="subtitle" id="notes-summary-text">Manage AI-generated and manual notes</span>
                         </div>
                         <div class="notes-full-toolbar">
                             <button class="notes-filter-btn active" data-filter="all">All</button>
                             <button class="notes-filter-btn" data-filter="ai">AI Generated</button>
                             <button class="notes-filter-btn" data-filter="manual">Manual</button>
                             <button class="notes-filter-btn" data-filter="pinned">Pinned</button>
+                            <button class="notes-filter-btn" data-filter="completed">Completed</button>
+                            <input type="text" id="notes-search-input" class="history-search notes-search" placeholder="Search notes...">
+                            <select id="notes-sort-select" class="notes-sort-select">
+                                <option value="newest">Newest First</option>
+                                <option value="oldest">Oldest First</option>
+                                <option value="pinned_first">Pinned First</option>
+                                <option value="active_first">Incomplete First</option>
+                            </select>
                             <div style="flex:1"></div>
+                            <button class="action-btn" id="notes-refresh-full-btn">
+                                <i class="fa-solid fa-arrows-rotate"></i>
+                                <span>Refresh</span>
+                            </button>
+                            <button class="action-btn danger" id="notes-clear-full-btn">
+                                <i class="fa-solid fa-trash-can"></i>
+                                <span>Clear</span>
+                            </button>
                             <button class="action-btn" id="export-all-notes-btn">
                                 <i class="fa-solid fa-download"></i>
                                 <span>Export</span>
@@ -346,6 +362,17 @@
                     <div class="history-sidebar">
                         <div class="history-header">
                             <input type="text" class="history-search" placeholder="Search sessions..." id="history-search">
+                            <div class="history-toolbar">
+                                <div class="history-count" id="history-count">0 sessions</div>
+                                <div class="history-toolbar-actions">
+                                    <button class="icon-btn" id="history-refresh-btn" title="Refresh History">
+                                        <i class="fa-solid fa-rotate"></i>
+                                    </button>
+                                    <button class="icon-btn danger" id="history-clear-btn" title="Clear All History">
+                                        <i class="fa-solid fa-trash-can"></i>
+                                    </button>
+                                </div>
+                            </div>
                         </div>
                         <div class="history-list" id="history-list">
                             <!-- History items will be rendered here -->
@@ -499,10 +526,10 @@
                                 <div class="setting-group">
                                     <label>Response Context Window (messages)</label>
                                     <div class="setting-range">
-                                        <input type="range" id="setting-response-context" min="6" max="60" value="14">
+                                        <input type="number" id="setting-response-context" min="0" max="5000" step="1" value="14">
                                         <span class="range-value" id="response-context-value">14</span>
                                     </div>
-                                    <div class="setting-hint">How many recent messages to use for response generation.</div>
+                                    <div class="setting-hint">How many recent messages to use for response generation (0 = all available).</div>
                                 </div>
 
                                 <div class="setting-row">
@@ -574,10 +601,10 @@
                                 <div class="setting-group">
                                     <label>Fact Check Context Window (messages)</label>
                                     <div class="setting-range">
-                                        <input type="range" id="setting-fact-check-context" min="6" max="80" value="18">
+                                        <input type="number" id="setting-fact-check-context" min="0" max="5000" step="1" value="18">
                                         <span class="range-value" id="fact-check-context-value">18</span>
                                     </div>
-                                    <div class="setting-hint">How many recent messages to inspect for claims.</div>
+                                    <div class="setting-hint">How many recent messages to inspect for claims (0 = all available).</div>
                                 </div>
 
                                 <div class="setting-group">
@@ -663,10 +690,10 @@
                                 <div class="setting-group">
                                     <label>Context Window (messages)</label>
                                     <div class="setting-range">
-                                        <input type="range" id="setting-notes-context" min="5" max="50" value="10">
+                                        <input type="number" id="setting-notes-context" min="0" max="5000" step="1" value="10">
                                         <span class="range-value" id="notes-context-value">10</span>
                                     </div>
-                                    <div class="setting-hint">How many recent messages to analyze for notes.</div>
+                                    <div class="setting-hint">How many recent messages to analyze for notes (0 = all available).</div>
                                 </div>
                             </div>
 
@@ -816,10 +843,9 @@
                                         <option value="cpu_realtime">CPU - Realtime</option>
                                         <option value="cpu_accuracy">CPU - Accuracy</option>
                                         <option value="gpu_realtime">GPU - Realtime</option>
-                                        <option value="gpu_balanced">GPU - Balanced</option>
-                                        <option value="gpu_quality">GPU - Quality</option>
+                                        <option value="gpu_accuracy">GPU - Accuracy</option>
                                     </select>
-                                    <div class="setting-hint">Applies tuned chunk/beam/continuity behavior by device. Auto picks CPU-Realtime or GPU-Balanced.</div>
+                                    <div class="setting-hint">Shows two tuned profiles for the selected device (Realtime/Accuracy). Auto picks CPU-Realtime or GPU-Accuracy.</div>
                                 </div>
 
                                 <div class="setting-row">
