@@ -1,4 +1,4 @@
-﻿# AsureFlow
+﻿# AsuréFlow
 
 Local, real-time conversation assistant for:
 - live transcription (mic + system audio)
