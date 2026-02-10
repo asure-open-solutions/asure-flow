@@ -1343,7 +1343,8 @@ def _looks_like_generic_input_device_name(name: str | None) -> bool:
 def _speech_preprocess_from_config(cfg: dict) -> SpeechPreprocessConfig:
     return SpeechPreprocessConfig(
         enabled=bool(cfg.get("speech_preprocess_enabled", True)),
-        vad_enabled=bool(cfg.get("speech_vad_enabled", True)),
+        # App-level VAD is intentionally disabled; keep Whisper VAD as the only VAD path.
+        vad_enabled=False,
         vad_threshold=float(cfg.get("speech_vad_threshold", 0.5)),
         vad_neg_threshold=float(cfg.get("speech_vad_neg_threshold", 0.35)),
         vad_min_speech_duration_ms=int(cfg.get("speech_vad_min_speech_ms", 200)),
@@ -1366,6 +1367,7 @@ def _whisper_device_from_config(cfg: dict) -> str:
 
 def _resolve_transcription_runtime_config(cfg: dict) -> dict[str, object]:
     device = _whisper_device_from_config(cfg)
+    model_size = str(cfg.get("whisper_model_size", "tiny") or "tiny").strip().lower()
     requested = str(cfg.get("transcription_profile", "auto") or "auto").strip().lower()
     valid = {"auto", "manual", "cpu_realtime", "cpu_accuracy", "gpu_realtime", "gpu_accuracy", "gpu_balanced", "gpu_quality"}
     if requested not in valid:
@@ -1402,9 +1404,12 @@ def _resolve_transcription_runtime_config(cfg: dict) -> dict[str, object]:
         },
         "gpu_accuracy": {
             # Prioritize transcript stability for long-form speech on CUDA.
-            "beam_size": 4,
-            "chunk_duration_s": 4.2,
-            "chunk_overlap_s": 0.36,
+            # Larger chunks give Whisper more sentence context, reducing
+            # boundary artefacts (e.g. em-dash → period, mid-phrase splits).
+            # RTF is typically 0.10-0.16 on modern GPUs, so 5.6 s is safe.
+            "beam_size": 5,
+            "chunk_duration_s": 5.6,
+            "chunk_overlap_s": 0.50,
             "condition_on_previous_text": True,
         },
     }
@@ -1414,6 +1419,20 @@ def _resolve_transcription_runtime_config(cfg: dict) -> dict[str, object]:
         duration = float(max(1.0, min(8.0, float(cfg.get("transcription_chunk_duration_seconds", 3.2) or 3.2))))
         overlap = float(max(0.0, min(1.2, float(cfg.get("transcription_chunk_overlap_seconds", 0.16) or 0.16))))
         cond_prev = bool(device == "cuda")
+        # Manual baseline uplift:
+        # when users keep older low-latency manual defaults on CUDA with bigger models,
+        # prefer a slightly more stable decode profile without overriding custom values.
+        legacy_manual_defaults = (
+            beam == 1
+            and abs(duration - 3.2) < 1e-6
+            and abs(overlap - 0.16) < 1e-6
+        )
+        large_model = model_size.startswith("medium") or model_size.startswith("large")
+        if device == "cuda" and large_model and legacy_manual_defaults:
+            beam = 2
+            duration = 3.8
+            overlap = 0.24
+            cond_prev = True
     else:
         params = profile_defaults.get(resolved, profile_defaults["cpu_realtime"])
         beam = int(params["beam_size"])
@@ -3096,7 +3115,8 @@ async def _decide_web_search(
         return {}
 
     data = _parse_json_best_effort(content)
-    should = bool(data.get("search"))
+    # Parse "search" strictly; avoid treating non-empty strings like "false" as truthy.
+    should = _coerce_bool(data.get("search"), False)
     query = _normalize_web_search_query(data.get("query") or "", fallback=seed)
     if not query:
         query = _fallback_web_search_query(seed)
@@ -5386,6 +5406,11 @@ def _should_merge_transcript(prev_text: str, new_text: str) -> bool:
     if b.startswith(("#", "@", "http://", "https://")):
         return False
 
+    # Whisper often emits trailing "..." when speech is cut off mid-flow by
+    # the chunk boundary.  This is a very strong continuation signal.
+    if a.endswith("..."):
+        return True
+
     if a and a[-1] not in ".?!":
         return True
 
@@ -5419,6 +5444,10 @@ def _is_strong_transcript_continuation(prev_text: str, new_text: str) -> bool:
 
     if b.startswith(("#", "@", "http://", "https://")):
         return False
+
+    # Whisper trailing "..." means the chunk was cut mid-speech flow.
+    if a.endswith("..."):
+        return True
 
     if a and a[-1] not in ".?!":
         return True
@@ -6137,15 +6166,29 @@ async def process_transcription(
         ):
             prev = current_session.transcript[-1]
             last_ts = float(_TRANSCRIPT_LAST_UPDATE_TS.get(prev.id, 0.0) or 0.0)
+            time_gap = now_ts - last_ts
             should_merge = _should_merge_transcript(prev.text, text)
-            if should_merge:
+
+            # Rapid-merge: consecutive same-source chunks arriving within roughly
+            # one transcription window are definitively continuous speech.
+            # The timing signal is more reliable than sentence-boundary heuristics.
+            rapid_window = float(
+                config.get("transcription_chunk_duration_seconds", 5.6) or 5.6
+            ) + 1.5
+            hard_no_merge = (
+                not (text or "").strip()
+                or (text or "").strip().startswith(("#", "@", "http://", "https://"))
+            )
+            if not hard_no_merge and time_gap <= rapid_window:
+                should_merge = True
+                allowed_window = rapid_window
+            elif should_merge:
                 strong_continuation = _is_strong_transcript_continuation(prev.text, text)
                 allowed_window = continuation_window if strong_continuation else merge_window
             else:
-                strong_continuation = False
                 allowed_window = merge_window
 
-            if should_merge and (now_ts - last_ts) <= allowed_window:
+            if should_merge and time_gap <= allowed_window:
                 previous_text_for_ai = str(prev.text or "")
                 prev.text = _merge_transcript_text(prev.text, text)
                 prev.clean_text = None  # Invalidate; will be regenerated if enabled.
@@ -6295,7 +6338,9 @@ async def process_transcription(
             return
 
         kind = (message_kind or "audio").strip().lower()
-        should_reply = (kind == "manual") or bool(config.get("auto_respond", False))
+        auto_respond = bool(config.get("auto_respond", False))
+        auto_source_allowed = _is_counterparty_source(source)
+        should_reply = (kind == "manual") or (auto_respond and auto_source_allowed)
         if should_reply and ai_signal_response:
             _enqueue_response_request(
                 response_queue,

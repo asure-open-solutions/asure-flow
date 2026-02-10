@@ -1370,8 +1370,6 @@ document.addEventListener('DOMContentLoaded', () => {
             // Audio
             mic_device: getSelectedMicDeviceForCompareAndSave(),
             loopback_device: getSelectedLoopbackDeviceForCompareAndSave(),
-            speech_vad_enabled: !!document.getElementById('setting-vad-enabled')?.checked,
-            speech_vad_threshold: parseNumericWithDefault(document.getElementById('setting-vad-threshold')?.value, 0.5, { allowFloat: true }),
             speech_denoise_enabled: !!document.getElementById('setting-denoise-enabled')?.checked,
             speech_denoise_strength: parseNumericWithDefault(document.getElementById('setting-denoise-strength')?.value, 0.8, { allowFloat: true }),
             whisper_vad_filter: !!document.getElementById('setting-whisper-vad')?.checked,
@@ -1899,7 +1897,6 @@ document.addEventListener('DOMContentLoaded', () => {
     setupRangeSlider('setting-fact-check-interval', 'fact-check-interval-value', 's');
     setupRangeSlider('setting-fact-check-context', 'fact-check-context-value', '', contextWindowLabel);
     setupRangeSlider('setting-transcript-merge-window', 'transcript-merge-window-value', 's');
-    setupRangeSlider('setting-vad-threshold', 'vad-threshold-value', '', v => parseFloat(v).toFixed(2));
     setupRangeSlider('setting-denoise-strength', 'denoise-strength-value');
     setupRangeSlider('setting-policy-interval', 'policy-interval-value', 's');
     setupRangeSlider('setting-session-timeout', 'session-timeout-value', 'm');
@@ -2225,8 +2222,6 @@ document.addEventListener('DOMContentLoaded', () => {
             syncSettingsDependencies();
 
             // Audio settings
-            const vadEnabledEl = document.getElementById('setting-vad-enabled');
-            const vadThresholdEl = document.getElementById('setting-vad-threshold');
             const denoiseEnabledEl = document.getElementById('setting-denoise-enabled');
             const denoiseStrengthEl = document.getElementById('setting-denoise-strength');
             const whisperModelSizeEl = document.getElementById('setting-whisper-model-size');
@@ -2235,11 +2230,6 @@ document.addEventListener('DOMContentLoaded', () => {
             const speakerDiarizationEl = document.getElementById('setting-speaker-diarization');
             const whisperVadEl = document.getElementById('setting-whisper-vad');
             
-            if (vadEnabledEl) vadEnabledEl.checked = cfg.speech_vad_enabled !== false;
-            if (vadThresholdEl) {
-                vadThresholdEl.value = cfg.speech_vad_threshold || 0.5;
-                document.getElementById('vad-threshold-value')?.textContent && (document.getElementById('vad-threshold-value').textContent = parseFloat(vadThresholdEl.value).toFixed(2));
-            }
             if (denoiseEnabledEl) denoiseEnabledEl.checked = !!cfg.speech_denoise_enabled;
             if (denoiseStrengthEl) {
                 denoiseStrengthEl.value = cfg.speech_denoise_strength || 0.8;

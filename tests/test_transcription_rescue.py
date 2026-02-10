@@ -81,6 +81,31 @@ class TestTranscriptionVadRescue(unittest.TestCase):
         out = transcription_mod.TranscriptionEngine._trim_leading_overlap(prev, curr)
         self.assertEqual(out, "the grid.")
 
+    def test_passes_previous_text_tail_as_initial_prompt(self):
+        eng = self._build_engine()
+        eng.preprocess = SpeechPreprocessConfig(enabled=False, vad_enabled=False)
+        eng.condition_on_previous_text = True
+        calls: list[str | None] = []
+
+        def fake_preprocess(audio, sample_rate, cfg):
+            return audio
+
+        def fake_transcribe(audio, *, force_whisper_vad=None, prompt_text=None):
+            calls.append(prompt_text)
+            if len(calls) == 1:
+                return [SimpleNamespace(text="Lifecycle assessments are biased, though.")], None
+            return [SimpleNamespace(text="They always assume ideal conditions.")], None
+
+        transcription_mod.preprocess_audio = fake_preprocess
+        eng._transcribe_with_fallback = fake_transcribe  # type: ignore[method-assign]
+
+        chunk = np.ones((16000,), dtype=np.float32) * 0.03
+        out = list(eng.transcribe_stream([chunk, chunk], return_voiceprint=False))
+
+        self.assertEqual(len(out), 2)
+        self.assertIsNone(calls[0])
+        self.assertEqual(calls[1], "Lifecycle assessments are biased, though.")
+
 
 if __name__ == "__main__":
     unittest.main()

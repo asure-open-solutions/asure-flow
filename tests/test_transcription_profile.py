@@ -18,10 +18,10 @@ class TestTranscriptionProfile(unittest.TestCase):
         gpu = main._resolve_transcription_runtime_config(cfg_gpu)
         self.assertEqual(gpu["resolved_profile"], "gpu_accuracy")
         self.assertEqual(gpu["device"], "cuda")
-        self.assertEqual(gpu["beam_size"], 4)
+        self.assertEqual(gpu["beam_size"], 5)
         self.assertTrue(gpu["condition_on_previous_text"])
-        self.assertAlmostEqual(float(gpu["chunk_duration_s"]), 4.2, places=3)
-        self.assertAlmostEqual(float(gpu["chunk_overlap_s"]), 0.36, places=3)
+        self.assertAlmostEqual(float(gpu["chunk_duration_s"]), 5.6, places=3)
+        self.assertAlmostEqual(float(gpu["chunk_overlap_s"]), 0.50, places=3)
 
     def test_manual_profile_uses_explicit_values(self):
         cfg = dict(main.DEFAULT_CONFIG)
@@ -40,6 +40,25 @@ class TestTranscriptionProfile(unittest.TestCase):
         self.assertAlmostEqual(float(rt["chunk_duration_s"]), 4.2, places=3)
         self.assertAlmostEqual(float(rt["chunk_overlap_s"]), 0.22, places=3)
 
+    def test_manual_legacy_defaults_are_uplifted_on_cuda_large_models(self):
+        cfg = dict(main.DEFAULT_CONFIG)
+        cfg.update(
+            {
+                "whisper_device": "cuda",
+                "whisper_model_size": "large-v3",
+                "transcription_profile": "manual",
+                "whisper_beam_size": 1,
+                "transcription_chunk_duration_seconds": 3.2,
+                "transcription_chunk_overlap_seconds": 0.16,
+            }
+        )
+        rt = main._resolve_transcription_runtime_config(cfg)
+        self.assertEqual(rt["resolved_profile"], "manual")
+        self.assertEqual(rt["beam_size"], 2)
+        self.assertAlmostEqual(float(rt["chunk_duration_s"]), 3.8, places=3)
+        self.assertAlmostEqual(float(rt["chunk_overlap_s"]), 0.24, places=3)
+        self.assertTrue(rt["condition_on_previous_text"])
+
     def test_profile_matrix_is_tuned(self):
         cfg = dict(main.DEFAULT_CONFIG)
         cfg["whisper_device"] = "cuda"
@@ -53,9 +72,9 @@ class TestTranscriptionProfile(unittest.TestCase):
 
         cfg["transcription_profile"] = "gpu_accuracy"
         accuracy = main._resolve_transcription_runtime_config(cfg)
-        self.assertEqual(accuracy["beam_size"], 4)
-        self.assertAlmostEqual(float(accuracy["chunk_duration_s"]), 4.2, places=3)
-        self.assertAlmostEqual(float(accuracy["chunk_overlap_s"]), 0.36, places=3)
+        self.assertEqual(accuracy["beam_size"], 5)
+        self.assertAlmostEqual(float(accuracy["chunk_duration_s"]), 5.6, places=3)
+        self.assertAlmostEqual(float(accuracy["chunk_overlap_s"]), 0.50, places=3)
         self.assertTrue(accuracy["condition_on_previous_text"])
 
     def test_gpu_profiles_map_to_cpu_profiles(self):

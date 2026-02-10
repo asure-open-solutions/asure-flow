@@ -53,6 +53,28 @@ class TestTranscriptionTextNormalization(unittest.TestCase):
         out = TranscriptionEngine._normalize_transcript_text(text)
         self.assertEqual(out, "Lifecycle assessments are biased, though.")
 
+    def test_suppresses_short_high_no_speech_chunks(self):
+        reason = TranscriptionEngine._suppression_reason_for_text(
+            "Life.",
+            {
+                "tokens": 2,
+                "no_speech_prob": 0.72,
+                "avg_logprob": -0.27,
+            },
+        )
+        self.assertEqual(reason, "quality-short-high-no-speech")
+
+    def test_keeps_useful_chunk_even_with_moderate_no_speech(self):
+        reason = TranscriptionEngine._suppression_reason_for_text(
+            "And even if EVs sometimes look better on paper,",
+            {
+                "tokens": 11,
+                "no_speech_prob": 0.59,
+                "avg_logprob": -0.25,
+            },
+        )
+        self.assertIsNone(reason)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,3 +1,4 @@
+import asyncio
 import time
 import unittest
 
@@ -130,6 +131,46 @@ class TestTranscriptMerge(unittest.IsolatedAsyncioTestCase):
             send_lock=None,
         )
         self.assertEqual(len(main.current_session.transcript), 2)
+
+    async def test_auto_respond_only_enqueues_for_counterparty_audio(self):
+        main.config.update(
+            {
+                "ai_enabled": True,
+                "auto_respond": True,
+            }
+        )
+        main.current_session = main.Session(id="s3", started_at="2026-02-10T00:00:00")
+
+        class _DummyLLM:
+            def __init__(self):
+                self.history = []
+
+            def add_transcript_message(self, source, text, speaker_id=None, speaker_label=None):
+                self.history.append({"source": source, "text": text})
+
+        main.llm_client = _DummyLLM()
+        response_queue: asyncio.Queue = asyncio.Queue(maxsize=8)
+
+        await main.process_transcription(
+            websocket=None,
+            text="Electric cars are obviously worse for the environment than gas cars because electricity is coal.",
+            source="third_party",
+            send_lock=None,
+            response_queue=response_queue,
+        )
+        self.assertEqual(response_queue.qsize(), 1)
+        first = response_queue.get_nowait()
+        self.assertEqual(first.get("trigger"), "audio")
+        self.assertEqual(first.get("source"), "third_party")
+
+        await main.process_transcription(
+            websocket=None,
+            text="Current studies show electric vehicles have lower lifetime emissions than gas vehicles.",
+            source="user",
+            send_lock=None,
+            response_queue=response_queue,
+        )
+        self.assertEqual(response_queue.qsize(), 0)
 
 
 if __name__ == "__main__":

@@ -278,6 +278,19 @@ class TranscriptionEngine:
             return "na"
         return f"{float(value):.{int(digits)}f}"
 
+    @staticmethod
+    def _build_initial_prompt_from_previous_text(
+        previous_text: str,
+        *,
+        max_words: int = 36,
+    ) -> str:
+        tokens = str(previous_text or "").strip().split()
+        if not tokens:
+            return ""
+        if len(tokens) > int(max_words):
+            tokens = tokens[-int(max_words):]
+        return " ".join(tokens).strip()
+
     @classmethod
     def _segment_metrics(cls, segments: list[object]) -> dict[str, float | int | None]:
         seg_count = int(len(segments))
@@ -326,6 +339,52 @@ class TranscriptionEngine:
             "no_speech_prob": _mean(no_speech_probs),
             "compression_ratio": _mean(compression_ratios),
         }
+
+    @classmethod
+    def _suppression_reason_for_text(
+        cls,
+        text: str,
+        seg_metrics: dict[str, float | int | None],
+    ) -> str | None:
+        import re
+
+        t = " ".join((text or "").split()).strip()
+        if not t:
+            return "quality-empty"
+
+        words = re.findall(r"[a-z0-9']+", t.casefold(), flags=re.I)
+        word_count = int(len(words))
+        char_count = int(len(t))
+        token_count = int(seg_metrics.get("tokens") or 0)
+        no_speech = cls._coerce_finite_float(seg_metrics.get("no_speech_prob"))
+        avg_logprob = cls._coerce_finite_float(seg_metrics.get("avg_logprob"))
+
+        # Guard against one- or two-word hallucinations around silence windows.
+        if (
+            no_speech is not None
+            and no_speech >= 0.90
+            and char_count <= 12
+            and word_count <= 3
+        ):
+            return "quality-high-no-speech"
+
+        if (
+            no_speech is not None
+            and no_speech >= 0.65
+            and char_count <= 6
+            and max(word_count, token_count) <= 2
+        ):
+            return "quality-short-high-no-speech"
+
+        if (
+            avg_logprob is not None
+            and avg_logprob <= -0.75
+            and char_count <= 4
+            and word_count <= 1
+        ):
+            return "quality-short-low-logprob"
+
+        return None
 
     @staticmethod
     def _normalize_transcript_text(text: str) -> str:
@@ -511,7 +570,13 @@ class TranscriptionEngine:
                 merged = seg
         return cls._normalize_transcript_text(merged)
 
-    def _transcribe_with_fallback(self, audio: np.ndarray, *, force_whisper_vad: bool | None = None):
+    def _transcribe_with_fallback(
+        self,
+        audio: np.ndarray,
+        *,
+        force_whisper_vad: bool | None = None,
+        prompt_text: str | None = None,
+    ):
         if force_whisper_vad is None:
             use_whisper_vad = bool(self.whisper_vad_filter)
             if self.preprocess is not None and bool(getattr(self.preprocess, "enabled", False)) and bool(getattr(self.preprocess, "vad_enabled", False)):
@@ -535,6 +600,8 @@ class TranscriptionEngine:
                 "patience": 1.0,
                 "without_timestamps": True,
             }
+            if prompt_text:
+                kwargs["initial_prompt"] = str(prompt_text).strip()
             if self.detected_language:
                 kwargs["language"] = self.detected_language
             try:
@@ -548,6 +615,7 @@ class TranscriptionEngine:
                 kwargs.pop("best_of", None)
                 kwargs.pop("patience", None)
                 kwargs.pop("without_timestamps", None)
+                kwargs.pop("initial_prompt", None)
                 segments, info = self.model.transcribe(input_audio, **kwargs)
             seg_list = list(segments)
             if self.detected_language is None:
@@ -677,10 +745,15 @@ class TranscriptionEngine:
 
                 # Transcribe the current buffer (with CUDA->CPU fallback if needed).
                 decode_started = time.perf_counter()
-                segments, info = self._transcribe_with_fallback(
-                    audio,
-                    force_whisper_vad=(True if rescued_from_empty_preprocess else None),
-                )
+                prompt_text = None
+                if bool(getattr(self, "condition_on_previous_text", False)) and last_emitted_text:
+                    prompt_text = self._build_initial_prompt_from_previous_text(last_emitted_text)
+                transcribe_kwargs = {
+                    "force_whisper_vad": (True if rescued_from_empty_preprocess else None),
+                }
+                if prompt_text:
+                    transcribe_kwargs["prompt_text"] = prompt_text
+                segments, info = self._transcribe_with_fallback(audio, **transcribe_kwargs)
                 decode_ms = (time.perf_counter() - decode_started) * 1000.0
 
                 segment_texts = [str(getattr(segment, "text", "") or "") for segment in segments]
@@ -688,6 +761,7 @@ class TranscriptionEngine:
                 raw_chars = len(raw_text)
                 normalized = self._merge_segment_texts(segment_texts)
                 normalized_chars = len(normalized)
+                seg_metrics = self._segment_metrics(segments)
                 overlap_trimmed_chars = 0
                 if normalized:
                     if normalized and last_emitted_text:
@@ -698,7 +772,6 @@ class TranscriptionEngine:
                     if not normalized:
                         total_ms = (time.perf_counter() - window_started_at) * 1000.0
                         whisper_vad_used = bool(getattr(self, "_last_transcribe_used_whisper_vad", self.whisper_vad_filter))
-                        seg_metrics = self._segment_metrics(segments)
                         input_s = float(len(audio) / float(self.sample_rate)) if len(audio) else 0.0
                         rtf = (decode_ms / 1000.0) / input_s if input_s > 0 else None
                         lang = str(getattr(info, "language", "") or "-")
@@ -741,11 +814,58 @@ class TranscriptionEngine:
                             buffer_samples = 0
                         continue
 
+                    suppression_reason = self._suppression_reason_for_text(normalized, seg_metrics)
+                    if suppression_reason:
+                        total_ms = (time.perf_counter() - window_started_at) * 1000.0
+                        whisper_vad_used = bool(getattr(self, "_last_transcribe_used_whisper_vad", self.whisper_vad_filter))
+                        input_s = float(len(audio) / float(self.sample_rate)) if len(audio) else 0.0
+                        rtf = (decode_ms / 1000.0) / input_s if input_s > 0 else None
+                        lang = str(getattr(info, "language", "") or "-")
+                        lang_p = self._coerce_finite_float(getattr(info, "language_probability", None))
+                        logger.info(
+                            "Transcription telemetry: profile=%s window=%d device=%s compute=%s emitted=0 reason=%s buffer_s=%.2f input_s=%.2f preprocess_s=%.2f preprocess_ms=%.1f decode_ms=%.1f total_ms=%.1f rtf=%s beam=%d cond_prev=%s whisper_vad=%s rescue=%d segs=%d segs_non_empty=%d tokens=%d chars_raw=%d chars_out=%d overlap_trim_chars=%d lang=%s lang_p=%s avg_logprob=%s no_speech_prob=%s compression=%s",
+                            profile,
+                            windows_processed,
+                            str(getattr(self, "device", "unknown") or "unknown"),
+                            str(getattr(self, "compute_type", "unknown") or "unknown"),
+                            suppression_reason,
+                            buffer_s,
+                            input_s,
+                            preprocess_s,
+                            preprocess_ms,
+                            decode_ms,
+                            total_ms,
+                            self._format_metric(rtf, 3),
+                            int(getattr(self, "beam_size", 1) or 1),
+                            bool(getattr(self, "condition_on_previous_text", False)),
+                            whisper_vad_used,
+                            1 if rescued_from_empty_preprocess else 0,
+                            int(seg_metrics.get("segments") or 0),
+                            int(seg_metrics.get("non_empty_segments") or 0),
+                            int(seg_metrics.get("tokens") or 0),
+                            raw_chars,
+                            len(normalized),
+                            overlap_trimmed_chars,
+                            lang,
+                            self._format_metric(lang_p, 2),
+                            self._format_metric(self._coerce_finite_float(seg_metrics.get("avg_logprob")), 3),
+                            self._format_metric(self._coerce_finite_float(seg_metrics.get("no_speech_prob")), 3),
+                            self._format_metric(self._coerce_finite_float(seg_metrics.get("compression_ratio")), 3),
+                        )
+                        logger.info("Transcription: suppressed low-confidence chunk (%s): %s", suppression_reason, normalized[:80])
+                        if OVERLAP_SAMPLES > 0 and len(buffer) > OVERLAP_SAMPLES:
+                            tail = buffer[-OVERLAP_SAMPLES:].copy()
+                            buffer_parts = [tail]
+                            buffer_samples = int(tail.size)
+                        else:
+                            buffer_parts = []
+                            buffer_samples = 0
+                        continue
+
                     logger.info(f"Transcription: got text: {normalized[:80]}...")
                     last_emitted_text = normalized
                     total_ms = (time.perf_counter() - window_started_at) * 1000.0
                     whisper_vad_used = bool(getattr(self, "_last_transcribe_used_whisper_vad", self.whisper_vad_filter))
-                    seg_metrics = self._segment_metrics(segments)
                     input_s = float(len(audio) / float(self.sample_rate)) if len(audio) else 0.0
                     rtf = (decode_ms / 1000.0) / input_s if input_s > 0 else None
                     lang = str(getattr(info, "language", "") or "-")
@@ -792,7 +912,6 @@ class TranscriptionEngine:
                 else:
                     total_ms = (time.perf_counter() - window_started_at) * 1000.0
                     whisper_vad_used = bool(getattr(self, "_last_transcribe_used_whisper_vad", self.whisper_vad_filter))
-                    seg_metrics = self._segment_metrics(segments)
                     input_s = float(len(audio) / float(self.sample_rate)) if len(audio) else 0.0
                     rtf = (decode_ms / 1000.0) / input_s if input_s > 0 else None
                     lang = str(getattr(info, "language", "") or "-")

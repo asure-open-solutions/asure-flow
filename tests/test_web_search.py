@@ -122,6 +122,30 @@ class TestWebSearch(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(should)
         self.assertEqual(query, "latest EV battery fire statistics")
 
+    async def test_decider_treats_string_false_as_no_search(self):
+        main.config["web_search_mode"] = "auto"
+
+        class _Resp:
+            choices = [
+                {
+                    "message": {
+                        "content": '{"search":"false","query":"latest EV battery fire statistics","reason":"not needed"}'
+                    }
+                }
+            ]
+
+        class _DummyLLM:
+            async def chat_create(self, **kwargs):
+                return _Resp()
+
+        main.llm_client = _DummyLLM()
+        should, query = await main._decide_web_search(
+            seed_text="latest EV battery fire statistics",
+            purpose="response_generate",
+        )
+        self.assertFalse(should)
+        self.assertEqual(query, "latest EV battery fire statistics")
+
 
 if __name__ == "__main__":
     unittest.main()
