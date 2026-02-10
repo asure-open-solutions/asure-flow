@@ -435,7 +435,11 @@ def _capture_worker(
                             try:
                                 out_queue.put(data, block=False)
                             except Full:
-                                pass
+                                # Keep newest audio: drop one oldest chunk and retry.
+                                with suppress(Exception):
+                                    out_queue.get_nowait()
+                                with suppress(Exception):
+                                    out_queue.put(data, block=False)
                     finally:
                         with suppress(Exception):
                             stream.stop_stream()
@@ -463,7 +467,14 @@ def _capture_worker(
                     data = rec.record(numframes=block_size)
                     data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
                     data = np.clip(data, -1.0, 1.0)
-                    out_queue.put(data.flatten())
+                    payload = data.flatten()
+                    try:
+                        out_queue.put(payload, block=False)
+                    except Full:
+                        with suppress(Exception):
+                            out_queue.get_nowait()
+                        with suppress(Exception):
+                            out_queue.put(payload, block=False)
         finally:
             if com_inited:
                 _com_uninitialize_for_thread()
@@ -474,9 +485,16 @@ def _capture_worker(
 
 
 class AudioManager:
-    def __init__(self, sample_rate=16000, block_size=1024):
+    def __init__(self, sample_rate=16000, block_size=2048):
         self.sample_rate = sample_rate
         self.block_size = block_size
+        # Keep enough buffered audio to survive Whisper inference bursts without dropping.
+        self.max_local_queue_chunks = 320
+        self.max_mp_queue_chunks = 1200
+        self.queue_batch_chunks = 6
+        self.queue_backlog_warn_chunks = 96
+        self.queue_backlog_warn_interval_s = 2.0
+        self._last_backlog_warn_ts = {"mic": 0.0, "loopback": 0.0}
 
         # Use multiprocessing for capture to isolate native crashes.
         self._mp_ctx = mp.get_context("spawn") if os.name == "nt" else mp.get_context()
@@ -488,8 +506,8 @@ class AudioManager:
         self._loop_q_mp = None
 
         # Local queues consumed by transcribers.
-        self.mic_queue = queue.Queue()
-        self.loopback_queue = queue.Queue()
+        self.mic_queue = queue.Queue(maxsize=self.max_local_queue_chunks)
+        self.loopback_queue = queue.Queue(maxsize=self.max_local_queue_chunks)
 
         # Pump threads (main process) to forward mp queue -> local queue.
         self._pump_threads = []
@@ -570,8 +588,8 @@ class AudioManager:
         # Create mp primitives per run.
         self._mic_stop = self._mp_ctx.Event()
         self._loop_stop = self._mp_ctx.Event()
-        self._mic_q_mp = self._mp_ctx.Queue(maxsize=200)
-        self._loop_q_mp = self._mp_ctx.Queue(maxsize=200)
+        self._mic_q_mp = self._mp_ctx.Queue(maxsize=self.max_mp_queue_chunks)
+        self._loop_q_mp = self._mp_ctx.Queue(maxsize=self.max_mp_queue_chunks)
         
         if start_mic:
             if os.name == "nt":
@@ -672,6 +690,7 @@ class AudioManager:
         # Start pump threads to forward mp queue -> local queue.
         def _pump(mp_q, local_q, proc_getter, label: str, first_chunk_event: threading.Event | None):
             pumped = 0
+            dropped = 0
             while self.is_recording:
                 proc = proc_getter()
                 if proc is not None and (not proc.is_alive()) and mp_q.empty():
@@ -679,7 +698,24 @@ class AudioManager:
                     break
                 try:
                     item = mp_q.get(timeout=0.1)
-                    local_q.put(item)
+                    try:
+                        local_q.put(item, block=False)
+                    except queue.Full:
+                        # Queue protection: if full, drop only one oldest block and keep newest.
+                        with suppress(Exception):
+                            local_q.get_nowait()
+                        try:
+                            local_q.put(item, block=False)
+                        except queue.Full:
+                            dropped += 1
+                        else:
+                            dropped += 1
+                        if dropped % 100 == 0:
+                            approx_lag_s = (float(local_q.qsize()) * float(self.block_size)) / float(max(1, self.sample_rate))
+                            logger.warning(
+                                f"Audio [{label}]: dropping stale chunks to keep up (dropped={dropped}, "
+                                f"qsize={local_q.qsize()}, lag~{approx_lag_s:.1f}s)."
+                            )
                     pumped += 1
                     if pumped == 1:
                         logger.info(f"Audio [{label}]: first chunk received from subprocess")
@@ -789,22 +825,61 @@ class AudioManager:
 
     # NOTE: capture happens in subprocess via _capture_worker.
             
+    def _warn_if_backlogged(self, q: queue.Queue, label: str) -> None:
+        try:
+            size = int(q.qsize())
+        except Exception:
+            return
+        if size < int(self.queue_backlog_warn_chunks):
+            return
+
+        now_ts = time.time()
+        last = float(self._last_backlog_warn_ts.get(label, 0.0) or 0.0)
+        if (now_ts - last) < float(self.queue_backlog_warn_interval_s):
+            return
+        self._last_backlog_warn_ts[label] = now_ts
+        approx_lag_s = (float(size) * float(self.block_size)) / float(max(1, self.sample_rate))
+        logger.warning(f"Audio [{label}]: backlog high (qsize={size}, lag~{approx_lag_s:.1f}s)")
+
+    def _coalesce_queue_chunk(self, q: queue.Queue, first_item) -> np.ndarray:
+        base = np.asarray(first_item, dtype=np.float32).reshape(-1)
+        if base.size == 0:
+            return base
+
+        parts = [base]
+        for _ in range(max(0, int(self.queue_batch_chunks) - 1)):
+            try:
+                nxt = q.get_nowait()
+            except queue.Empty:
+                break
+            arr = np.asarray(nxt, dtype=np.float32).reshape(-1)
+            if arr.size:
+                parts.append(arr)
+
+        if len(parts) == 1:
+            return parts[0]
+        return np.concatenate(parts).astype(np.float32, copy=False)
+
     def get_mic_data(self):
         """Yields audio data from mic queue."""
         while self.is_recording or not self.mic_queue.empty():
             if self._mic_proc is not None and (not self._mic_proc.is_alive()) and self.mic_queue.empty():
                 break
+            self._warn_if_backlogged(self.mic_queue, "mic")
             try:
-                yield self.mic_queue.get(timeout=0.1)
+                first = self.mic_queue.get(timeout=0.1)
             except queue.Empty:
                 continue
+            yield self._coalesce_queue_chunk(self.mic_queue, first)
 
     def get_loopback_data(self):
-         """Yields audio data from loopback queue."""
-         while self.is_recording or not self.loopback_queue.empty():
+        """Yields audio data from loopback queue."""
+        while self.is_recording or not self.loopback_queue.empty():
             if self._loop_proc is not None and (not self._loop_proc.is_alive()) and self.loopback_queue.empty():
                 break
+            self._warn_if_backlogged(self.loopback_queue, "loopback")
             try:
-                yield self.loopback_queue.get(timeout=0.1)
+                first = self.loopback_queue.get(timeout=0.1)
             except queue.Empty:
                 continue
+            yield self._coalesce_queue_chunk(self.loopback_queue, first)

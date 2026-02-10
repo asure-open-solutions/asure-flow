@@ -1,21 +1,163 @@
 from openai import AsyncOpenAI
 import logging
+import json
 
 logger = logging.getLogger(__name__)
 
 class LLMClient:
-    def __init__(self, api_key, base_url="https://openrouter.ai/api/v1", model="openai/gpt-3.5-turbo", default_headers=None):
-        self.api_key = api_key
-        self.base_url = base_url
-        self.default_headers = default_headers
-        self.client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            default_headers=default_headers,
+    def __init__(
+        self,
+        api_key,
+        base_url="https://openrouter.ai/api/v1",
+        model="openai/gpt-3.5-turbo",
+        default_headers=None,
+        *,
+        fallback_routes=None,
+        failover_enabled: bool = True,
+    ):
+        self.failover_enabled = bool(failover_enabled)
+        self._active_endpoint_index = 0
+        self.endpoints = []
+        self._config_signature = None
+
+        self._add_endpoint(
+            {
+                "provider": "primary",
+                "api_key": api_key,
+                "base_url": base_url,
+                "model": model,
+                "api_extra_headers": default_headers,
+            }
         )
-        self.model = model
+        for route in (fallback_routes or []):
+            self._add_endpoint(route)
+
+        if not self.endpoints:
+            raise ValueError("LLMClient requires at least one endpoint with an API key.")
+
+        self._refresh_compat_fields()
         self.history = []
         self.system_prompt = "You are a helpful AI assistant running on the user's desktop. Keep your answers concise and helpful."
+
+    def _endpoint_signature(self) -> tuple:
+        sig = []
+        for ep in self.endpoints:
+            headers = ep.get("api_extra_headers") or {}
+            try:
+                hdr_json = json.dumps(headers, sort_keys=True, separators=(",", ":"))
+            except Exception:
+                hdr_json = "{}"
+            sig.append(
+                (
+                    str(ep.get("provider") or ""),
+                    str(ep.get("base_url") or ""),
+                    str(ep.get("model") or ""),
+                    str(ep.get("api_key") or ""),
+                    hdr_json,
+                )
+            )
+        return tuple(sig)
+
+    def set_config_signature(self, sig) -> None:
+        self._config_signature = sig
+
+    def get_config_signature(self):
+        return self._config_signature
+
+    def _add_endpoint(self, route: dict) -> None:
+        if not isinstance(route, dict):
+            return
+        api_key = str(route.get("api_key") or "").strip()
+        if not api_key:
+            return
+
+        base_url = str(route.get("base_url") or "").strip()
+        model = str(route.get("model") or "").strip()
+        if not base_url or not model:
+            return
+
+        headers = route.get("api_extra_headers", route.get("default_headers"))
+        if not isinstance(headers, dict):
+            headers = {}
+        provider = str(route.get("provider") or "custom").strip().lower() or "custom"
+
+        ep = {
+            "provider": provider,
+            "api_key": api_key,
+            "base_url": base_url,
+            "model": model,
+            "api_extra_headers": headers,
+            "client": AsyncOpenAI(
+                api_key=api_key,
+                base_url=base_url,
+                default_headers=headers,
+            ),
+        }
+
+        # Keep first occurrence by unique connection tuple.
+        for cur in self.endpoints:
+            if (
+                cur.get("base_url") == ep["base_url"]
+                and cur.get("model") == ep["model"]
+                and cur.get("api_key") == ep["api_key"]
+                and cur.get("api_extra_headers") == ep["api_extra_headers"]
+            ):
+                return
+
+        self.endpoints.append(ep)
+
+    def _refresh_compat_fields(self) -> None:
+        idx = self._active_endpoint_index
+        if idx < 0 or idx >= len(self.endpoints):
+            idx = 0
+            self._active_endpoint_index = 0
+        ep = self.endpoints[idx]
+        self.api_key = ep["api_key"]
+        self.base_url = ep["base_url"]
+        self.default_headers = ep["api_extra_headers"]
+        self.model = ep["model"]
+        self.client = ep["client"]
+
+    async def chat_create(self, **kwargs):
+        if not self.endpoints:
+            raise RuntimeError("No LLM endpoints configured")
+
+        errors = []
+        attempt_count = len(self.endpoints) if self.failover_enabled else 1
+        for idx in range(attempt_count):
+            ep = self.endpoints[idx]
+            req = dict(kwargs)
+            req["model"] = ep["model"]
+            try:
+                resp = await ep["client"].chat.completions.create(**req)
+                prev_idx = self._active_endpoint_index
+                self._active_endpoint_index = idx
+                self._refresh_compat_fields()
+                if idx != prev_idx:
+                    logger.warning(
+                        "LLM failover selected endpoint #%s (%s %s)",
+                        idx + 1,
+                        ep["provider"],
+                        ep["base_url"],
+                    )
+                return resp
+            except Exception as e:
+                errors.append(
+                    f"#{idx + 1} {ep['provider']} {ep['base_url']} ({ep['model']}): {e}"
+                )
+                if idx + 1 < attempt_count:
+                    logger.warning(
+                        "LLM endpoint failed, trying fallback #%s: %s (%s) -> %s",
+                        idx + 2,
+                        ep["provider"],
+                        ep["base_url"],
+                        e,
+                    )
+                continue
+
+        if errors:
+            raise RuntimeError("All configured LLM APIs failed. " + " | ".join(errors))
+        raise RuntimeError("LLM request failed")
 
     def set_system_prompt(self, prompt):
         self.system_prompt = prompt
@@ -130,10 +272,9 @@ class LLMClient:
         messages = [{"role": "system", "content": prompt}] + self.history + list(extra_messages)
 
         try:
-            stream = await self.client.chat.completions.create(
-                model=self.model,
+            stream = await self.chat_create(
                 messages=messages,
-                stream=True
+                stream=True,
             )
             
             full_response = ""

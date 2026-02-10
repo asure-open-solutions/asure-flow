@@ -1,51 +1,111 @@
-# AsuréFlow (AI Assistant)
+﻿# AsureFlow
 
-Real-time transcription + AI notes in a lightweight local web app (FastAPI + WebSockets).
+Local, real-time conversation assistant for:
+- live transcription (mic + system audio)
+- AI response guidance
+- claim-level fact checking
+- rolling notes
+- session history
 
-## Features (high level)
-- Live transcription (Whisper / faster-whisper)
-- Optional audio capture (mic / system audio; platform-dependent)
-- Speaker diarization (identify speakers)
-- AI-assisted notes (actions/decisions/etc.)
-- Local web UI (served from the FastAPI app)
+Built with FastAPI + WebSockets + faster-whisper.
 
-## Quick start (Windows)
-1. Install Python 3.11+.
+## What It Does
+- Captures speech from mic and/or loopback audio.
+- Transcribes in real time with optional speaker diarization.
+- Generates:
+  - `Responses`: practical, fact-grounded reply suggestions.
+  - `Fact Check`: supported/contradicted/uncertain claim checks.
+  - `Notes`: key points, actions, decisions, risks.
+- Saves sessions locally and lets you reload old sessions.
+- Supports multiple AI API routes with automatic fallback.
+
+[image of live session view showing transcript + notes/response/fact check side tabs]
+
+## Quick Start (Windows)
+1. Install Python `3.11+`.
 2. Run `run.bat`.
+3. Open Settings, configure at least one API provider/key.
 
-## Run in VS Code
-1. Open the folder in VS Code.
-2. Run and Debug:
-   - `AI Assistant (no Audio)` (recommended), or
+## VS Code Run
+1. Open folder in VS Code.
+2. Run `F5` with one of:
+   - `AI Assistant (no Audio)` (recommended first run)
    - `AI Assistant (with Audio)`
-3. Press `F5`.
 
-The debug config runs `AI Assistant: Setup venv` first (creates `.venv` and installs `requirements.txt`).
+The debug profile runs `.vscode/setup-venv.ps1` first.
 
-## Run manually
+## Manual Run
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe main.py
 ```
 
-## Configuration
-Common env vars:
-- `AI_ASSISTANT_ENABLE_AUDIO` = `0` / `1`
-- `AI_ASSISTANT_PORT` = port number (default `8000`)
-- `AI_ASSISTANT_USE_WEBVIEW` = `0` / `1` (embed UI in a WebView window)
-- `AI_ASSISTANT_CONFIG_PATH` = path to a config file (optional)
+## API Providers
+Primary + fallback providers are supported.
 
-Transcription settings (in the UI Settings panel):
-- `whisper_model_size`: `tiny`/`base`/`small`/`medium`/`large-v2`/`large-v3`
-- `whisper_device`: `cpu` or `cuda` (GPU requires CUDA runtime DLLs on PATH, e.g. `cublas64_12.dll`; if missing, the app falls back to CPU)
+Built-in provider presets:
+- `openrouter`
+- `openai`
+- `canopywave`
+- `huggingface`
+- `gemini`
+- `github_models`
+- `custom` (OpenAI-compatible)
 
-## Repo layout
-- `main.py`: FastAPI app + UI server + orchestration
-- `backend/`: audio, transcription, diarization, LLM helpers
-- `index.html`, `js/`, `css/`: UI assets
-- `.vscode/`: debug/tasks setup
+Fallback behavior:
+- Configure primary API fields in Settings.
+- Add additional routes in `Additional API Routes (JSON Array)`.
+- Enable `Enable API Fallback`.
+- If one route fails/declines, the app tries the next route automatically.
 
-## Notes
-- First startup can take a while because models may download/cache.
-- Audio capture is disabled by default; enable it only if you need it.
+[image of API settings with fallback enabled and additional API routes JSON]
+
+## Environment Variables
+- `AI_ASSISTANT_ENABLE_AUDIO` = `0` or `1`
+- `AI_ASSISTANT_PORT` = server port (default `8000`)
+- `AI_ASSISTANT_USE_WEBVIEW` = `0` or `1`
+- `AI_ASSISTANT_CONFIG_PATH` = custom settings file path
+
+Common provider key env vars:
+- `OPENROUTER_API_KEY`
+- `OPENAI_API_KEY`
+- `CANOPYWAVE_API_KEY`
+- `HF_TOKEN` or `HUGGINGFACEHUB_API_TOKEN`
+- `GEMINI_API_KEY`
+- `GITHUB_TOKEN` or `GH_TOKEN`
+
+## Transcription Notes
+- Model setting is in UI (`whisper_model_size`).
+- Device setting is `cpu` or `cuda`.
+- For CUDA on Windows, runtime DLLs must be available (for example `cublas64_12.dll`).
+- If CUDA is unavailable at runtime, transcription falls back to CPU.
+
+## Session + Editing
+- Sessions are autosaved locally.
+- Transcript messages can be edited/deleted from the live chat.
+- Notes/responses/fact checks update against current transcript context.
+
+[image of session history panel and load-into-live workflow]
+
+## Project Layout
+- `main.py`: server, websocket orchestration, settings, routes
+- `backend/`: audio, transcription, diarization, LLM client
+- `index.html`, `js/`, `css/`: UI
+- `tests/`: unit tests
+- `.vscode/`: debug and task helpers
+
+## Development
+Run tests:
+```powershell
+python -m unittest discover -s tests -q
+```
+
+Quick syntax checks:
+```powershell
+python -m py_compile main.py backend\llm.py
+node --check js\app.js
+```
+
+## Disclaimer
+Response/fact-check output is assistive only. Verify important claims independently, especially for legal, medical, or financial decisions.

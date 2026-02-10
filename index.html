@@ -5,7 +5,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI Assistant</title>
-    <link rel="icon" href="branding/icon.svg" type="image/svg+xml">
+    <link rel="icon" href="/static/branding/icon.svg?v=2" type="image/svg+xml">
+    <link rel="shortcut icon" href="/static/branding/icon.svg?v=2" type="image/svg+xml">
     <link rel="stylesheet" href="css/style.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 </head>
@@ -16,7 +17,7 @@
         <aside class="sidebar">
             <div class="sidebar-header">
                 <div class="logo">
-                    <i class="fa-solid fa-brain"></i>
+                    <img src="branding/icon.svg" alt="AsureFlow" class="logo-icon">
                     <span>AsuréFlow</span>
                 </div>
             </div>
@@ -30,6 +31,14 @@
                 <button class="nav-item" data-tab="notes">
                     <i class="fa-solid fa-note-sticky"></i>
                     <span>Notes</span>
+                </button>
+                <button class="nav-item" data-tab="responses">
+                    <i class="fa-solid fa-comment-dots"></i>
+                    <span>Responses</span>
+                </button>
+                <button class="nav-item" data-tab="fact-check">
+                    <i class="fa-solid fa-magnifying-glass"></i>
+                    <span>Fact Check</span>
                 </button>
                 <button class="nav-item" data-tab="history">
                     <i class="fa-solid fa-clock-rotate-left"></i>
@@ -117,7 +126,7 @@
                             </div>
                             <div class="context-body hidden" id="session-context-body">
                                 <textarea id="session-context-input" rows="3" placeholder="Add optional context for this Live Session..."></textarea>
-                                <div class="context-hint">Included in AI replies and notes for this session.</div>
+                                <div class="context-hint">Included in response guidance, fact checks, and notes for this session.</div>
                             </div>
                         </div>
 
@@ -125,7 +134,7 @@
                             <div class="message system">
                                 <div class="avatar"><i class="fa-solid fa-info"></i></div>
                                 <div class="bubble">
-                                    Welcome! Configure your API key in Settings to enable AI responses. 
+                                    Welcome! Configure your API key in Settings to enable AI response and fact-check analysis.
                                     Toggle the microphone or system audio to start transcription.
                                 </div>
                             </div>
@@ -140,33 +149,98 @@
                     </div>
 
                     <aside class="session-right">
-                        <div class="notes-panel">
-                            <div class="notes-header">
-                                <h3>Live Notes</h3>
-                                <span class="subtitle">AI-generated key points</span>
-                            </div>
-                            <div class="notes-toolbar">
-                                <button class="icon-btn" id="notes-refresh-btn" title="Refresh Notes">
-                                    <i class="fa-solid fa-arrows-rotate"></i>
-                                </button>
-                                <button class="icon-btn" id="notes-clear-btn" title="Clear Notes">
-                                    <i class="fa-solid fa-trash-can"></i>
-                                </button>
-                                <button class="icon-btn" id="notes-export-btn" title="Export Notes">
-                                    <i class="fa-solid fa-download"></i>
-                                </button>
-                            </div>
-                            <div class="notes-content">
-                                <ul id="notes-points-session" class="notes-list"></ul>
-                                <div class="empty-state" id="notes-empty-state">
-                                    <i class="fa-regular fa-lightbulb"></i>
-                                    <p>Notes will appear as the conversation progresses</p>
+                        <div class="session-side-tabs">
+                            <button class="session-side-tab active" data-session-panel="notes">
+                                <i class="fa-solid fa-note-sticky"></i>
+                                <span>Notes</span>
+                            </button>
+                            <button class="session-side-tab" data-session-panel="response">
+                                <i class="fa-solid fa-comment-dots"></i>
+                                <span>Response</span>
+                            </button>
+                            <button class="session-side-tab" data-session-panel="fact-check">
+                                <i class="fa-solid fa-magnifying-glass"></i>
+                                <span>Fact Check</span>
+                            </button>
+                        </div>
+
+                        <div class="session-side-panel active" id="session-panel-notes">
+                            <div class="notes-panel">
+                                <div class="notes-header">
+                                    <h3>Live Notes</h3>
+                                    <span class="subtitle">AI-generated key points</span>
+                                </div>
+                                <div class="notes-toolbar">
+                                    <button class="icon-btn" id="notes-refresh-btn" title="Refresh Notes">
+                                        <i class="fa-solid fa-arrows-rotate"></i>
+                                    </button>
+                                    <button class="icon-btn" id="notes-clear-btn" title="Clear Notes">
+                                        <i class="fa-solid fa-trash-can"></i>
+                                    </button>
+                                    <button class="icon-btn" id="notes-export-btn" title="Export Notes">
+                                        <i class="fa-solid fa-download"></i>
+                                    </button>
+                                </div>
+                                <div class="notes-content">
+                                    <ul id="notes-points-session" class="notes-list"></ul>
+                                    <div class="empty-state" id="notes-empty-state">
+                                        <i class="fa-regular fa-lightbulb"></i>
+                                        <p>Notes will appear as the conversation progresses</p>
+                                    </div>
+                                </div>
+                                <div class="note-input-area">
+                                    <div class="note-input-wrapper">
+                                        <input type="text" id="manual-note-input" placeholder="Add a manual note...">
+                                        <button id="add-note-btn" title="Add Note"><i class="fa-solid fa-plus"></i></button>
+                                    </div>
                                 </div>
                             </div>
-                            <div class="note-input-area">
-                                <div class="note-input-wrapper">
-                                    <input type="text" id="manual-note-input" placeholder="Add a manual note...">
-                                    <button id="add-note-btn" title="Add Note"><i class="fa-solid fa-plus"></i></button>
+                        </div>
+
+                        <div class="session-side-panel" id="session-panel-response">
+                            <div class="notes-panel">
+                                <div class="notes-header">
+                                    <h3>Live Response</h3>
+                                    <span class="subtitle">Fact-based response guidance</span>
+                                </div>
+                                <div class="notes-toolbar">
+                                    <button class="icon-btn" id="response-refresh-btn" title="Refresh Response">
+                                        <i class="fa-solid fa-arrows-rotate"></i>
+                                    </button>
+                                    <button class="icon-btn" id="response-clear-btn" title="Clear Responses">
+                                        <i class="fa-solid fa-trash-can"></i>
+                                    </button>
+                                </div>
+                                <div class="notes-content">
+                                    <div id="responses-session-list" class="analysis-list"></div>
+                                    <div class="empty-state" id="responses-empty-state">
+                                        <i class="fa-regular fa-comment-dots"></i>
+                                        <p>Responses will appear when AI generates guidance</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="session-side-panel" id="session-panel-fact-check">
+                            <div class="notes-panel">
+                                <div class="notes-header">
+                                    <h3>Live Fact Check</h3>
+                                    <span class="subtitle">Supported vs uncertain claims</span>
+                                </div>
+                                <div class="notes-toolbar">
+                                    <button class="icon-btn" id="fact-check-refresh-btn" title="Refresh Fact Checks">
+                                        <i class="fa-solid fa-arrows-rotate"></i>
+                                    </button>
+                                    <button class="icon-btn" id="fact-check-clear-btn" title="Clear Fact Checks">
+                                        <i class="fa-solid fa-trash-can"></i>
+                                    </button>
+                                </div>
+                                <div class="notes-content">
+                                    <div id="fact-check-session-list" class="analysis-list"></div>
+                                    <div class="empty-state" id="fact-check-empty-state">
+                                        <i class="fa-regular fa-circle-question"></i>
+                                        <p>Fact checks will appear as conversation context builds</p>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -206,6 +280,66 @@
                 </div>
             </div>
 
+            <!-- Responses Tab -->
+            <div id="tab-responses" class="tab-content">
+                <div class="notes-full-layout">
+                    <div class="notes-full-panel">
+                        <div class="notes-full-header">
+                            <h2>Response Guidance</h2>
+                            <span class="subtitle">AI-generated, fact-based responses for tense or legal-style situations</span>
+                        </div>
+                        <div class="notes-full-toolbar">
+                            <div style="flex:1"></div>
+                            <button class="action-btn" id="responses-refresh-full-btn">
+                                <i class="fa-solid fa-arrows-rotate"></i>
+                                <span>Refresh</span>
+                            </button>
+                            <button class="action-btn danger" id="responses-clear-full-btn">
+                                <i class="fa-solid fa-trash-can"></i>
+                                <span>Clear</span>
+                            </button>
+                        </div>
+                        <div class="notes-full-content">
+                            <div class="analysis-list full" id="responses-full-list"></div>
+                            <div class="empty-state" id="responses-full-empty">
+                                <i class="fa-regular fa-comment-dots"></i>
+                                <p>No responses yet. Start a live session and generate response guidance.</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Fact Check Tab -->
+            <div id="tab-fact-check" class="tab-content">
+                <div class="notes-full-layout">
+                    <div class="notes-full-panel">
+                        <div class="notes-full-header">
+                            <h2>Fact Check</h2>
+                            <span class="subtitle">Claim checks based on transcript and available context</span>
+                        </div>
+                        <div class="notes-full-toolbar">
+                            <div style="flex:1"></div>
+                            <button class="action-btn" id="fact-check-refresh-full-btn">
+                                <i class="fa-solid fa-arrows-rotate"></i>
+                                <span>Refresh</span>
+                            </button>
+                            <button class="action-btn danger" id="fact-check-clear-full-btn">
+                                <i class="fa-solid fa-trash-can"></i>
+                                <span>Clear</span>
+                            </button>
+                        </div>
+                        <div class="notes-full-content">
+                            <div class="analysis-list full" id="fact-check-full-list"></div>
+                            <div class="empty-state" id="fact-check-full-empty">
+                                <i class="fa-regular fa-circle-question"></i>
+                                <p>No fact checks yet. Start a live session and run fact checking.</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <!-- History Tab -->
             <div id="tab-history" class="tab-content">
                 <div class="history-layout">
@@ -220,7 +354,7 @@
                     <div class="history-content" id="history-content">
                         <div class="history-empty">
                             <i class="fa-solid fa-clock-rotate-left"></i>
-                            <p>Select a session from the list to view its transcript and notes</p>
+                            <p>Select a session from the list to view transcript, notes, responses, and fact checks</p>
                         </div>
                     </div>
                 </div>
@@ -275,9 +409,11 @@
                                         <option value="openai">OpenAI</option>
                                         <option value="canopywave">Canopy Wave</option>
                                         <option value="huggingface">Hugging Face</option>
+                                        <option value="gemini">Google Gemini</option>
+                                        <option value="github_models">GitHub Models</option>
                                         <option value="custom">Custom (OpenAI-compatible)</option>
                                     </select>
-                                    <div class="setting-hint">Sets defaults for Base URL/Model. API key can also come from env vars (OPENROUTER_API_KEY, OPENAI_API_KEY, CANOPYWAVE_API_KEY, HF_TOKEN).</div>
+                                    <div class="setting-hint">Sets defaults for Base URL/Model. API key can also come from env vars (OPENROUTER_API_KEY, OPENAI_API_KEY, CANOPYWAVE_API_KEY, HF_TOKEN, GEMINI_API_KEY, GITHUB_TOKEN).</div>
                                 </div>
 
                                 <div class="setting-group">
@@ -301,7 +437,24 @@
                                 <div class="setting-group">
                                     <label>Extra Headers (JSON)</label>
                                     <textarea id="setting-extra-headers" rows="3" placeholder='{"HTTP-Referer":"https://example.com","X-Title":"AI Assistant"}'></textarea>
-                                    <div class="setting-hint">Optional. Added to every request.</div>
+                                    <div class="setting-hint">Optional. Added to every request. GitHub Models defaults to required API version headers automatically.</div>
+                                </div>
+
+                                <div class="setting-row">
+                                    <div class="setting-row-info">
+                                        <div class="setting-row-label">Enable API Fallback</div>
+                                        <div class="setting-row-desc">If one API fails/declines, automatically try the next configured API route</div>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="setting-api-fallback" checked>
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+
+                                <div class="setting-group">
+                                    <label>Additional API Routes (JSON Array)</label>
+                                    <textarea id="setting-api-routes" rows="6" placeholder='[{"provider":"openai","api_key":"","base_url":"https://api.openai.com/v1","model":"gpt-4o-mini","api_extra_headers":{}},{"provider":"huggingface","api_key":"","base_url":"https://router.huggingface.co/v1","model":"HuggingFaceTB/SmolLM2-1.7B-Instruct:groq","api_extra_headers":{}}]'></textarea>
+                                    <div class="setting-hint">Ordered fallback chain after the primary API above. Leave API key blank to use provider env vars.</div>
                                 </div>
                             </div>
                             
@@ -313,18 +466,29 @@
                         <!-- Assistant Settings -->
                         <div class="settings-panel hidden" id="settings-assistant">
                             <div class="settings-section">
-                                <div class="settings-section-title">Assistant Behavior</div>
-                                
+                                <div class="settings-section-title">Response System</div>
+
+                                <div class="setting-row">
+                                    <div class="setting-row-info">
+                                        <div class="setting-row-label">Enable Responses</div>
+                                        <div class="setting-row-desc">Generate strategic, fact-based response guidance</div>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="setting-response-enabled" checked>
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+
                                 <div class="setting-group">
-                                    <label>System Prompt</label>
-                                    <textarea id="setting-prompt" rows="5">You are a helpful AI assistant. Summarize the user's input and reply concisely. Focus on being practical and actionable.</textarea>
-                                    <div class="setting-hint">Instructions that shape how the AI responds.</div>
+                                    <label>Response Prompt</label>
+                                    <textarea id="setting-response-prompt" rows="5">Generate a strategic, fact-based response the user can say in an argument or legal-style dispute. Use only information grounded in the transcript/context. Be concise, calm, and defensible. Do not invent facts.</textarea>
+                                    <div class="setting-hint">Instructions for how response guidance should be generated.</div>
                                 </div>
 
                                 <div class="setting-row">
                                     <div class="setting-row-info">
-                                        <div class="setting-row-label">Auto-respond</div>
-                                        <div class="setting-row-desc">AI automatically responds to transcriptions</div>
+                                        <div class="setting-row-label">Auto Generate</div>
+                                        <div class="setting-row-desc">Automatically generate guidance during live transcription</div>
                                     </div>
                                     <label class="toggle-switch">
                                         <input type="checkbox" id="setting-auto-respond">
@@ -332,10 +496,19 @@
                                     </label>
                                 </div>
 
+                                <div class="setting-group">
+                                    <label>Response Context Window (messages)</label>
+                                    <div class="setting-range">
+                                        <input type="range" id="setting-response-context" min="6" max="60" value="14">
+                                        <span class="range-value" id="response-context-value">14</span>
+                                    </div>
+                                    <div class="setting-hint">How many recent messages to use for response generation.</div>
+                                </div>
+
                                 <div class="setting-row">
                                     <div class="setting-row-info">
                                         <div class="setting-row-label">Web Search</div>
-                                        <div class="setting-row-desc">Let AI (and notes) decide when to search the web for accuracy</div>
+                                        <div class="setting-row-desc">Let AI decide when web search helps response/fact-check accuracy</div>
                                     </div>
                                     <label class="toggle-switch">
                                         <input type="checkbox" id="setting-web-search">
@@ -349,7 +522,68 @@
                                         <input type="range" id="setting-ai-interval" min="2" max="30" value="8">
                                         <span class="range-value" id="ai-interval-value">8s</span>
                                     </div>
-                                    <div class="setting-hint">Minimum time between AI responses.</div>
+                                    <div class="setting-hint">Minimum time between auto-generated responses.</div>
+                                </div>
+                            </div>
+
+                            <div class="settings-section">
+                                <div class="settings-section-title">Fact Check System</div>
+
+                                <div class="setting-row">
+                                    <div class="setting-row-info">
+                                        <div class="setting-row-label">Enable Fact Check</div>
+                                        <div class="setting-row-desc">Run claim-level checks against known context</div>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="setting-fact-check-enabled" checked>
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+
+                                <div class="setting-row">
+                                    <div class="setting-row-info">
+                                        <div class="setting-row-label">Live On Message</div>
+                                        <div class="setting-row-desc">Trigger fact checks when a new message is transcribed</div>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="setting-fact-check-live-on-message" checked>
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+
+                                <div class="setting-row">
+                                    <div class="setting-row-info">
+                                        <div class="setting-row-label">Interaction Only</div>
+                                        <div class="setting-row-desc">Disable interval loop; run only after interaction or manual refresh</div>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="setting-fact-check-interaction-only">
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+
+                                <div class="setting-group">
+                                    <label>Fact Check Interval (seconds)</label>
+                                    <div class="setting-range">
+                                        <input type="range" id="setting-fact-check-interval" min="8" max="120" value="25">
+                                        <span class="range-value" id="fact-check-interval-value">25s</span>
+                                    </div>
+                                    <div class="setting-hint">How often to run fact checks when interval mode is enabled.</div>
+                                </div>
+
+                                <div class="setting-group">
+                                    <label>Fact Check Context Window (messages)</label>
+                                    <div class="setting-range">
+                                        <input type="range" id="setting-fact-check-context" min="6" max="80" value="18">
+                                        <span class="range-value" id="fact-check-context-value">18</span>
+                                    </div>
+                                    <div class="setting-hint">How many recent messages to inspect for claims.</div>
+                                </div>
+
+                                <div class="setting-group">
+                                    <label>Fact Check Prompt</label>
+                                    <textarea id="setting-fact-check-prompt" rows="4">Identify key claims in the conversation and classify each as supported, contradicted, or uncertain based only on known context. Do not fabricate evidence.</textarea>
+                                    <div class="setting-hint">Instructions for claim extraction and verdict rules.</div>
                                 </div>
                             </div>
                         </div>
@@ -572,6 +806,20 @@
                                         <option value="cuda">GPU (CUDA)</option>
                                     </select>
                                     <div class="setting-hint">Controls whether local transcription runs on CPU or NVIDIA GPU (CUDA). GPU requires CUDA runtime DLLs on PATH (e.g. cublas64_12.dll); if missing, the app falls back to CPU. Applies on next app start.</div>
+                                </div>
+
+                                <div class="setting-group">
+                                    <label>Transcription Profile</label>
+                                    <select id="setting-transcription-profile">
+                                        <option value="auto">Auto (recommended)</option>
+                                        <option value="manual">Manual (use advanced values)</option>
+                                        <option value="cpu_realtime">CPU - Realtime</option>
+                                        <option value="cpu_accuracy">CPU - Accuracy</option>
+                                        <option value="gpu_realtime">GPU - Realtime</option>
+                                        <option value="gpu_balanced">GPU - Balanced</option>
+                                        <option value="gpu_quality">GPU - Quality</option>
+                                    </select>
+                                    <div class="setting-hint">Applies tuned chunk/beam/continuity behavior by device. Auto picks CPU-Realtime or GPU-Balanced.</div>
                                 </div>
 
                                 <div class="setting-row">

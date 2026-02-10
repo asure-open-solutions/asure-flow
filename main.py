@@ -28,6 +28,58 @@ from starlette.websockets import WebSocketDisconnect
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("Main")
+important_logger = logging.getLogger("Main.IMPORTANT")
+
+_IMPORTANT_LAST_BY_KEY: dict[str, float] = {}
+_NOISY_LOGGERS = (
+    "backend.transcription",
+    "backend.audio",
+    "faster_whisper",
+    "uvicorn.access",
+)
+
+
+def _safe_log_value(value: Any, *, max_len: int = 96) -> str:
+    if value is None:
+        return "-"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    s = str(value).strip()
+    if not s:
+        return "-"
+    s = " ".join(s.split())
+    if len(s) > max_len:
+        s = s[: max_len - 3] + "..."
+    return s
+
+
+def log_important(
+    event: str,
+    *,
+    level: int = logging.INFO,
+    dedupe_key: str | None = None,
+    dedupe_window_s: float = 0.0,
+    **fields: Any,
+) -> None:
+    try:
+        ev = _safe_log_value(event, max_len=64)
+        if dedupe_key and dedupe_window_s > 0:
+            token = f"{ev}|{dedupe_key}"
+            now_ts = time.time()
+            prev_ts = _IMPORTANT_LAST_BY_KEY.get(token, 0.0)
+            if now_ts - prev_ts < float(dedupe_window_s):
+                return
+            _IMPORTANT_LAST_BY_KEY[token] = now_ts
+
+        if fields:
+            parts = [f"{k}={_safe_log_value(v)}" for k, v in sorted(fields.items())]
+            important_logger.log(level, f"IMPORTANT {ev} | " + " ".join(parts))
+        else:
+            important_logger.log(level, f"IMPORTANT {ev}")
+    except Exception:
+        logger.exception("Failed to emit important log")
 
 # Best-effort: dump tracebacks on native crashes (segfault/abort).
 with suppress(Exception):
@@ -44,6 +96,8 @@ transcription_queue = asyncio.Queue()
 
 _TRANSCRIPT_LAST_UPDATE_TS: dict[str, float] = {}
 _TRANSCRIPT_CLEANUP_LAST_TS: float = 0.0
+_TRANSCRIPT_ACTIVITY_SEQ: int = 0
+_AI_TRIGGER_BASELINE_TEXT: dict[str, str] = {}
 
 
 # ============================================
@@ -63,10 +117,38 @@ class NoteItem:
 
 
 @dataclass
+class ResponseItem:
+    id: str
+    content: str
+    timestamp: str
+    responding_to_text: str = ""
+    responding_to_source: str = ""
+    responding_to_speaker: str = ""
+    responding_to_timestamp: str = ""
+    basis_facts: List[str] = field(default_factory=list)
+    cautions: List[str] = field(default_factory=list)
+    confidence: str = ""
+    source: str = "ai"
+    session_id: Optional[str] = None
+
+
+@dataclass
+class FactCheckItem:
+    id: str
+    claim: str
+    verdict: str
+    analysis: str
+    timestamp: str
+    evidence: List[str] = field(default_factory=list)
+    confidence: str = ""
+    session_id: Optional[str] = None
+
+
+@dataclass
 class TranscriptMessage:
     id: str
     text: str
-    source: str  # "user" (You), "third_party"/"loopback" (Third-Party), "assistant" (AI)
+    source: str  # "user" (You), "third_party"/"loopback" (Third-Party)
     timestamp: str
     clean_text: Optional[str] = None
     speaker_id: Optional[str] = None
@@ -82,6 +164,8 @@ class Session:
     context: str = ""
     transcript: List[TranscriptMessage] = field(default_factory=list)
     notes: List[NoteItem] = field(default_factory=list)
+    responses: List[ResponseItem] = field(default_factory=list)
+    fact_checks: List[FactCheckItem] = field(default_factory=list)
     speaker_names: Dict[str, str] = field(default_factory=dict)  # speaker_id -> friendly name
     
     def to_dict(self) -> dict:
@@ -93,11 +177,31 @@ class Session:
             "context": self.context,
             "transcript": [asdict(m) for m in self.transcript],
             "notes": [asdict(n) for n in self.notes],
+            "responses": [asdict(r) for r in self.responses],
+            "fact_checks": [asdict(f) for f in self.fact_checks],
             "speaker_names": dict(self.speaker_names or {}),
         }
     
     @classmethod
     def from_dict(cls, data: dict) -> "Session":
+        responses: list[ResponseItem] = []
+        for r in data.get("responses", []) or []:
+            if not isinstance(r, dict):
+                continue
+            try:
+                responses.append(ResponseItem(**r))
+            except Exception:
+                continue
+
+        fact_checks: list[FactCheckItem] = []
+        for f in data.get("fact_checks", []) or []:
+            if not isinstance(f, dict):
+                continue
+            try:
+                fact_checks.append(FactCheckItem(**f))
+            except Exception:
+                continue
+
         return cls(
             id=data["id"],
             started_at=data["started_at"],
@@ -106,6 +210,8 @@ class Session:
             context=data.get("context", "") or "",
             transcript=[TranscriptMessage(**m) for m in data.get("transcript", [])],
             notes=[NoteItem(**n) for n in data.get("notes", [])],
+            responses=responses,
+            fact_checks=fact_checks,
             speaker_names=dict(data.get("speaker_names") or {}),
         )
 
@@ -125,6 +231,11 @@ DEFAULT_CONFIG = {
     "base_url": "https://openrouter.ai/api/v1",
     "model": "openai/gpt-4o-mini",
     "api_extra_headers": {},  # Optional extra headers passed to the OpenAI-compatible client.
+    "api_fallback_enabled": True,
+    # Ordered fallback routes (each entry mirrors primary API fields).
+    # Example:
+    # [{"provider":"openai","api_key":"...","base_url":"https://api.openai.com/v1","model":"gpt-4o-mini","api_extra_headers":{}}]
+    "api_routes": [],
     
     # Devices
     "mic_device": None,
@@ -137,12 +248,17 @@ DEFAULT_CONFIG = {
     "ai_enabled": False,
     "ai_min_interval_seconds": 8.0,
     "auto_respond": False,
+    "response_enabled": True,
+    "response_context_messages": 14,
+    "response_max_items": 20,
+    "response_require_policy_gate": True,
+    "response_policy_min_confidence": 0.58,
+    "response_prompt": (
+        "Generate a strategic, fact-based response the user can say in an argument or legal-style dispute. "
+        "Use only information grounded in the transcript/context. Be concise, calm, and defensible. "
+        "Do not invent facts."
+    ),
     "web_search_enabled": False,
-    "web_search_mode": "auto",  # "auto" or "always" (only used when web_search_enabled is True)
-    "web_search_max_results": 5,
-    "web_search_timeout_seconds": 6.0,
-    "web_search_cache_ttl_seconds": 180.0,
-    "web_search_min_interval_seconds": 6.0,
     "web_search_mode": "auto",  # "auto" or "always" (only used when web_search_enabled is True)
     "web_search_max_results": 5,
     "web_search_timeout_seconds": 6.0,
@@ -175,6 +291,20 @@ DEFAULT_CONFIG = {
     "notes_extract_risks": True,
     "notes_extract_facts": True,
 
+    # Fact Check
+    "fact_check_enabled": True,
+    "fact_check_interval_seconds": 25,
+    "fact_check_on_interaction_only": False,
+    "fact_check_live_on_message": True,
+    "fact_check_debounce_seconds": 2.5,
+    "fact_check_trigger_min_interval_seconds": 10.0,
+    "fact_check_context_messages": 18,
+    "fact_check_max_items": 12,
+    "fact_check_prompt": (
+        "Identify key claims in the conversation and classify each as supported, contradicted, or uncertain "
+        "based only on known context. Do not fabricate evidence."
+    ),
+
     # Speech preprocessing (voice-only transcription).
     "speech_preprocess_enabled": True,
     "speech_vad_enabled": True,
@@ -191,6 +321,13 @@ DEFAULT_CONFIG = {
     "speech_denoise_strength": 0.8,
     "speech_denoise_floor": 0.06,
     "whisper_vad_filter": True,
+    "whisper_beam_size": 1,
+    "transcription_chunk_duration_seconds": 3.2,
+    "transcription_chunk_overlap_seconds": 0.16,
+    # "auto" chooses profile based on whisper_device.
+    # "manual" uses whisper_beam_size/chunk_duration/chunk_overlap as provided.
+    # cpu_realtime|cpu_accuracy|gpu_realtime|gpu_balanced|gpu_quality apply tuned defaults.
+    "transcription_profile": "auto",
     "whisper_model_size": "tiny",
     "whisper_device": "cpu",  # "cpu" or "cuda"
     "speaker_diarization_enabled": False,
@@ -203,6 +340,8 @@ DEFAULT_CONFIG = {
     # Transcript quality
     "transcript_merge_enabled": True,
     "transcript_merge_window_seconds": 4.0,
+    # Allows merging strong same-speaker continuations across slower chunk arrivals.
+    "transcript_merge_continuation_window_seconds": 18.0,
     # "off" = disabled, "cleanup" = punctuation/fluency only, "paraphrase" = rewrite into what speaker likely meant.
     "transcript_ai_mode": "off",
     "transcript_ai_cleanup_debounce_seconds": 1.25,
@@ -214,7 +353,8 @@ DEFAULT_CONFIG = {
 @dataclass
 class ConnectionState:
     last_policy_eval_ts: float = 0.0
-    last_ai_reply_ts: float = 0.0
+    last_response_ts: float = 0.0
+    last_fact_check_ts: float = 0.0
     llm_not_configured_warned: bool = False
 
 
@@ -307,6 +447,22 @@ _API_PROVIDER_PRESETS: dict[str, dict[str, object]] = {
         "model": "HuggingFaceTB/SmolLM2-1.7B-Instruct:groq",
         "api_key_envs": ["HF_TOKEN", "HUGGINGFACEHUB_API_TOKEN"],
     },
+    # Gemini via OpenAI-compatible endpoint.
+    "gemini": {
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "model": "gemini-2.5-flash",
+        "api_key_env": "GEMINI_API_KEY",
+    },
+    # GitHub Models OpenAI-compatible endpoint.
+    "github_models": {
+        "base_url": "https://models.github.ai/inference",
+        "model": "openai/gpt-4.1",
+        "api_key_envs": ["GITHUB_TOKEN", "GH_TOKEN"],
+        "api_extra_headers": {
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    },
     "custom": {},
 }
 
@@ -320,6 +476,10 @@ def _normalize_api_provider(provider: str | None) -> str:
         p = "canopywave"
     if p in ("hf", "hugging_face"):
         p = "huggingface"
+    if p in ("google", "google_ai", "google_gemini"):
+        p = "gemini"
+    if p in ("github", "github_model", "githubmodels", "gh_models", "gh_model"):
+        p = "github_models"
     if p in ("open_router",):
         p = "openrouter"
     if p not in _API_PROVIDER_PRESETS:
@@ -339,6 +499,10 @@ def _infer_provider_from_base_url(base_url: str | None) -> str:
         return "canopywave"
     if "router.huggingface.co" in u or "api-inference.huggingface.co" in u:
         return "huggingface"
+    if "generativelanguage.googleapis.com" in u:
+        return "gemini"
+    if "models.github.ai" in u:
+        return "github_models"
     return "custom"
 
 
@@ -363,60 +527,567 @@ def _coerce_headers(value: object) -> dict[str, str]:
     return {}
 
 
-def _effective_api_settings(cfg: dict) -> tuple[str, str, str, dict[str, str]]:
-    base_url_raw = (cfg.get("base_url") or "").strip()
-    provider = _normalize_api_provider(cfg.get("api_provider"))
+def _coerce_bool(value: object, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if s in ("1", "true", "yes", "on", "y"):
+            return True
+        if s in ("0", "false", "no", "off", "n", ""):
+            return False
+    return default
+
+
+def _coerce_str(value: object, default: str, *, strip: bool = True, max_len: int | None = None) -> str:
+    if value is None:
+        out = default
+    elif isinstance(value, str):
+        out = value
+    else:
+        out = str(value)
+    if strip:
+        out = out.strip()
+    if max_len is not None and max_len >= 0:
+        out = out[:max_len]
+    return out
+
+
+def _coerce_int_in_range(value: object, default: int, *, min_v: int | None = None, max_v: int | None = None) -> int:
+    try:
+        out = int(float(value))
+    except Exception:
+        out = int(default)
+    if min_v is not None and out < min_v:
+        out = min_v
+    if max_v is not None and out > max_v:
+        out = max_v
+    return out
+
+
+def _coerce_float_in_range(
+    value: object,
+    default: float,
+    *,
+    min_v: float | None = None,
+    max_v: float | None = None,
+) -> float:
+    try:
+        out = float(value)
+    except Exception:
+        out = float(default)
+    if min_v is not None and out < min_v:
+        out = min_v
+    if max_v is not None and out > max_v:
+        out = max_v
+    return out
+
+
+def _coerce_choice(value: object, choices: set[str], default: str) -> str:
+    s = _coerce_str(value, default).lower()
+    return s if s in choices else default
+
+
+def _coerce_device(value: object) -> str | None:
+    if value is None:
+        return None
+    s = _coerce_str(value, "", strip=True, max_len=256)
+    return s or None
+
+
+def _sanitize_api_route_entry(value: object) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        return None
+
+    base_url_raw = _coerce_str(value.get("base_url"), "", max_len=2048)
+    provider = _normalize_api_provider(_coerce_str(value.get("provider"), ""))
+    inferred_provider = _infer_provider_from_base_url(base_url_raw)
+    if provider == "custom" and inferred_provider != "custom":
+        provider = inferred_provider
+    preset = _API_PROVIDER_PRESETS.get(provider, {})
+
+    base_url = base_url_raw or str(preset.get("base_url") or "")
+    model = _coerce_str(
+        value.get("model"),
+        str(preset.get("model") or DEFAULT_CONFIG["model"]),
+        max_len=512,
+    ) or str(DEFAULT_CONFIG["model"])
+    api_key = _coerce_str(value.get("api_key"), "", max_len=4096)
+    preset_headers = _coerce_headers(preset.get("api_extra_headers"))
+    extra_headers = {**preset_headers, **_coerce_headers(value.get("api_extra_headers"))}
+    enabled = _coerce_bool(value.get("enabled"), True)
+
+    if not base_url:
+        return None
+
+    return {
+        "provider": provider,
+        "api_key": api_key,
+        "base_url": base_url,
+        "model": model,
+        "api_extra_headers": extra_headers,
+        "enabled": enabled,
+    }
+
+
+def _coerce_api_routes_list(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+    out: list[dict[str, object]] = []
+    for raw in value:
+        item = _sanitize_api_route_entry(raw)
+        if not item:
+            continue
+        out.append(item)
+        if len(out) >= 8:
+            break
+    return out
+
+
+def _sanitize_config_values(raw: dict | None, *, base: dict | None = None) -> dict:
+    raw_dict = raw if isinstance(raw, dict) else {}
+    src: dict[str, object] = {}
+    if isinstance(base, dict):
+        src.update(base)
+    if raw_dict:
+        src.update(raw_dict)
+
+    # Back-compat migration: older boolean flag maps to cleanup mode when explicit mode is missing.
+    if "transcript_ai_mode" not in raw_dict and _coerce_bool(raw_dict.get("transcript_ai_cleanup_enabled"), False):
+        src["transcript_ai_mode"] = "cleanup"
+
+    # Back-compat migration: if older config only had a custom system prompt, re-use it for response prompt.
+    response_prompt_raw = _coerce_str(src.get("response_prompt"), "", max_len=12000)
+    system_prompt_raw = _coerce_str(src.get("system_prompt"), DEFAULT_CONFIG["system_prompt"], max_len=12000)
+    default_legacy = _coerce_str(DEFAULT_CONFIG.get("system_prompt"), "", max_len=12000)
+    if "response_prompt" not in raw_dict:
+        legacy_prompt = _coerce_str(raw_dict.get("system_prompt"), "", max_len=12000)
+        if legacy_prompt and legacy_prompt != default_legacy:
+            response_prompt_raw = legacy_prompt
+    if not response_prompt_raw:
+        if system_prompt_raw and system_prompt_raw != default_legacy:
+            response_prompt_raw = system_prompt_raw
+        else:
+            response_prompt_raw = _coerce_str(DEFAULT_CONFIG["response_prompt"], "", max_len=12000)
+
+    provider = _normalize_api_provider(_coerce_str(src.get("api_provider"), str(DEFAULT_CONFIG["api_provider"])))
+    base_url_raw = _coerce_str(src.get("base_url"), str(DEFAULT_CONFIG["base_url"]), max_len=2048)
+    inferred_provider = _infer_provider_from_base_url(base_url_raw)
+    if provider == "custom" and inferred_provider != "custom":
+        provider = inferred_provider
+
+    out: dict[str, object] = dict(DEFAULT_CONFIG)
+
+    out["api_provider"] = provider
+    out["api_key"] = _coerce_str(src.get("api_key"), "", max_len=4096)
+    out["base_url"] = base_url_raw or str(DEFAULT_CONFIG["base_url"])
+    out["model"] = _coerce_str(src.get("model"), str(DEFAULT_CONFIG["model"]), max_len=512) or str(DEFAULT_CONFIG["model"])
+    out["api_extra_headers"] = _coerce_headers(src.get("api_extra_headers"))
+    out["api_fallback_enabled"] = _coerce_bool(
+        src.get("api_fallback_enabled"),
+        bool(DEFAULT_CONFIG["api_fallback_enabled"]),
+    )
+    out["api_routes"] = _coerce_api_routes_list(src.get("api_routes"))
+
+    out["mic_device"] = _coerce_device(src.get("mic_device"))
+    out["mic_enabled"] = _coerce_bool(src.get("mic_enabled"), bool(DEFAULT_CONFIG["mic_enabled"]))
+    out["loopback_device"] = _coerce_device(src.get("loopback_device"))
+    out["loopback_enabled"] = _coerce_bool(src.get("loopback_enabled"), bool(DEFAULT_CONFIG["loopback_enabled"]))
+
+    out["system_prompt"] = system_prompt_raw or str(DEFAULT_CONFIG["system_prompt"])
+    out["ai_enabled"] = _coerce_bool(src.get("ai_enabled"), bool(DEFAULT_CONFIG["ai_enabled"]))
+    out["ai_min_interval_seconds"] = _coerce_float_in_range(src.get("ai_min_interval_seconds"), 8.0, min_v=0.0, max_v=120.0)
+    out["auto_respond"] = _coerce_bool(src.get("auto_respond"), bool(DEFAULT_CONFIG["auto_respond"]))
+    out["response_enabled"] = _coerce_bool(src.get("response_enabled"), bool(DEFAULT_CONFIG["response_enabled"]))
+    out["response_context_messages"] = _coerce_int_in_range(src.get("response_context_messages"), 14, min_v=4, max_v=120)
+    out["response_max_items"] = _coerce_int_in_range(src.get("response_max_items"), 20, min_v=1, max_v=100)
+    out["response_require_policy_gate"] = _coerce_bool(
+        src.get("response_require_policy_gate"),
+        bool(DEFAULT_CONFIG["response_require_policy_gate"]),
+    )
+    out["response_policy_min_confidence"] = _coerce_float_in_range(
+        src.get("response_policy_min_confidence"),
+        0.58,
+        min_v=0.0,
+        max_v=1.0,
+    )
+    out["response_prompt"] = response_prompt_raw
+    out["web_search_enabled"] = _coerce_bool(src.get("web_search_enabled"), bool(DEFAULT_CONFIG["web_search_enabled"]))
+    out["web_search_mode"] = _coerce_choice(
+        src.get("web_search_mode"),
+        {"auto", "always"},
+        str(DEFAULT_CONFIG["web_search_mode"]),
+    )
+    out["web_search_max_results"] = _coerce_int_in_range(src.get("web_search_max_results"), 5, min_v=1, max_v=20)
+    out["web_search_timeout_seconds"] = _coerce_float_in_range(src.get("web_search_timeout_seconds"), 6.0, min_v=1.0, max_v=30.0)
+    out["web_search_cache_ttl_seconds"] = _coerce_float_in_range(
+        src.get("web_search_cache_ttl_seconds"),
+        180.0,
+        min_v=15.0,
+        max_v=3600.0,
+    )
+    out["web_search_min_interval_seconds"] = _coerce_float_in_range(
+        src.get("web_search_min_interval_seconds"),
+        6.0,
+        min_v=0.0,
+        max_v=300.0,
+    )
+
+    out["policy_enabled"] = _coerce_bool(src.get("policy_enabled"), bool(DEFAULT_CONFIG["policy_enabled"]))
+    out["policy_prompt"] = _coerce_str(src.get("policy_prompt"), str(DEFAULT_CONFIG["policy_prompt"]), max_len=12000)
+    out["policy_show_withheld"] = _coerce_bool(src.get("policy_show_withheld"), bool(DEFAULT_CONFIG["policy_show_withheld"]))
+    out["policy_min_interval_seconds"] = _coerce_float_in_range(src.get("policy_min_interval_seconds"), 4.0, min_v=0.0, max_v=60.0)
+
+    out["notes_enabled"] = _coerce_bool(src.get("notes_enabled"), bool(DEFAULT_CONFIG["notes_enabled"]))
+    out["notes_interval_seconds"] = _coerce_int_in_range(src.get("notes_interval_seconds"), 30, min_v=5, max_v=600)
+    out["notes_on_interaction_only"] = _coerce_bool(
+        src.get("notes_on_interaction_only"),
+        bool(DEFAULT_CONFIG["notes_on_interaction_only"]),
+    )
+    out["notes_format"] = _coerce_choice(
+        src.get("notes_format"),
+        {"bullets", "structured", "summary", "custom"},
+        str(DEFAULT_CONFIG["notes_format"]),
+    )
+    out["notes_prompt"] = _coerce_str(src.get("notes_prompt"), str(DEFAULT_CONFIG["notes_prompt"]), max_len=12000)
+    out["notes_context_messages"] = _coerce_int_in_range(src.get("notes_context_messages"), 10, min_v=3, max_v=120)
+    out["notes_max_chars"] = _coerce_int_in_range(src.get("notes_max_chars"), 24000, min_v=2000, max_v=200000)
+    out["notes_live_on_message"] = _coerce_bool(src.get("notes_live_on_message"), bool(DEFAULT_CONFIG["notes_live_on_message"]))
+    out["notes_debounce_seconds"] = _coerce_float_in_range(src.get("notes_debounce_seconds"), 2.5, min_v=0.2, max_v=10.0)
+    out["notes_trigger_min_interval_seconds"] = _coerce_float_in_range(
+        src.get("notes_trigger_min_interval_seconds"),
+        10.0,
+        min_v=0.0,
+        max_v=300.0,
+    )
+    out["notes_smart_enabled"] = _coerce_bool(src.get("notes_smart_enabled"), bool(DEFAULT_CONFIG["notes_smart_enabled"]))
+    out["notes_smart_target_ai_notes"] = _coerce_int_in_range(
+        src.get("notes_smart_target_ai_notes"),
+        12,
+        min_v=2,
+        max_v=100,
+    )
+    out["notes_smart_max_ai_notes"] = _coerce_int_in_range(
+        src.get("notes_smart_max_ai_notes"),
+        18,
+        min_v=3,
+        max_v=120,
+    )
+    if int(out["notes_smart_max_ai_notes"]) < int(out["notes_smart_target_ai_notes"]):
+        out["notes_smart_max_ai_notes"] = int(out["notes_smart_target_ai_notes"])
+    out["notes_extract_decisions"] = _coerce_bool(src.get("notes_extract_decisions"), bool(DEFAULT_CONFIG["notes_extract_decisions"]))
+    out["notes_extract_actions"] = _coerce_bool(src.get("notes_extract_actions"), bool(DEFAULT_CONFIG["notes_extract_actions"]))
+    out["notes_extract_risks"] = _coerce_bool(src.get("notes_extract_risks"), bool(DEFAULT_CONFIG["notes_extract_risks"]))
+    out["notes_extract_facts"] = _coerce_bool(src.get("notes_extract_facts"), bool(DEFAULT_CONFIG["notes_extract_facts"]))
+
+    out["fact_check_enabled"] = _coerce_bool(src.get("fact_check_enabled"), bool(DEFAULT_CONFIG["fact_check_enabled"]))
+    out["fact_check_interval_seconds"] = _coerce_int_in_range(src.get("fact_check_interval_seconds"), 25, min_v=5, max_v=600)
+    out["fact_check_on_interaction_only"] = _coerce_bool(
+        src.get("fact_check_on_interaction_only"),
+        bool(DEFAULT_CONFIG["fact_check_on_interaction_only"]),
+    )
+    out["fact_check_live_on_message"] = _coerce_bool(
+        src.get("fact_check_live_on_message"),
+        bool(DEFAULT_CONFIG["fact_check_live_on_message"]),
+    )
+    out["fact_check_debounce_seconds"] = _coerce_float_in_range(
+        src.get("fact_check_debounce_seconds"),
+        2.5,
+        min_v=0.2,
+        max_v=10.0,
+    )
+    out["fact_check_trigger_min_interval_seconds"] = _coerce_float_in_range(
+        src.get("fact_check_trigger_min_interval_seconds"),
+        10.0,
+        min_v=0.0,
+        max_v=300.0,
+    )
+    out["fact_check_context_messages"] = _coerce_int_in_range(src.get("fact_check_context_messages"), 18, min_v=3, max_v=120)
+    out["fact_check_max_items"] = _coerce_int_in_range(src.get("fact_check_max_items"), 12, min_v=1, max_v=100)
+    out["fact_check_prompt"] = _coerce_str(src.get("fact_check_prompt"), str(DEFAULT_CONFIG["fact_check_prompt"]), max_len=12000)
+
+    out["speech_preprocess_enabled"] = _coerce_bool(src.get("speech_preprocess_enabled"), bool(DEFAULT_CONFIG["speech_preprocess_enabled"]))
+    out["speech_vad_enabled"] = _coerce_bool(src.get("speech_vad_enabled"), bool(DEFAULT_CONFIG["speech_vad_enabled"]))
+    out["speech_vad_threshold"] = _coerce_float_in_range(src.get("speech_vad_threshold"), 0.5, min_v=0.05, max_v=0.98)
+    out["speech_vad_neg_threshold"] = _coerce_float_in_range(src.get("speech_vad_neg_threshold"), 0.35, min_v=0.0, max_v=0.95)
+    if float(out["speech_vad_neg_threshold"]) >= float(out["speech_vad_threshold"]):
+        out["speech_vad_neg_threshold"] = max(0.0, float(out["speech_vad_threshold"]) - 0.05)
+    out["speech_vad_min_speech_ms"] = _coerce_int_in_range(src.get("speech_vad_min_speech_ms"), 200, min_v=50, max_v=4000)
+    out["speech_vad_max_speech_s"] = _coerce_float_in_range(src.get("speech_vad_max_speech_s"), 30.0, min_v=1.0, max_v=120.0)
+    out["speech_vad_min_silence_ms"] = _coerce_int_in_range(src.get("speech_vad_min_silence_ms"), 650, min_v=40, max_v=4000)
+    out["speech_vad_speech_pad_ms"] = _coerce_int_in_range(src.get("speech_vad_speech_pad_ms"), 120, min_v=0, max_v=1200)
+    out["speech_vad_concat_silence_ms"] = _coerce_int_in_range(src.get("speech_vad_concat_silence_ms"), 220, min_v=0, max_v=2500)
+    out["speech_denoise_enabled"] = _coerce_bool(src.get("speech_denoise_enabled"), bool(DEFAULT_CONFIG["speech_denoise_enabled"]))
+    out["speech_denoise_strength"] = _coerce_float_in_range(src.get("speech_denoise_strength"), 0.8, min_v=0.0, max_v=1.0)
+    out["speech_denoise_floor"] = _coerce_float_in_range(src.get("speech_denoise_floor"), 0.06, min_v=0.0, max_v=1.0)
+    out["whisper_vad_filter"] = _coerce_bool(src.get("whisper_vad_filter"), bool(DEFAULT_CONFIG["whisper_vad_filter"]))
+    out["whisper_beam_size"] = _coerce_int_in_range(src.get("whisper_beam_size"), 1, min_v=1, max_v=8)
+    out["transcription_profile"] = _coerce_choice(
+        src.get("transcription_profile"),
+        {"auto", "manual", "cpu_realtime", "cpu_accuracy", "gpu_realtime", "gpu_balanced", "gpu_quality"},
+        str(DEFAULT_CONFIG["transcription_profile"]),
+    )
+    out["transcription_chunk_duration_seconds"] = _coerce_float_in_range(
+        src.get("transcription_chunk_duration_seconds"),
+        3.2,
+        min_v=1.0,
+        max_v=8.0,
+    )
+    out["transcription_chunk_overlap_seconds"] = _coerce_float_in_range(
+        src.get("transcription_chunk_overlap_seconds"),
+        0.16,
+        min_v=0.0,
+        max_v=1.2,
+    )
+    if float(out["transcription_chunk_overlap_seconds"]) >= float(out["transcription_chunk_duration_seconds"]):
+        out["transcription_chunk_overlap_seconds"] = max(0.0, float(out["transcription_chunk_duration_seconds"]) * 0.15)
+    # Back-compat performance migration:
+    # if older defaults were persisted as explicit values, lift to newer lower-overhead defaults.
+    try:
+        raw_dur = float(raw_dict.get("transcription_chunk_duration_seconds")) if "transcription_chunk_duration_seconds" in raw_dict else None
+        raw_ovr = float(raw_dict.get("transcription_chunk_overlap_seconds")) if "transcription_chunk_overlap_seconds" in raw_dict else None
+        if raw_dur is not None and raw_ovr is not None and abs(raw_dur - 2.4) < 1e-6 and abs(raw_ovr - 0.24) < 1e-6:
+            out["transcription_chunk_duration_seconds"] = 3.2
+            out["transcription_chunk_overlap_seconds"] = 0.16
+    except Exception:
+        pass
+    out["whisper_model_size"] = _coerce_str(src.get("whisper_model_size"), str(DEFAULT_CONFIG["whisper_model_size"]), max_len=64)
+    out["whisper_device"] = _coerce_choice(src.get("whisper_device"), {"cpu", "cuda", "gpu"}, str(DEFAULT_CONFIG["whisper_device"]))
+    if out["whisper_device"] == "gpu":
+        out["whisper_device"] = "cuda"
+    out["speaker_diarization_enabled"] = _coerce_bool(
+        src.get("speaker_diarization_enabled"),
+        bool(DEFAULT_CONFIG["speaker_diarization_enabled"]),
+    )
+
+    out["autosave_enabled"] = _coerce_bool(src.get("autosave_enabled"), bool(DEFAULT_CONFIG["autosave_enabled"]))
+    out["session_timeout_minutes"] = _coerce_int_in_range(src.get("session_timeout_minutes"), 30, min_v=1, max_v=24 * 60)
+    out["verbose_logging"] = _coerce_bool(src.get("verbose_logging"), bool(DEFAULT_CONFIG["verbose_logging"]))
+
+    out["transcript_merge_enabled"] = _coerce_bool(src.get("transcript_merge_enabled"), bool(DEFAULT_CONFIG["transcript_merge_enabled"]))
+    out["transcript_merge_window_seconds"] = _coerce_float_in_range(
+        src.get("transcript_merge_window_seconds"),
+        4.0,
+        min_v=0.0,
+        max_v=30.0,
+    )
+    out["transcript_merge_continuation_window_seconds"] = _coerce_float_in_range(
+        src.get("transcript_merge_continuation_window_seconds"),
+        18.0,
+        min_v=0.0,
+        max_v=45.0,
+    )
+    if float(out["transcript_merge_continuation_window_seconds"]) < float(out["transcript_merge_window_seconds"]):
+        out["transcript_merge_continuation_window_seconds"] = float(out["transcript_merge_window_seconds"])
+    out["transcript_ai_mode"] = _coerce_choice(
+        src.get("transcript_ai_mode"),
+        {"off", "cleanup", "paraphrase"},
+        str(DEFAULT_CONFIG["transcript_ai_mode"]),
+    )
+    out["transcript_ai_cleanup_debounce_seconds"] = _coerce_float_in_range(
+        src.get("transcript_ai_cleanup_debounce_seconds"),
+        1.25,
+        min_v=0.2,
+        max_v=15.0,
+    )
+    out["transcript_ai_cleanup_min_interval_seconds"] = _coerce_float_in_range(
+        src.get("transcript_ai_cleanup_min_interval_seconds"),
+        3.0,
+        min_v=0.0,
+        max_v=120.0,
+    )
+    out["transcript_display_mode"] = _coerce_choice(
+        src.get("transcript_display_mode"),
+        {"raw", "clean"},
+        str(DEFAULT_CONFIG["transcript_display_mode"]),
+    )
+    if out["transcript_ai_mode"] == "off":
+        out["transcript_display_mode"] = "raw"
+
+    return out
+
+
+def _resolve_api_key_for_provider(provider: str, explicit_key: object) -> str:
+    api_key = _coerce_str(explicit_key, "", max_len=4096)
+    if api_key:
+        return api_key
+
+    preset = _API_PROVIDER_PRESETS.get(_normalize_api_provider(provider), {})
+    env_names = preset.get("api_key_envs")
+    if isinstance(env_names, list):
+        for env_name in env_names:
+            if not isinstance(env_name, str):
+                continue
+            api_key = (os.environ.get(env_name) or "").strip()
+            if api_key:
+                return api_key
+
+    env_name = preset.get("api_key_env")
+    if isinstance(env_name, str) and env_name:
+        api_key = (os.environ.get(env_name) or "").strip()
+        if api_key:
+            return api_key
+
+    return ""
+
+
+def _effective_api_route_from_values(values: dict[str, object]) -> dict[str, object]:
+    base_url_raw = _coerce_str(values.get("base_url"), "", max_len=2048)
+    provider = _normalize_api_provider(_coerce_str(values.get("provider"), ""))
     inferred = _infer_provider_from_base_url(base_url_raw)
     if provider == "custom" and inferred != "custom":
         provider = inferred
     preset = _API_PROVIDER_PRESETS.get(provider, {})
 
-    api_key = (cfg.get("api_key") or "").strip()
-    if not api_key:
-        env_names = preset.get("api_key_envs")
-        if isinstance(env_names, list):
-            for env_name in env_names:
-                if not isinstance(env_name, str):
-                    continue
-                api_key = (os.environ.get(env_name) or "").strip()
-                if api_key:
-                    break
-        if not api_key:
-            env_name = preset.get("api_key_env")
-            if isinstance(env_name, str) and env_name:
-                api_key = (os.environ.get(env_name) or "").strip()
+    base_url = (
+        base_url_raw
+        or (preset.get("base_url") if isinstance(preset.get("base_url"), str) else "")
+        or str(DEFAULT_CONFIG["base_url"])
+    )
+    model = (
+        _coerce_str(values.get("model"), "", max_len=512)
+        or (preset.get("model") if isinstance(preset.get("model"), str) else "")
+        or str(DEFAULT_CONFIG["model"])
+    )
+    preset_headers = _coerce_headers(preset.get("api_extra_headers"))
+    extra_headers = {**preset_headers, **_coerce_headers(values.get("api_extra_headers"))}
+    api_key = _resolve_api_key_for_provider(provider, values.get("api_key"))
+    enabled = _coerce_bool(values.get("enabled"), True)
 
-    base_url = base_url_raw or (preset.get("base_url") if isinstance(preset.get("base_url"), str) else "") or DEFAULT_CONFIG["base_url"]
-    model = (cfg.get("model") or "").strip() or (preset.get("model") if isinstance(preset.get("model"), str) else "") or DEFAULT_CONFIG["model"]
-    extra_headers = _coerce_headers(cfg.get("api_extra_headers"))
-    return api_key, base_url, model, extra_headers
+    return {
+        "provider": provider,
+        "api_key": api_key,
+        "base_url": base_url,
+        "model": model,
+        "api_extra_headers": extra_headers,
+        "enabled": enabled,
+    }
+
+
+def _effective_api_routes(cfg: dict) -> list[dict[str, object]]:
+    raw_primary = {
+        "provider": cfg.get("api_provider"),
+        "api_key": cfg.get("api_key"),
+        "base_url": cfg.get("base_url"),
+        "model": cfg.get("model"),
+        "api_extra_headers": cfg.get("api_extra_headers"),
+        "enabled": True,
+    }
+    candidates: list[dict[str, object]] = [_effective_api_route_from_values(raw_primary)]
+    for route in _coerce_api_routes_list(cfg.get("api_routes")):
+        candidates.append(_effective_api_route_from_values(route))
+
+    out: list[dict[str, object]] = []
+    seen: set[tuple[str, str, str, str, str]] = set()
+    for item in candidates:
+        if not _coerce_bool(item.get("enabled"), True):
+            continue
+        api_key = _coerce_str(item.get("api_key"), "", max_len=4096)
+        if not api_key:
+            continue
+        base_url = _coerce_str(item.get("base_url"), "", max_len=2048)
+        model = _coerce_str(item.get("model"), "", max_len=512)
+        provider = _normalize_api_provider(_coerce_str(item.get("provider"), "custom"))
+        headers = _coerce_headers(item.get("api_extra_headers"))
+        try:
+            hdr_sig = json.dumps(headers, sort_keys=True, separators=(",", ":"))
+        except Exception:
+            hdr_sig = "{}"
+        sig = (provider, base_url, model, api_key, hdr_sig)
+        if sig in seen:
+            continue
+        seen.add(sig)
+        out.append(
+            {
+                "provider": provider,
+                "api_key": api_key,
+                "base_url": base_url,
+                "model": model,
+                "api_extra_headers": headers,
+            }
+        )
+        if len(out) >= 8:
+            break
+
+    return out
+
+
+def _effective_api_settings(cfg: dict) -> tuple[str, str, str, dict[str, str]]:
+    routes = _effective_api_routes(cfg)
+    if routes:
+        first = routes[0]
+        return (
+            str(first.get("api_key") or ""),
+            str(first.get("base_url") or ""),
+            str(first.get("model") or ""),
+            _coerce_headers(first.get("api_extra_headers")),
+        )
+    return "", str(DEFAULT_CONFIG["base_url"]), str(DEFAULT_CONFIG["model"]), {}
+
+
+def _normalize_model_id_token(value: object) -> str:
+    s = _coerce_str(value, "", max_len=512).strip().casefold()
+    if s.startswith("models/"):
+        s = s[len("models/") :]
+    return s
+
+
+def _model_id_matches(requested: object, returned: object) -> bool:
+    req = _normalize_model_id_token(requested)
+    got = _normalize_model_id_token(returned)
+    return bool(req and got and req == got)
 
 
 def load_config() -> dict:
-    cfg = dict(DEFAULT_CONFIG)
+    loaded: dict = {}
     try:
         if _CONFIG_PATH.is_file():
             data = json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
             if isinstance(data, dict):
-                cfg.update(data)
+                loaded = data
     except Exception:
         logger.exception("Failed to load settings file")
-    return cfg
+    return _sanitize_config_values(loaded, base=DEFAULT_CONFIG)
 
 
 def save_config(cfg: dict) -> None:
+    clean_cfg = _sanitize_config_values(cfg, base=DEFAULT_CONFIG)
     try:
         _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = _CONFIG_PATH.with_suffix(_CONFIG_PATH.suffix + ".tmp")
-        tmp_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+        tmp_path.write_text(json.dumps(clean_cfg, indent=2), encoding="utf-8")
         tmp_path.replace(_CONFIG_PATH)
     except Exception:
         logger.exception("Failed to save settings file")
         raise
 
 
+def _apply_runtime_log_levels(cfg: dict) -> None:
+    verbose = bool((cfg or {}).get("verbose_logging", False))
+
+    # Main logs stay at INFO; verbose mode enables DEBUG details on our app logger.
+    logger.setLevel(logging.DEBUG if verbose else logging.INFO)
+    important_logger.setLevel(logging.INFO)
+
+    # In default mode, keep noisy libraries to warnings/errors only.
+    noisy_level = logging.INFO if verbose else logging.WARNING
+    for name in _NOISY_LOGGERS:
+        logging.getLogger(name).setLevel(noisy_level)
+
+    log_important(
+        "logging.mode",
+        dedupe_key=f"verbose={verbose}",
+        dedupe_window_s=0.5,
+        verbose=verbose,
+        noisy_level=("info" if verbose else "warning"),
+    )
+
+
 # Configuration
 config = load_config()
+_apply_runtime_log_levels(config)
 
 
 # ============================================
@@ -482,6 +1153,8 @@ def list_sessions() -> List[dict]:
                     "ended_at": data.get("ended_at"),
                     "message_count": len(data.get("transcript", [])),
                     "note_count": len(data.get("notes", [])),
+                    "response_count": len(data.get("responses", [])),
+                    "fact_check_count": len(data.get("fact_checks", [])),
                 })
             except Exception:
                 pass
@@ -501,6 +1174,41 @@ def delete_session(session_id: str) -> bool:
     return False
 
 
+def _rebuild_llm_history_from_session(session: Session | None = None) -> None:
+    """Rebuild LLM transcript history from a session after edits/deletes/loads."""
+    if llm_client is None:
+        return
+
+    src = session if session is not None else current_session
+    try:
+        llm_client.clear_history()
+        if src is None:
+            return
+
+        for m in (src.transcript or []):
+            text = (getattr(m, "text", "") or "").strip()
+            if not text:
+                continue
+            llm_client.add_transcript_message(
+                getattr(m, "source", "user"),
+                text,
+                speaker_id=getattr(m, "speaker_id", None),
+                speaker_label=getattr(m, "speaker_label", None),
+            )
+    except Exception:
+        logger.exception("Failed to rebuild LLM history from session")
+
+
+def _find_transcript_index_by_id(session: Session, message_id: str) -> int:
+    target = (message_id or "").strip()
+    if not target:
+        return -1
+    for i, tm in enumerate(session.transcript or []):
+        if str(getattr(tm, "id", "") or "") == target:
+            return i
+    return -1
+
+
 def create_new_session() -> Session:
     global current_session, third_party_diarizer
     
@@ -517,6 +1225,7 @@ def create_new_session() -> Session:
         title=f"Session {datetime.now().strftime('%Y-%m-%d %H:%M')}",
     )
     third_party_diarizer = None
+    log_important("session.new", session_id=session_id, title=current_session.title)
     return current_session
 
 
@@ -531,7 +1240,7 @@ def _looks_like_system_mix_device_name(name: str | None) -> bool:
             "what u hear",
             "wave out mix",
             "monitor of",
-            "mixage stéréo",
+            "mixage stÃ©rÃ©o",
         )
     )
 
@@ -573,6 +1282,78 @@ def _whisper_device_from_config(cfg: dict) -> str:
     return "cpu"
 
 
+def _resolve_transcription_runtime_config(cfg: dict) -> dict[str, object]:
+    device = _whisper_device_from_config(cfg)
+    requested = str(cfg.get("transcription_profile", "auto") or "auto").strip().lower()
+    valid = {"auto", "manual", "cpu_realtime", "cpu_accuracy", "gpu_realtime", "gpu_balanced", "gpu_quality"}
+    if requested not in valid:
+        requested = "auto"
+
+    resolved = requested
+    if resolved == "auto":
+        resolved = "gpu_balanced" if device == "cuda" else "cpu_realtime"
+    if device != "cuda" and resolved.startswith("gpu_"):
+        resolved = "cpu_accuracy" if resolved == "gpu_quality" else "cpu_realtime"
+
+    profile_defaults: dict[str, dict[str, object]] = {
+        "cpu_realtime": {
+            "beam_size": 1,
+            "chunk_duration_s": 3.8,
+            "chunk_overlap_s": 0.12,
+            "condition_on_previous_text": False,
+        },
+        "cpu_accuracy": {
+            "beam_size": 2,
+            "chunk_duration_s": 3.0,
+            "chunk_overlap_s": 0.18,
+            "condition_on_previous_text": False,
+        },
+        "gpu_realtime": {
+            "beam_size": 1,
+            "chunk_duration_s": 2.2,
+            "chunk_overlap_s": 0.10,
+            "condition_on_previous_text": False,
+        },
+        "gpu_balanced": {
+            "beam_size": 2,
+            "chunk_duration_s": 2.6,
+            "chunk_overlap_s": 0.12,
+            "condition_on_previous_text": False,
+        },
+        "gpu_quality": {
+            "beam_size": 3,
+            "chunk_duration_s": 2.2,
+            "chunk_overlap_s": 0.22,
+            "condition_on_previous_text": True,
+        },
+    }
+
+    if resolved == "manual":
+        beam = int(max(1, min(8, int(cfg.get("whisper_beam_size", 1) or 1))))
+        duration = float(max(1.0, min(8.0, float(cfg.get("transcription_chunk_duration_seconds", 3.2) or 3.2))))
+        overlap = float(max(0.0, min(1.2, float(cfg.get("transcription_chunk_overlap_seconds", 0.16) or 0.16))))
+        cond_prev = bool(device == "cuda")
+    else:
+        params = profile_defaults.get(resolved, profile_defaults["cpu_realtime"])
+        beam = int(params["beam_size"])
+        duration = float(params["chunk_duration_s"])
+        overlap = float(params["chunk_overlap_s"])
+        cond_prev = bool(params["condition_on_previous_text"])
+
+    if overlap >= duration:
+        overlap = max(0.0, duration * 0.15)
+
+    return {
+        "requested_profile": requested,
+        "resolved_profile": resolved,
+        "device": device,
+        "beam_size": beam,
+        "chunk_duration_s": duration,
+        "chunk_overlap_s": overlap,
+        "condition_on_previous_text": cond_prev,
+    }
+
+
 def _default_speaker_label_from_id(speaker_id: str | None) -> str:
     sid = (speaker_id or "").strip()
     if not sid:
@@ -597,39 +1378,97 @@ def _safe_openai_name_component(text: str, *, max_len: int = 40) -> str:
 def init_llm_client_from_config() -> None:
     global llm_client
 
-    api_key, base_url, model, extra_headers = _effective_api_settings(config)
-    if not api_key:
+    routes = _effective_api_routes(config)
+    if not routes:
         llm_client = None
+        log_important(
+            "llm.unconfigured",
+            level=logging.WARNING,
+            dedupe_key="no-api-key",
+            dedupe_window_s=30.0,
+            provider=config.get("api_provider"),
+        )
         return
 
+    fallback_enabled = bool(config.get("api_fallback_enabled", True))
+    if not fallback_enabled:
+        routes = routes[:1]
+
     system_prompt = (config.get("system_prompt") or DEFAULT_CONFIG["system_prompt"])
+    first = routes[0]
+    api_key = str(first.get("api_key") or "")
+    base_url = str(first.get("base_url") or "")
+    model = str(first.get("model") or "")
+    extra_headers = _coerce_headers(first.get("api_extra_headers"))
+    fallback_routes = []
+    for r in routes[1:]:
+        fallback_routes.append(
+            {
+                "provider": str(r.get("provider") or "custom"),
+                "api_key": str(r.get("api_key") or ""),
+                "base_url": str(r.get("base_url") or ""),
+                "model": str(r.get("model") or ""),
+                "api_extra_headers": _coerce_headers(r.get("api_extra_headers")),
+            }
+        )
+    signature = {
+        "fallback_enabled": fallback_enabled,
+        "routes": [
+            {
+                "provider": str(r.get("provider") or "custom"),
+                "base_url": str(r.get("base_url") or ""),
+                "model": str(r.get("model") or ""),
+                "api_key": str(r.get("api_key") or ""),
+                "api_extra_headers": _coerce_headers(r.get("api_extra_headers")),
+            }
+            for r in routes
+        ],
+    }
 
     if (
         llm_client is not None
-        and getattr(llm_client, "api_key", None) == api_key
-        and getattr(llm_client, "base_url", None) == base_url
-        and getattr(llm_client, "model", None) == model
-        and getattr(llm_client, "default_headers", None) == extra_headers
+        and hasattr(llm_client, "get_config_signature")
+        and llm_client.get_config_signature() == signature
     ):
         llm_client.set_system_prompt(system_prompt)
         return
 
     previous_history = list(getattr(llm_client, "history", []) or [])
-    llm_client = LLMClient(api_key=api_key, base_url=base_url, model=model, default_headers=extra_headers)
+    llm_client = LLMClient(
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        default_headers=extra_headers,
+        fallback_routes=fallback_routes,
+        failover_enabled=fallback_enabled,
+    )
+    if hasattr(llm_client, "set_config_signature"):
+        llm_client.set_config_signature(signature)
     llm_client.history = previous_history
     llm_client.set_system_prompt(system_prompt)
+    log_important(
+        "llm.configured",
+        provider=first.get("provider"),
+        model=model,
+        base_url=base_url,
+        extra_headers=len(extra_headers or {}),
+        fallback_enabled=fallback_enabled,
+        routes=len(routes),
+    )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("Server starting...")
+    log_important("server.starting")
     init_llm_client_from_config()
     # Create initial session
     create_new_session()
     yield
     # Shutdown
     logger.info("Shutting down...")
+    log_important("server.stopping")
     # Save current session
     if current_session:
         current_session.ended_at = datetime.now().isoformat()
@@ -703,7 +1542,15 @@ def get_static(path: str):
 
 @app.get("/favicon.ico")
 def favicon():
-    return Response(status_code=204)
+    icon_path = (_PROJECT_ROOT / "branding" / "icon.svg").resolve()
+    if icon_path.is_file():
+        headers = {
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        }
+        return FileResponse(str(icon_path), media_type="image/svg+xml", headers=headers)
+    return Response(status_code=404)
 
 
 @app.get("/api/devices")
@@ -741,6 +1588,7 @@ def get_settings():
 
 @app.post("/api/settings")
 async def update_settings(request: Request):
+    global config
     try:
         data = await request.json()
     except Exception:
@@ -749,13 +1597,22 @@ async def update_settings(request: Request):
     if not isinstance(data, dict):
         return JSONResponse({"status": "error", "message": "JSON body must be an object"}, status_code=400)
 
-    config.update(data)
+    prev_config = dict(config)
+    config = _sanitize_config_values(data, base=config)
     try:
         save_config(config)
     except Exception as e:
         return JSONResponse({"status": "error", "message": f"Failed to save settings: {e}"}, status_code=500)
 
+    _apply_runtime_log_levels(config)
     init_llm_client_from_config()
+    changed = [k for k in config.keys() if config.get(k) != prev_config.get(k)]
+    changed_list = ",".join(changed[:12]) + (",..." if len(changed) > 12 else "")
+    log_important(
+        "settings.updated",
+        changed_count=len(changed),
+        changed_keys=(changed_list or "-"),
+    )
     
     return {"status": "ok", "config": config}
 
@@ -770,13 +1627,15 @@ def api_reset_settings():
     except Exception:
         pass
 
-    config = dict(DEFAULT_CONFIG)
+    config = _sanitize_config_values({}, base=DEFAULT_CONFIG)
     try:
         save_config(config)
     except Exception as e:
         return JSONResponse({"status": "error", "message": f"Failed to save settings: {e}"}, status_code=500)
 
+    _apply_runtime_log_levels(config)
     init_llm_client_from_config()
+    log_important("settings.reset")
     return {"status": "ok", "config": config}
 
 
@@ -789,11 +1648,21 @@ def api_list_presets():
             continue
         saved_at = entry.get("saved_at")
         cfg = entry.get("config")
+        has_api_key = False
+        if isinstance(cfg, dict):
+            has_api_key = bool((cfg.get("api_key") or "").strip())
+            if not has_api_key:
+                for route in (cfg.get("api_routes") or []):
+                    if not isinstance(route, dict):
+                        continue
+                    if (str(route.get("api_key") or "").strip()):
+                        has_api_key = True
+                        break
         out.append(
             {
                 "name": str(name),
                 "saved_at": saved_at,
-                "has_api_key": bool(isinstance(cfg, dict) and (cfg.get("api_key") or "").strip()),
+                "has_api_key": has_api_key,
             }
         )
     out.sort(key=lambda x: str(x.get("name") or "").casefold())
@@ -816,9 +1685,14 @@ async def api_save_preset(request: Request):
 
     include_api_key = bool(data.get("include_api_key", False))
 
-    preset_cfg = dict(config)
+    preset_cfg = _sanitize_config_values(config, base=DEFAULT_CONFIG)
     if not include_api_key:
         preset_cfg.pop("api_key", None)
+        routes = preset_cfg.get("api_routes")
+        if isinstance(routes, list):
+            for route in routes:
+                if isinstance(route, dict):
+                    route.pop("api_key", None)
 
     presets = _load_presets()
     presets[name] = {"saved_at": datetime.now().isoformat(), "config": preset_cfg}
@@ -868,10 +1742,25 @@ def api_apply_preset(preset_name: str):
         return JSONResponse({"status": "error", "message": "Preset invalid"}, status_code=500)
 
     # Start from defaults, then apply preset. Preserve current api_key if preset omitted it.
-    merged = dict(DEFAULT_CONFIG)
-    merged.update(preset_cfg)
-    if not (preset_cfg.get("api_key") or "").strip():
-        merged["api_key"] = config.get("api_key", "")
+    merged = _sanitize_config_values(preset_cfg, base=DEFAULT_CONFIG)
+    if not _coerce_str(preset_cfg.get("api_key"), ""):
+        merged["api_key"] = _coerce_str(config.get("api_key"), "")
+    preset_routes = preset_cfg.get("api_routes")
+    if isinstance(preset_routes, list):
+        merged_routes = merged.get("api_routes")
+        current_routes = config.get("api_routes")
+        if isinstance(merged_routes, list) and isinstance(current_routes, list):
+            for i, route in enumerate(merged_routes):
+                if not isinstance(route, dict):
+                    continue
+                if _coerce_str(route.get("api_key"), ""):
+                    continue
+                if i >= len(current_routes):
+                    continue
+                current_route = current_routes[i]
+                if not isinstance(current_route, dict):
+                    continue
+                route["api_key"] = _coerce_str(current_route.get("api_key"), "")
 
     try:
         audio_manager.stop_recording()
@@ -884,7 +1773,14 @@ def api_apply_preset(preset_name: str):
     except Exception as e:
         return JSONResponse({"status": "error", "message": f"Failed to save settings: {e}"}, status_code=500)
 
+    _apply_runtime_log_levels(config)
     init_llm_client_from_config()
+    log_important(
+        "preset.applied",
+        preset=name,
+        provider=config.get("api_provider"),
+        model=config.get("model"),
+    )
     return {"status": "ok", "config": config}
 
 
@@ -898,76 +1794,128 @@ async def api_test_connection(request: Request):
     if not isinstance(data, dict):
         return JSONResponse({"status": "error", "message": "JSON body must be an object"}, status_code=400)
 
-    merged_cfg = dict(config)
-    merged_cfg.update({k: v for k, v in data.items() if k in ("api_provider", "api_key", "base_url", "model", "api_extra_headers")})
-    api_key, base_url, model, extra_headers = _effective_api_settings(merged_cfg)
-
-    if not api_key:
+    merged_cfg = _sanitize_config_values(data, base=config)
+    routes = _effective_api_routes(merged_cfg)
+    if not routes:
         return JSONResponse(
             {
                 "status": "error",
-                "message": "Missing API key (set it in Settings or via provider env var)",
+                "message": "Missing API key (set it in Settings, API routes, or via provider env var)",
             },
             status_code=400,
         )
+    fallback_enabled = bool(merged_cfg.get("api_fallback_enabled", True))
+    attempt_routes = routes if fallback_enabled else routes[:1]
 
     try:
         from openai import AsyncOpenAI
 
-        t0 = time.monotonic()
-        client = AsyncOpenAI(api_key=api_key, base_url=base_url, default_headers=extra_headers)
+        failures: list[dict[str, object]] = []
+        for idx, route in enumerate(attempt_routes):
+            provider = str(route.get("provider") or "custom")
+            api_key = str(route.get("api_key") or "")
+            base_url = str(route.get("base_url") or "")
+            model = str(route.get("model") or "")
+            extra_headers = _coerce_headers(route.get("api_extra_headers"))
 
-        model_list_ok = False
-        model_found = None
-        model_list_error = None
-        try:
-            resp = await asyncio.wait_for(client.models.list(), timeout=6.0)
-            model_list_ok = True
-            ids = [getattr(m, "id", None) for m in getattr(resp, "data", [])]
-            ids = [i for i in ids if isinstance(i, str)]
-            model_found = model in ids if model else None
-        except Exception as e:
-            model_list_error = str(e)
+            t0 = time.monotonic()
+            client = AsyncOpenAI(api_key=api_key, base_url=base_url, default_headers=extra_headers)
 
-        chat_ok = False
-        chat_error = None
-        try:
-            await asyncio.wait_for(
-                client.chat.completions.create(
-                    model=model,
-                    messages=[
-                        {"role": "system", "content": "You are a connection test. Reply with exactly: OK"},
-                        {"role": "user", "content": "ping"},
-                    ],
-                    max_tokens=1,
-                    temperature=0,
-                    stream=False,
-                ),
-                timeout=10.0,
+            model_list_ok = False
+            model_found = None
+            model_list_error = None
+            model_retrieve_error = None
+            try:
+                resp = await asyncio.wait_for(client.models.list(), timeout=6.0)
+                model_list_ok = True
+                ids = [getattr(m, "id", None) for m in getattr(resp, "data", [])]
+                ids = [i for i in ids if isinstance(i, str)]
+                if model:
+                    model_found = any(_model_id_matches(model, mid) for mid in ids)
+                else:
+                    model_found = None
+            except Exception as e:
+                model_list_error = str(e)
+
+            # Some providers return aliased IDs from /models (or no usable list).
+            # If exact list matching says False, verify directly with retrieve().
+            if model and model_found is False:
+                try:
+                    _ = await asyncio.wait_for(client.models.retrieve(model), timeout=6.0)
+                    model_found = True
+                except Exception as e:
+                    model_retrieve_error = str(e)
+
+            chat_ok = False
+            chat_error = None
+            try:
+                await asyncio.wait_for(
+                    client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": "You are a connection test. Reply with exactly: OK"},
+                            {"role": "user", "content": "ping"},
+                        ],
+                        max_tokens=1,
+                        temperature=0,
+                        stream=False,
+                    ),
+                    timeout=10.0,
+                )
+                chat_ok = True
+            except Exception as e:
+                chat_error = str(e)
+
+            latency_ms = int((time.monotonic() - t0) * 1000)
+            if chat_ok:
+                return {
+                    "status": "ok",
+                    "message": "Connection OK" if idx == 0 else f"Connection OK via fallback #{idx + 1}",
+                    "latency_ms": latency_ms,
+                    "model_list_ok": model_list_ok,
+                    "model_found": model_found,
+                    "model_list_error": model_list_error,
+                    "model_retrieve_error": model_retrieve_error,
+                    "provider": provider,
+                    "base_url": base_url,
+                    "model": model,
+                    "route_index": idx + 1,
+                    "attempted_routes": len(attempt_routes),
+                    "fallback_used": idx > 0,
+                    "failed_routes": failures,
+                }
+
+            failures.append(
+                {
+                    "route_index": idx + 1,
+                    "provider": provider,
+                    "base_url": base_url,
+                    "model": model,
+                    "latency_ms": latency_ms,
+                    "message": chat_error or "Connection test failed",
+                    "model_list_ok": model_list_ok,
+                    "model_found": model_found,
+                    "model_list_error": model_list_error,
+                    "model_retrieve_error": model_retrieve_error,
+                }
             )
-            chat_ok = True
-        except Exception as e:
-            chat_error = str(e)
 
-        latency_ms = int((time.monotonic() - t0) * 1000)
-
-        if not chat_ok:
-            return {
-                "status": "error",
-                "message": chat_error or "Connection test failed",
-                "latency_ms": latency_ms,
-                "model_list_ok": model_list_ok,
-                "model_found": model_found,
-                "model_list_error": model_list_error,
-            }
-
+        last = failures[-1] if failures else {}
         return {
-            "status": "ok",
-            "message": "Connection OK",
-            "latency_ms": latency_ms,
-            "model_list_ok": model_list_ok,
-            "model_found": model_found,
-            "model_list_error": model_list_error,
+            "status": "error",
+            "message": str(last.get("message") or "Connection test failed"),
+            "latency_ms": int(last.get("latency_ms") or 0),
+            "model_list_ok": bool(last.get("model_list_ok")),
+            "model_found": last.get("model_found"),
+            "model_list_error": last.get("model_list_error"),
+            "model_retrieve_error": last.get("model_retrieve_error"),
+            "provider": last.get("provider"),
+            "base_url": last.get("base_url"),
+            "model": last.get("model"),
+            "route_index": last.get("route_index"),
+            "attempted_routes": len(attempt_routes),
+            "fallback_used": False,
+            "failed_routes": failures,
         }
     except Exception as e:
         return JSONResponse({"status": "error", "message": f"Test failed: {e}"}, status_code=500)
@@ -1011,19 +1959,8 @@ def api_load_session(session_id: str):
 
     current_session = session
 
-    # Rebuild LLM history for policy/notes context using the 3-entity transcript.
-    if llm_client:
-        try:
-            llm_client.clear_history()
-            for m in (session.transcript or []):
-                llm_client.add_transcript_message(
-                    getattr(m, "source", "user"),
-                    getattr(m, "text", ""),
-                    speaker_id=getattr(m, "speaker_id", None),
-                    speaker_label=getattr(m, "speaker_label", None),
-                )
-        except Exception:
-            logger.exception("Failed to rebuild LLM history from loaded session")
+    # Rebuild LLM history for policy/notes/response/fact-check context from transcript.
+    _rebuild_llm_history_from_session(session)
 
     return {"status": "ok", "session": session.to_dict()}
 
@@ -1131,17 +2068,25 @@ def api_clear_notes():
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    global _TRANSCRIPT_ACTIVITY_SEQ
     await websocket.accept()
     logger.info("WebSocket connected")
+    log_important("ws.connected")
 
     state = ConnectionState()
     send_lock = asyncio.Lock()
+    response_lock = asyncio.Lock()
     notes_lock = asyncio.Lock()
+    fact_check_lock = asyncio.Lock()
     transcript_cleanup_lock = asyncio.Lock()
-    ai_queue: asyncio.Queue = asyncio.Queue(maxsize=50)
-    ai_task = asyncio.create_task(run_ai_loop(websocket, state, send_lock, ai_queue))
+    response_queue: asyncio.Queue = asyncio.Queue(maxsize=50)
+    response_task = asyncio.create_task(run_response_loop(websocket, state, send_lock, response_lock, response_queue))
     notes_trigger_queue: asyncio.Queue = asyncio.Queue(maxsize=1)
     notes_trigger_task = asyncio.create_task(run_notes_trigger_loop(websocket, send_lock, notes_trigger_queue, notes_lock))
+    fact_check_trigger_queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+    fact_check_trigger_task = asyncio.create_task(
+        run_fact_check_trigger_loop(websocket, send_lock, fact_check_trigger_queue, fact_check_lock)
+    )
     transcript_cleanup_queue: asyncio.Queue = asyncio.Queue(maxsize=1)
     transcript_cleanup_task = asyncio.create_task(
         run_transcript_cleanup_loop(websocket, send_lock, transcript_cleanup_queue, transcript_cleanup_lock)
@@ -1155,19 +2100,38 @@ async def websocket_endpoint(websocket: WebSocket):
             "started_at": current_session.started_at,
         }, send_lock)
         await _ws_send_json(websocket, {"type": "session_context", "context": (current_session.context or "")}, send_lock)
+        await _ws_send_json(websocket, {"type": "notes_update", "notes": [asdict(n) for n in current_session.notes]}, send_lock)
+        await _ws_send_json(websocket, {"type": "response_update", "responses": [asdict(r) for r in current_session.responses]}, send_lock)
+        await _ws_send_json(websocket, {"type": "fact_checks_update", "fact_checks": [asdict(f) for f in current_session.fact_checks]}, send_lock)
 
-    # Let the UI know whether audio capture is enabled in this run.
-    if os.environ.get("AI_ASSISTANT_ENABLE_AUDIO") == "1":
-        await _ws_send_json(websocket, {"type": "status", "message": "Audio: capture enabled."}, send_lock)
-    else:
-        await _ws_send_json(
-            websocket,
-            {
-                "type": "status",
-                "message": "Audio: capture disabled. Set AI_ASSISTANT_ENABLE_AUDIO=1 to enable (may be unstable).",
-            },
-            send_lock,
-        )
+    def _audio_runtime_enabled() -> bool:
+        return os.environ.get("AI_ASSISTANT_ENABLE_AUDIO") == "1"
+
+    def _on_off(flag: bool) -> str:
+        return "on" if flag else "off"
+
+    def _audio_snapshot_status() -> str:
+        if not _audio_runtime_enabled():
+            return "Audio: capture unavailable in this run. Set AI_ASSISTANT_ENABLE_AUDIO=1 to enable (may be unstable)."
+
+        requested_mic = bool(config.get("mic_enabled"))
+        requested_loopback = bool(config.get("loopback_enabled"))
+        active_mic = bool(getattr(audio_manager, "mic_active", False))
+        active_loopback = bool(getattr(audio_manager, "loopback_active", False))
+        active = bool(getattr(audio_manager, "is_recording", False)) and (active_mic or active_loopback)
+
+        if active:
+            return f"Audio: capture active (mic={_on_off(active_mic)}, system={_on_off(active_loopback)})."
+
+        if requested_mic or requested_loopback:
+            return (
+                f"Audio: ready (capture idle). Configured: "
+                f"mic={_on_off(requested_mic)}, system={_on_off(requested_loopback)}."
+            )
+
+        return "Audio: ready (capture idle). Both mic and system audio toggles are off."
+
+    await _ws_send_json(websocket, {"type": "status", "message": _audio_snapshot_status()}, send_lock)
     
     global transcription_model
     transcription_tasks_started = False
@@ -1178,18 +2142,33 @@ async def websocket_endpoint(websocket: WebSocket):
         global transcription_model
         nonlocal transcription_tasks_started, enable_loopback, audio_disabled_warned
         if transcription_tasks_started or audio_manager.is_recording:
+            log_important(
+                "audio.start.skip",
+                reason="already-running",
+                recording=bool(audio_manager.is_recording),
+            )
+            await _ws_send_json(
+                websocket,
+                {"type": "status", "message": _audio_snapshot_status()},
+                send_lock,
+            )
             return
 
         # Audio capture via soundcard is currently unstable on some Windows/Python setups (can hard-crash).
         # Keep it opt-in via env var so the UI doesn't immediately close.
-        if os.environ.get("AI_ASSISTANT_ENABLE_AUDIO") != "1":
+        if not _audio_runtime_enabled():
             if not audio_disabled_warned:
                 audio_disabled_warned = True
+                log_important(
+                    "audio.start.blocked",
+                    level=logging.WARNING,
+                    reason="runtime-disabled",
+                )
                 await _ws_send_json(
                     websocket,
                     {
-                        "type": "error",
-                        "message": "Audio capture is disabled by default. Set AI_ASSISTANT_ENABLE_AUDIO=1 to enable (may be unstable).",
+                        "type": "status",
+                        "message": "Audio: capture disabled in this run. Set AI_ASSISTANT_ENABLE_AUDIO=1 to enable (may be unstable).",
                     },
                     send_lock,
                 )
@@ -1205,11 +2184,26 @@ async def websocket_endpoint(websocket: WebSocket):
         if (enable_mic or enable_loopback) and transcription_model is None:
             logger.info("Loading transcription model...")
             model_size = str(config.get("whisper_model_size", "tiny") or "tiny").strip() or "tiny"
+            runtime_cfg = _resolve_transcription_runtime_config(config)
             transcription_model = TranscriptionEngine(
                 model_size=model_size,
-                device=_whisper_device_from_config(config),
+                device=str(runtime_cfg.get("device") or "cpu"),
                 preprocess=_speech_preprocess_from_config(config),
                 whisper_vad_filter=bool(config.get("whisper_vad_filter", True)),
+                beam_size=int(runtime_cfg.get("beam_size") or 1),
+                chunk_duration_s=float(runtime_cfg.get("chunk_duration_s") or 3.2),
+                chunk_overlap_s=float(runtime_cfg.get("chunk_overlap_s") or 0.16),
+                condition_on_previous_text=bool(runtime_cfg.get("condition_on_previous_text")),
+            )
+            log_important(
+                "transcription.backend",
+                model=model_size,
+                device=getattr(transcription_model, "device", "unknown"),
+                compute=getattr(transcription_model, "compute_type", "unknown"),
+                profile=str(runtime_cfg.get("resolved_profile") or "manual"),
+                beam=int(runtime_cfg.get("beam_size") or 1),
+                chunk_s=f"{float(runtime_cfg.get('chunk_duration_s') or 0.0):.2f}",
+                overlap_s=f"{float(runtime_cfg.get('chunk_overlap_s') or 0.0):.2f}",
             )
 
         mic_name = config.get("mic_device")
@@ -1228,6 +2222,12 @@ async def websocket_endpoint(websocket: WebSocket):
             mic_name = None
 
         if not enable_mic and not enable_loopback:
+            log_important(
+                "audio.start.skip",
+                reason="no-inputs-enabled",
+                mic=enable_mic,
+                loopback=enable_loopback,
+            )
             await _ws_send_json(
                 websocket,
                 {"type": "status", "message": "Audio: nothing to capture (both mic and system audio disabled)."},
@@ -1253,6 +2253,7 @@ async def websocket_endpoint(websocket: WebSocket):
             )
         except Exception as e:
             logger.error(f"Failed to start audio recording: {e}")
+            log_important("audio.start.failed", level=logging.ERROR, error=e)
             await _ws_send_json(
                 websocket,
                 {"type": "error", "message": f"Failed to start audio recording: {e}"},
@@ -1275,6 +2276,13 @@ async def websocket_endpoint(websocket: WebSocket):
             )
 
         if not audio_manager.is_recording:
+            log_important(
+                "audio.start.failed",
+                level=logging.ERROR,
+                reason="no-streams-opened",
+                requested_mic=enable_mic,
+                requested_loopback=enable_loopback,
+            )
             await _ws_send_json(
                 websocket,
                 {
@@ -1285,22 +2293,60 @@ async def websocket_endpoint(websocket: WebSocket):
             )
             return
 
+        log_important(
+            "audio.start.ok",
+            requested_mic=bool(enable_mic),
+            requested_loopback=bool(enable_loopback),
+            active_mic=bool(getattr(audio_manager, "mic_active", False)),
+            active_loopback=bool(getattr(audio_manager, "loopback_active", False)),
+            recording=bool(getattr(audio_manager, "is_recording", False)),
+            mic_first_chunk=bool((report or {}).get("mic", {}).get("first_chunk")),
+            loopback_first_chunk=bool((report or {}).get("loopback", {}).get("first_chunk")),
+        )
+
         if getattr(audio_manager, "mic_active", False):
-            asyncio.create_task(run_transcription_loop(websocket, "user", state, send_lock, ai_queue, notes_trigger_queue, transcript_cleanup_queue))
+            asyncio.create_task(
+                run_transcription_loop(
+                    websocket,
+                    "user",
+                    state,
+                    send_lock,
+                    response_queue,
+                    notes_trigger_queue,
+                    fact_check_trigger_queue,
+                    transcript_cleanup_queue,
+                )
+            )
         if getattr(audio_manager, "loopback_active", False):
-            asyncio.create_task(run_transcription_loop(websocket, "third_party", state, send_lock, ai_queue, notes_trigger_queue, transcript_cleanup_queue))
+            asyncio.create_task(
+                run_transcription_loop(
+                    websocket,
+                    "third_party",
+                    state,
+                    send_lock,
+                    response_queue,
+                    notes_trigger_queue,
+                    fact_check_trigger_queue,
+                    transcript_cleanup_queue,
+                )
+            )
         transcription_tasks_started = True
-        await _ws_send_json(websocket, {"type": "status", "message": "Audio: capture started."}, send_lock)
+        await _ws_send_json(websocket, {"type": "status", "message": _audio_snapshot_status()}, send_lock)
 
     async def stop_audio_capture():
         nonlocal transcription_tasks_started
         if audio_manager.is_recording:
             audio_manager.stop_recording()
+            log_important("audio.stop", had_recording=True)
+            await _ws_send_json(websocket, {"type": "status", "message": "Audio: capture stopped."}, send_lock)
+        else:
+            log_important("audio.stop", had_recording=False)
+            await _ws_send_json(websocket, {"type": "status", "message": "Audio: capture already stopped."}, send_lock)
         transcription_tasks_started = False
-        await _ws_send_json(websocket, {"type": "status", "message": "Audio: capture stopped."}, send_lock)
 
-    # Start notes generation loop (separate AI process with its own settings)
+    # Start periodic generators (separate AI processes with their own settings)
     notes_task = asyncio.create_task(run_notes_loop(websocket, send_lock, notes_lock))
+    fact_check_task = asyncio.create_task(run_fact_check_loop(websocket, send_lock, fact_check_lock))
 
     try:
         while True:
@@ -1318,12 +2364,14 @@ async def websocket_endpoint(websocket: WebSocket):
                         state,
                         send_lock,
                         message_kind="manual",
-                        ai_queue=ai_queue,
+                        response_queue=response_queue,
                         notes_queue=notes_trigger_queue,
+                        fact_check_queue=fact_check_trigger_queue,
                         transcript_cleanup_queue=transcript_cleanup_queue,
                     )
                 elif msg_type == "ai_run_now":
-                    _enqueue_ai_request(ai_queue, {"trigger": "run_now", "ts": time.time()})
+                    _enqueue_response_request(response_queue, {"trigger": "run_now", "ts": time.time()})
+                    _enqueue_fact_check_trigger(fact_check_trigger_queue)
                 elif msg_type == "start_audio":
                     await start_audio_capture()
                 elif msg_type == "stop_audio":
@@ -1336,15 +2384,114 @@ async def websocket_endpoint(websocket: WebSocket):
                         "started_at": session.started_at,
                     }, send_lock)
                     await _ws_send_json(websocket, {"type": "session_context", "context": (session.context or "")}, send_lock)
+                    await _ws_send_json(websocket, {"type": "notes_update", "notes": []}, send_lock)
+                    await _ws_send_json(websocket, {"type": "response_update", "responses": []}, send_lock)
+                    await _ws_send_json(websocket, {"type": "fact_checks_update", "fact_checks": []}, send_lock)
                 elif msg_type == "set_session_context":
                     ctx = msg.get("context", "")
                     if ctx is not None and not isinstance(ctx, str):
                         ctx = str(ctx)
-                    ctx = (ctx or "").strip()
+                    ctx = (ctx or "")
                     if current_session is not None:
                         current_session.context = ctx[:8000]
                         save_session_throttled(current_session)
                         await _ws_send_json(websocket, {"type": "session_context", "context": current_session.context}, send_lock)
+                elif msg_type == "update_transcript_message":
+                    message_id = msg.get("id", msg.get("message_id"))
+                    text = msg.get("text", "")
+                    if message_id is not None and not isinstance(message_id, str):
+                        message_id = str(message_id)
+                    message_id = (message_id or "").strip()
+                    if text is not None and not isinstance(text, str):
+                        text = str(text)
+                    text = (text or "").strip()
+
+                    if current_session is None or not message_id:
+                        await _ws_send_json(websocket, {"type": "error", "message": "Edit failed: no active session/message."}, send_lock)
+                        continue
+                    if not text:
+                        await _ws_send_json(websocket, {"type": "error", "message": "Edit failed: message text cannot be empty."}, send_lock)
+                        continue
+
+                    idx = _find_transcript_index_by_id(current_session, message_id)
+                    if idx < 0:
+                        await _ws_send_json(websocket, {"type": "error", "message": "Edit failed: message not found."}, send_lock)
+                        continue
+
+                    tm = current_session.transcript[idx]
+                    tm.text = text[:8000]
+                    tm.clean_text = None
+                    tm.timestamp = datetime.now().strftime("%H:%M:%S")
+                    _TRANSCRIPT_LAST_UPDATE_TS[tm.id] = time.time()
+                    _TRANSCRIPT_ACTIVITY_SEQ += 1
+                    save_session(current_session)
+                    _rebuild_llm_history_from_session(current_session)
+
+                    if transcript_cleanup_queue is not None and config.get("ai_enabled", False) and _get_transcript_ai_mode(config) != "off":
+                        _enqueue_transcript_cleanup(transcript_cleanup_queue, tm.id)
+                    if config.get("ai_enabled", False) and config.get("notes_enabled", True) and (
+                        config.get("notes_live_on_message", True) or config.get("notes_on_interaction_only", False)
+                    ):
+                        _enqueue_notes_trigger(notes_trigger_queue)
+                    if config.get("ai_enabled", False) and config.get("fact_check_enabled", True) and (
+                        config.get("fact_check_live_on_message", True) or config.get("fact_check_on_interaction_only", False)
+                    ):
+                        _enqueue_fact_check_trigger(fact_check_trigger_queue)
+
+                    await _ws_send_json(
+                        websocket,
+                        {
+                            "type": "transcription_update",
+                            "id": tm.id,
+                            "text": tm.text,
+                            "clean_text": tm.clean_text,
+                            "source": tm.source,
+                            "timestamp": tm.timestamp,
+                            "speaker_id": tm.speaker_id,
+                            "speaker_label": tm.speaker_label,
+                        },
+                        send_lock,
+                    )
+                elif msg_type == "delete_transcript_message":
+                    message_id = msg.get("id", msg.get("message_id"))
+                    if message_id is not None and not isinstance(message_id, str):
+                        message_id = str(message_id)
+                    message_id = (message_id or "").strip()
+
+                    if current_session is None or not message_id:
+                        await _ws_send_json(websocket, {"type": "error", "message": "Delete failed: no active session/message."}, send_lock)
+                        continue
+
+                    idx = _find_transcript_index_by_id(current_session, message_id)
+                    if idx < 0:
+                        await _ws_send_json(websocket, {"type": "error", "message": "Delete failed: message not found."}, send_lock)
+                        continue
+
+                    removed = current_session.transcript.pop(idx)
+                    with suppress(Exception):
+                        _TRANSCRIPT_LAST_UPDATE_TS.pop(removed.id, None)
+                    _TRANSCRIPT_ACTIVITY_SEQ += 1
+                    save_session(current_session)
+                    _rebuild_llm_history_from_session(current_session)
+
+                    if config.get("ai_enabled", False) and config.get("notes_enabled", True) and (
+                        config.get("notes_live_on_message", True) or config.get("notes_on_interaction_only", False)
+                    ):
+                        _enqueue_notes_trigger(notes_trigger_queue)
+                    if config.get("ai_enabled", False) and config.get("fact_check_enabled", True) and (
+                        config.get("fact_check_live_on_message", True) or config.get("fact_check_on_interaction_only", False)
+                    ):
+                        _enqueue_fact_check_trigger(fact_check_trigger_queue)
+
+                    await _ws_send_json(
+                        websocket,
+                        {
+                            "type": "transcription_deleted",
+                            "id": removed.id,
+                            "message_count": len(current_session.transcript),
+                        },
+                        send_lock,
+                    )
                 elif msg_type == "rename_speaker":
                     speaker_id = msg.get("speaker_id", msg.get("speakerId"))
                     name = msg.get("name", msg.get("speaker_label", msg.get("speakerLabel", "")))
@@ -1420,6 +2567,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         }, send_lock)
                         if config.get("ai_enabled", False) and config.get("notes_enabled", True) and config.get("notes_on_interaction_only", False):
                             _enqueue_notes_trigger(notes_trigger_queue)
+                        if config.get("ai_enabled", False) and config.get("fact_check_enabled", True) and config.get("fact_check_on_interaction_only", False):
+                            _enqueue_fact_check_trigger(fact_check_trigger_queue)
                 elif msg_type == "update_note":
                     note_id = msg.get("note_id")
                     updates = msg.get("updates", {})
@@ -1461,23 +2610,55 @@ async def websocket_endpoint(websocket: WebSocket):
                         await _ws_send_json(websocket, {"type": "error", "message": "AI is disabled. Enable AI to generate notes."}, send_lock)
                     else:
                         await generate_notes(websocket, send_lock, notes_lock)
+                elif msg_type == "refresh_response":
+                    if not config.get("ai_enabled", False):
+                        await _ws_send_json(websocket, {"type": "error", "message": "AI is disabled. Enable AI to generate responses."}, send_lock)
+                    elif not config.get("response_enabled", True):
+                        await _ws_send_json(websocket, {"type": "error", "message": "Response system is disabled in Settings."}, send_lock)
+                    else:
+                        _enqueue_response_request(response_queue, {"trigger": "run_now", "ts": time.time()})
+                elif msg_type == "clear_responses":
+                    if current_session:
+                        current_session.responses = []
+                        save_session(current_session)
+                        await _ws_send_json(websocket, {"type": "responses_cleared"}, send_lock)
+                elif msg_type == "refresh_fact_checks":
+                    if not config.get("ai_enabled", False):
+                        await _ws_send_json(websocket, {"type": "error", "message": "AI is disabled. Enable AI to run fact checks."}, send_lock)
+                    elif not config.get("fact_check_enabled", True):
+                        await _ws_send_json(websocket, {"type": "error", "message": "Fact check system is disabled in Settings."}, send_lock)
+                    else:
+                        _enqueue_fact_check_trigger(fact_check_trigger_queue)
+                elif msg_type == "clear_fact_checks":
+                    if current_session:
+                        current_session.fact_checks = []
+                        save_session(current_session)
+                        await _ws_send_json(websocket, {"type": "fact_checks_cleared"}, send_lock)
                     
             except json.JSONDecodeError:
                 pass
     except WebSocketDisconnect as e:
         logger.info(f"WebSocket disconnected (code={getattr(e, 'code', None)})")
+        log_important("ws.disconnected", code=getattr(e, "code", None))
     except Exception:
         logger.exception("WebSocket crashed")
+        log_important("ws.crashed", level=logging.ERROR)
     finally:
         notes_task.cancel()
         with suppress(BaseException):
             await notes_task
-        ai_task.cancel()
+        fact_check_task.cancel()
         with suppress(BaseException):
-            await ai_task
+            await fact_check_task
+        response_task.cancel()
+        with suppress(BaseException):
+            await response_task
         notes_trigger_task.cancel()
         with suppress(BaseException):
             await notes_trigger_task
+        fact_check_trigger_task.cancel()
+        with suppress(BaseException):
+            await fact_check_trigger_task
         transcript_cleanup_task.cancel()
         with suppress(BaseException):
             await transcript_cleanup_task
@@ -1515,6 +2696,51 @@ def _extract_web_search_query_from_history() -> Optional[str]:
     if len(query) < 6:
         return None
     return query
+
+
+def _normalize_web_search_query(query: str, *, fallback: str = "") -> str:
+    import re
+
+    for raw in (query, fallback):
+        text = str(raw or "").strip()
+        if not text:
+            continue
+
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        if lines:
+            # Prefer the most recent line when full transcript blocks are provided.
+            text = lines[-1]
+
+        text = re.sub(
+            r"^(you|user|assistant|ai|third[ _-]?party(?:\s*[a-z0-9_-]+)?|speaker\s*\d+)\s*:\s*",
+            "",
+            text,
+            flags=re.I,
+        )
+        text = re.sub(r"\s+", " ", text)
+        text = text.strip(" \t\r\n:;,.!?-")
+        text = text[:220].strip()
+        if len(text) >= 2:
+            return text[:120]
+
+    return ""
+
+
+def _fallback_web_search_query(seed_text: str) -> str:
+    query = _normalize_web_search_query(seed_text)
+    if query:
+        return query
+    return _normalize_web_search_query(_extract_web_search_query_from_history() or "")
+
+
+async def _llm_chat_create(**kwargs):
+    if llm_client is None:
+        raise RuntimeError("LLM not configured")
+    if hasattr(llm_client, "chat_create"):
+        return await llm_client.chat_create(**kwargs)
+    # Back-compat fallback if client implementation is older.
+    model = kwargs.pop("model", getattr(llm_client, "model", ""))
+    return await llm_client.client.chat.completions.create(model=model, **kwargs)
 
 
 def _strip_html_tags(s: str) -> str:
@@ -1681,16 +2907,21 @@ async def _decide_web_search(
     Ask the model whether to run a web search and what query to use.
     Returns: (should_search, query)
     """
-    if not llm_client:
-        return False, ""
-
-    seed = " ".join((seed_text or "").split()).strip()
-    if len(seed) < 6:
-        return False, ""
-
     mode = (config.get("web_search_mode") or "auto").strip().lower()
     if mode not in ("auto", "always"):
         mode = "auto"
+
+    seed = " ".join((seed_text or "").split()).strip()
+
+    # In always mode, avoid a second LLM call and derive query directly.
+    if mode == "always":
+        query = _fallback_web_search_query(seed)
+        return bool(query), query
+
+    if not llm_client:
+        return False, ""
+    if len(seed) < 6:
+        return False, ""
 
     system_prompt = (
         "You are deciding whether to call a web_search tool before answering.\n"
@@ -1704,11 +2935,7 @@ async def _decide_web_search(
         "- reason: string (short)\n"
     )
 
-    if mode == "always":
-        system_prompt += "\nMode is ALWAYS: set search=true (still choose the best query)."
-
-    resp = await llm_client.client.chat.completions.create(
-        model=llm_client.model,
+    resp = await _llm_chat_create(
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": seed[:900]},
@@ -1746,12 +2973,9 @@ async def _decide_web_search(
 
     data = _parse_json_best_effort(content)
     should = bool(data.get("search"))
-    query = (data.get("query") or "").strip()
-    query = " ".join(query.split())[:120]
+    query = _normalize_web_search_query(data.get("query") or "", fallback=seed)
     if not query:
-        query = seed[:120]
-    if mode == "always":
-        should = True
+        query = _fallback_web_search_query(seed)
     if len(query) < 2:
         return False, ""
     return should, query
@@ -1763,32 +2987,62 @@ async def _maybe_build_web_search_context(*, purpose: str, seed_text: str) -> Op
 
     global _WEB_SEARCH_LAST_TS
     now_ts = time.time()
-    min_interval = float(config.get("web_search_min_interval_seconds", 6.0) or 6.0)
-    min_interval = max(0.0, min(60.0, min_interval))
-    if now_ts - _WEB_SEARCH_LAST_TS < min_interval:
-        return None
 
     try:
         should, query = await _decide_web_search(seed_text=seed_text, purpose=purpose)
     except Exception as e:
         logger.warning(f"Web search decision failed: {e}")
-        should, query = False, ""
+        if (config.get("web_search_mode") or "auto").strip().lower() == "always":
+            should, query = True, _fallback_web_search_query(seed_text)
+        else:
+            should, query = False, ""
 
     if not should or not query:
         return None
 
     ttl = float(config.get("web_search_cache_ttl_seconds", 180.0) or 180.0)
     ttl = max(10.0, min(3600.0, ttl))
-    cache_key = query.casefold()
+    cache_key = _normalize_web_search_query(query).casefold()
+    if not cache_key:
+        return None
     cached = _WEB_SEARCH_CACHE.get(cache_key)
     if cached and (now_ts - cached[0]) < ttl:
-        _WEB_SEARCH_LAST_TS = now_ts
+        log_important(
+            "web_search.cache_hit",
+            purpose=purpose,
+            query=query,
+            dedupe_key=f"{purpose}|{cache_key}",
+            dedupe_window_s=8.0,
+        )
         return cached[1]
+
+    min_interval = float(config.get("web_search_min_interval_seconds", 6.0) or 6.0)
+    min_interval = max(0.0, min(60.0, min_interval))
+    since_last = now_ts - _WEB_SEARCH_LAST_TS
+    if since_last < min_interval:
+        wait_s = max(0.0, min_interval - since_last)
+        log_important(
+            "web_search.cooldown_skip",
+            purpose=purpose,
+            wait_s=f"{wait_s:.2f}",
+            dedupe_key=f"{purpose}|{cache_key}",
+            dedupe_window_s=4.0,
+        )
+        return None
 
     max_results = int(config.get("web_search_max_results", 5) or 5)
     max_results = max(1, min(10, max_results))
     timeout_s = float(config.get("web_search_timeout_seconds", 6.0) or 6.0)
     timeout_s = max(2.0, min(20.0, timeout_s))
+    _WEB_SEARCH_LAST_TS = now_ts
+    log_important(
+        "web_search.start",
+        purpose=purpose,
+        mode=(config.get("web_search_mode") or "auto"),
+        query=query,
+        timeout_s=f"{timeout_s:.1f}",
+        max_results=max_results,
+    )
 
     try:
         results = await asyncio.to_thread(
@@ -1799,6 +3053,7 @@ async def _maybe_build_web_search_context(*, purpose: str, seed_text: str) -> Op
         )
     except Exception as e:
         logger.warning(f"Web search failed: {e}")
+        log_important("web_search.error", level=logging.WARNING, purpose=purpose, provider="ddg_lite", error=e)
         results = []
 
     # Fallback to instant answer API if Lite fails.
@@ -1811,6 +3066,14 @@ async def _maybe_build_web_search_context(*, purpose: str, seed_text: str) -> Op
                 max_results=max_results,
             )
             if ia:
+                log_important(
+                    "web_search.results",
+                    purpose=purpose,
+                    provider="ddg_instant",
+                    count=len(ia),
+                    dedupe_key=f"{purpose}|{cache_key}|ddg_instant",
+                    dedupe_window_s=2.0,
+                )
                 lines = [
                     "Web search results (DuckDuckGo Instant Answer API; may be incomplete/outdated):",
                     f"Query: {query}",
@@ -1824,13 +3087,28 @@ async def _maybe_build_web_search_context(*, purpose: str, seed_text: str) -> Op
                         lines.append(f"{i}. {text}")
                 ctx = "\n".join(lines)[:2200]
                 _web_search_cache_put(cache_key, ctx, ts=now_ts)
-                _WEB_SEARCH_LAST_TS = now_ts
                 return ctx
         except Exception as e:
             logger.warning(f"Web search fallback failed: {e}")
+            log_important("web_search.error", level=logging.WARNING, purpose=purpose, provider="ddg_instant", error=e)
 
+        log_important(
+            "web_search.empty",
+            purpose=purpose,
+            provider="ddg_lite_and_instant",
+            dedupe_key=f"{purpose}|{cache_key}",
+            dedupe_window_s=3.0,
+        )
         return None
 
+    log_important(
+        "web_search.results",
+        purpose=purpose,
+        provider="ddg_lite",
+        count=len(results),
+        dedupe_key=f"{purpose}|{cache_key}|ddg_lite",
+        dedupe_window_s=2.0,
+    )
     lines = [
         "Web search results (DuckDuckGo Lite; verify details on the linked sources):",
         f"Query: {query}",
@@ -1841,31 +3119,30 @@ async def _maybe_build_web_search_context(*, purpose: str, seed_text: str) -> Op
         url = (r.get("url") or "").strip()
         line = f"{i}. {title}"
         if snippet:
-            line += f" — {snippet}"
+            line += f" - {snippet}"
         if url:
             line += f"\n   Source: {url}"
         lines.append(line)
 
     ctx = "\n".join(lines)[:2200]
     _web_search_cache_put(cache_key, ctx, ts=now_ts)
-    _WEB_SEARCH_LAST_TS = now_ts
     return ctx
 
 
 # ============================================
-# AI REPLY LOOP (Non-blocking)
+# RESPONSE / FACT CHECK LOOPS (Non-blocking)
 # ============================================
 
-def _enqueue_ai_request(ai_queue: asyncio.Queue, payload: dict) -> None:
+def _enqueue_response_request(response_queue: asyncio.Queue, payload: dict) -> None:
     try:
-        ai_queue.put_nowait(payload)
+        response_queue.put_nowait(payload)
     except asyncio.QueueFull:
         try:
-            ai_queue.get_nowait()
+            response_queue.get_nowait()
         except Exception:
             return
         try:
-            ai_queue.put_nowait(payload)
+            response_queue.put_nowait(payload)
         except Exception:
             return
 
@@ -1884,6 +3161,20 @@ def _enqueue_notes_trigger(notes_queue: asyncio.Queue) -> None:
             return
 
 
+def _enqueue_fact_check_trigger(fact_check_queue: asyncio.Queue) -> None:
+    try:
+        fact_check_queue.put_nowait(time.time())
+    except asyncio.QueueFull:
+        try:
+            fact_check_queue.get_nowait()
+        except Exception:
+            return
+        try:
+            fact_check_queue.put_nowait(time.time())
+        except Exception:
+            return
+
+
 async def run_notes_trigger_loop(
     websocket: WebSocket,
     send_lock: asyncio.Lock,
@@ -1895,7 +3186,7 @@ async def run_notes_trigger_loop(
     while True:
         await notes_queue.get()
 
-        debounce = float(config.get("notes_debounce_seconds", 2.5) or 2.5)
+        debounce = _cfg_float(config.get("notes_debounce_seconds"), 2.5, min_v=0.2, max_v=10.0)
         debounce = max(0.2, min(10.0, debounce))
 
         # Debounce: keep waiting while triggers continue.
@@ -1912,13 +3203,52 @@ async def run_notes_trigger_loop(
         if not config.get("notes_enabled", True):
             continue
 
-        min_interval = float(config.get("notes_trigger_min_interval_seconds", 10.0) or 10.0)
+        min_interval = _cfg_float(config.get("notes_trigger_min_interval_seconds"), 10.0, min_v=0.0, max_v=300.0)
         min_interval = max(0.0, min(300.0, min_interval))
         now_ts = time.time()
         if now_ts - last_generated_ts < min_interval:
             continue
 
         ok = await generate_notes(websocket, send_lock, notes_lock)
+        if ok:
+            last_generated_ts = time.time()
+
+
+async def run_fact_check_trigger_loop(
+    websocket: WebSocket,
+    send_lock: asyncio.Lock,
+    fact_check_queue: asyncio.Queue,
+    fact_check_lock: asyncio.Lock,
+):
+    last_generated_ts = 0.0
+
+    while True:
+        await fact_check_queue.get()
+
+        debounce = _cfg_float(config.get("fact_check_debounce_seconds"), 2.5, min_v=0.2, max_v=10.0)
+        debounce = max(0.2, min(10.0, debounce))
+
+        # Debounce: keep waiting while triggers continue.
+        while True:
+            try:
+                await asyncio.wait_for(fact_check_queue.get(), timeout=debounce)
+                continue
+            except asyncio.TimeoutError:
+                break
+
+        if not config.get("ai_enabled", False):
+            continue
+
+        if not config.get("fact_check_enabled", True):
+            continue
+
+        min_interval = _cfg_float(config.get("fact_check_trigger_min_interval_seconds"), 10.0, min_v=0.0, max_v=300.0)
+        min_interval = max(0.0, min(300.0, min_interval))
+        now_ts = time.time()
+        if now_ts - last_generated_ts < min_interval:
+            continue
+
+        ok = await generate_fact_checks(websocket, send_lock, fact_check_lock=fact_check_lock)
         if ok:
             last_generated_ts = time.time()
 
@@ -1941,7 +3271,7 @@ def _text_requests_no_response(text: str) -> bool:
     return any(p in t for p in phrases)
 
 
-def _latest_non_assistant_transcript() -> Optional[tuple[str, str]]:
+def _latest_non_assistant_transcript() -> Optional[tuple[str, str, str, str, str]]:
     if not current_session or not current_session.transcript:
         return None
 
@@ -1951,24 +3281,38 @@ def _latest_non_assistant_transcript() -> Optional[tuple[str, str]]:
                 continue
             text = (getattr(m, "text", "") or "").strip()
             if text:
-                return text, (getattr(m, "source", "user") or "user")
+                return (
+                    text,
+                    (getattr(m, "source", "user") or "user"),
+                    (getattr(m, "timestamp", "") or ""),
+                    (getattr(m, "speaker_label", "") or ""),
+                    (getattr(m, "id", "") or ""),
+                )
         except Exception:
             continue
 
     return None
 
 
-async def run_ai_loop(
+async def run_response_loop(
     websocket: WebSocket,
     state: ConnectionState,
     send_lock: asyncio.Lock,
-    ai_queue: asyncio.Queue,
+    response_lock: asyncio.Lock,
+    response_queue: asyncio.Queue,
 ):
     while True:
-        req = await ai_queue.get()
+        req = await response_queue.get()
         trigger = (req.get("trigger") or "").strip().lower()
 
+        # For high-frequency audio triggers, prefer the newest queued context.
+        if trigger == "audio" and not response_queue.empty():
+            continue
+
         if not config.get("ai_enabled", False):
+            continue
+
+        if not config.get("response_enabled", True):
             continue
 
         if llm_client is None:
@@ -1981,12 +3325,18 @@ async def run_ai_loop(
 
         text = (req.get("text") or "").strip()
         source = (req.get("source") or "user").strip() or "user"
+        target_timestamp = (req.get("timestamp") or "").strip() if isinstance(req.get("timestamp"), str) else ""
+        target_speaker = (req.get("speaker_label") or "").strip() if isinstance(req.get("speaker_label"), str) else ""
+        target_id = (req.get("message_id") or "").strip() if isinstance(req.get("message_id"), str) else ""
         if (not text) and trigger == "run_now":
             latest = _latest_non_assistant_transcript()
             if latest:
-                text, source = latest
+                text, source, target_timestamp, target_speaker, target_id = latest
 
-        # Hard override: if user explicitly asked for no response, do not reply (still keep notes/history).
+        if not text:
+            continue
+
+        # Hard override: if user explicitly asked for no response, do not generate response guidance.
         if text and _text_requests_no_response(text):
             await _ws_send_json(
                 websocket,
@@ -2003,8 +3353,10 @@ async def run_ai_loop(
             continue
 
         # Policy gate (applies to manual, audio, and run-now).
-        if config.get("policy_enabled", False):
-            min_policy_interval = float(config.get("policy_min_interval_seconds", 0.0) or 0.0)
+        require_policy = bool(config.get("response_require_policy_gate", True))
+        use_policy = bool(config.get("policy_enabled", False)) or require_policy
+        if use_policy:
+            min_policy_interval = _cfg_float(config.get("policy_min_interval_seconds"), 0.0, min_v=0.0, max_v=60.0)
             # Manual + run-now should evaluate immediately (don't skip on interval).
             if trigger in ("manual", "run_now"):
                 min_policy_interval = 0.0
@@ -2028,59 +3380,459 @@ async def run_ai_loop(
             ):
                 continue
 
-            if not decision.get("allow") or decision.get("urgency") != "now":
+            min_conf = _cfg_float(config.get("response_policy_min_confidence"), 0.58, min_v=0.0, max_v=1.0)
+            min_conf = max(0.0, min(1.0, min_conf))
+            decision_conf = float(decision.get("confidence") or 0.0)
+            if not decision.get("allow") or decision.get("urgency") != "now" or decision_conf < min_conf:
+                if decision_conf < min_conf and decision.get("allow") and decision.get("urgency") == "now":
+                    await _ws_send_json(
+                        websocket,
+                        {
+                            "type": "assistant_policy",
+                            "allow": False,
+                            "urgency": "wait",
+                            "reason": "Low policy confidence",
+                            "confidence": decision_conf,
+                            "show_withheld": bool(config.get("policy_show_withheld", True)),
+                        },
+                        send_lock,
+                    )
                 continue
 
-        # Rate limit only for audio-driven auto-respond; manual + run-now should run immediately.
+        # Rate limit only for audio-driven auto generation; manual + run-now should run immediately.
         if trigger == "audio":
-            min_ai_interval = float(config.get("ai_min_interval_seconds", 0.0) or 0.0)
-            if now_ts - state.last_ai_reply_ts < min_ai_interval:
+            min_ai_interval = _cfg_float(config.get("ai_min_interval_seconds"), 0.0, min_v=0.0, max_v=120.0)
+            if now_ts - state.last_response_ts < min_ai_interval:
                 continue
 
+        ok = await generate_response(
+            websocket,
+            send_lock,
+            response_lock=response_lock,
+            seed_text=text,
+            source=source,
+            target_timestamp=target_timestamp,
+            target_speaker=target_speaker,
+            target_message_id=target_id,
+        )
+        if ok:
+            state.last_response_ts = time.time()
+
+
+def _parse_json_object_best_effort(value: Any) -> dict:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        return {}
+
+    s = value.strip()
+    if not s:
+        return {}
+
+    try:
+        obj = json.loads(s)
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        pass
+
+    start = s.find("{")
+    end = s.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        try:
+            obj = json.loads(s[start : end + 1])
+            return obj if isinstance(obj, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _normalize_confidence(value: Any) -> str:
+    v = (str(value or "").strip().lower())
+    if v in ("high", "medium", "low"):
+        return v
+    if v in ("med", "mid"):
+        return "medium"
+    return ""
+
+
+def _response_source_label(source: str, speaker_label: str = "") -> str:
+    s = (source or "").strip().lower()
+    if s in ("third_party", "third-party", "loopback"):
+        return (speaker_label or "").strip() or "Third-Party"
+    if s in ("user", "you"):
+        return "You"
+    return (source or "").strip() or "Unknown"
+
+
+def _trim_excerpt(text: str, max_chars: int = 180) -> str:
+    t = " ".join((text or "").split()).strip()
+    if len(t) <= max_chars:
+        return t
+    return (t[: max(0, max_chars - 3)] + "...").strip()
+
+
+def _cfg_float(value: Any, default: float, *, min_v: float | None = None, max_v: float | None = None) -> float:
+    try:
+        out = float(value if value is not None else default)
+    except Exception:
+        out = float(default)
+    if min_v is not None:
+        out = max(float(min_v), out)
+    if max_v is not None:
+        out = min(float(max_v), out)
+    return out
+
+
+def _cfg_int(value: Any, default: int, *, min_v: int | None = None, max_v: int | None = None) -> int:
+    try:
+        out = int(value if value is not None else default)
+    except Exception:
+        out = int(default)
+    if min_v is not None:
+        out = max(int(min_v), out)
+    if max_v is not None:
+        out = min(int(max_v), out)
+    return out
+
+
+def _response_signature(item: ResponseItem | dict) -> tuple:
+    if isinstance(item, ResponseItem):
+        d = asdict(item)
+    else:
+        d = dict(item or {})
+    return (
+        str(d.get("content") or "").strip(),
+        str(d.get("responding_to_text") or "").strip(),
+        str(d.get("responding_to_source") or "").strip(),
+        str(d.get("responding_to_timestamp") or "").strip(),
+        tuple(str(x).strip() for x in (d.get("basis_facts") or []) if str(x).strip()),
+        tuple(str(x).strip() for x in (d.get("cautions") or []) if str(x).strip()),
+        str(d.get("confidence") or "").strip().lower(),
+    )
+
+
+def _fact_check_signature(item: FactCheckItem | dict) -> tuple:
+    if isinstance(item, FactCheckItem):
+        d = asdict(item)
+    else:
+        d = dict(item or {})
+    return (
+        str(d.get("claim") or "").strip(),
+        str(d.get("verdict") or "").strip().lower(),
+        str(d.get("analysis") or "").strip(),
+        tuple(str(x).strip() for x in (d.get("evidence") or []) if str(x).strip()),
+        str(d.get("confidence") or "").strip().lower(),
+    )
+
+
+def _build_response_prompt() -> str:
+    base = config.get("response_prompt", DEFAULT_CONFIG["response_prompt"])
+    return f"""You are a strategic response coach for the user. {base}
+
+Requirements:
+- Ground advice in conversation facts and session context only.
+- Keep tone calm, assertive, and legally cautious.
+- Do not invent evidence, names, dates, or laws.
+- Prefer short, defensible language the user can actually say out loud.
+- The response must clearly reference the specific statement/event it addresses.
+
+Output ONLY valid JSON with this exact shape:
+{{
+  "response": "string",
+  "basis_facts": ["string"],
+  "cautions": ["string"],
+  "confidence": "low|medium|high"
+}}
+"""
+
+
+def _build_fact_check_prompt() -> str:
+    base = config.get("fact_check_prompt", DEFAULT_CONFIG["fact_check_prompt"])
+    return f"""You are a strict fact-check assistant. {base}
+
+Task:
+- Identify specific claims from the recent conversation.
+- For each claim, decide verdict: supported, contradicted, or uncertain.
+- Explain briefly using only transcript/context facts (and web results if present).
+- If evidence is weak, say uncertain instead of guessing.
+
+Output ONLY valid JSON with this exact shape:
+{{
+  "checks": [
+    {{
+      "claim": "string",
+      "verdict": "supported|contradicted|uncertain",
+      "analysis": "string",
+      "evidence": ["string"],
+      "confidence": "low|medium|high"
+    }}
+  ]
+}}
+"""
+
+
+async def generate_response(
+    websocket: WebSocket,
+    send_lock: asyncio.Lock,
+    *,
+    response_lock: asyncio.Lock | None = None,
+    seed_text: str = "",
+    source: str = "user",
+    target_timestamp: str = "",
+    target_speaker: str = "",
+    target_message_id: str = "",
+) -> bool:
+    if not config.get("ai_enabled", False):
+        return False
+    if not config.get("response_enabled", True):
+        return False
+    if llm_client is None or current_session is None:
+        return False
+
+    locked = False
+    try:
+        if response_lock is not None:
+            await response_lock.acquire()
+            locked = True
+
+        context_size = int(config.get("response_context_messages", 14) or 14)
+        context_size = max(6, min(60, context_size))
+        conversation_text = llm_client.format_recent_history(limit=context_size)
+        if not conversation_text.strip():
+            return False
+
+        web_seed = (seed_text or "").strip() or conversation_text[-500:]
         extra_messages: list[dict] = []
-        web_ctx = await _maybe_build_web_search_context(purpose="assistant_reply", seed_text=text)
+        web_ctx = await _maybe_build_web_search_context(purpose="response_generate", seed_text=web_seed)
         if web_ctx:
             extra_messages.append({"role": "system", "content": web_ctx})
 
-        if not await _ws_send_json(websocket, {"type": "llm_start"}, send_lock):
-            continue
-
-        full_response = ""
-        pending = ""
-        last_flush = time.monotonic()
         session_ctx = _get_session_context()
-        system_prompt = llm_client.system_prompt
         if session_ctx:
-            system_prompt = f"{system_prompt}\n\nSession context:\n{session_ctx}"
+            extra_messages.append({"role": "system", "content": f"Session context:\n{session_ctx[:4000]}"})
 
-        try:
-            async for chunk in llm_client.stream_reply(extra_messages=extra_messages, system_prompt=system_prompt):
-                full_response += chunk
-                pending += chunk
+        payload = {
+            "target_message_id": target_message_id,
+            "new_message_source": source,
+            "new_message_speaker": target_speaker,
+            "new_message_timestamp": target_timestamp,
+            "new_message": seed_text,
+            "conversation": conversation_text,
+        }
 
-                now_m = time.monotonic()
-                if len(pending) >= 80 or (now_m - last_flush) >= 0.06:
-                    if not await _ws_send_json(websocket, {"type": "llm_chunk", "text": pending}, send_lock):
-                        pending = ""
-                        break
-                    pending = ""
-                    last_flush = now_m
-        finally:
-            if pending:
-                await _ws_send_json(websocket, {"type": "llm_chunk", "text": pending}, send_lock)
-            await _ws_send_json(websocket, {"type": "llm_end"}, send_lock)
+        resp = await _llm_chat_create(
+            messages=[
+                {"role": "system", "content": _build_response_prompt()},
+                *extra_messages,
+                {"role": "user", "content": json.dumps(payload)},
+            ],
+            stream=False,
+            temperature=0.25,
+            max_tokens=700,
+            response_format={"type": "json_object"},
+        )
 
-        if current_session and full_response.strip():
-            state.last_ai_reply_ts = time.time()
-            current_session.transcript.append(
-                TranscriptMessage(
+        data = _parse_json_object_best_effort(resp.choices[0].message.content or "")
+
+        content = (data.get("response") or "").strip()
+        if not content:
+            content = (data.get("recommended_response") or "").strip()
+        content = " ".join(content.split())[:1400].strip()
+        if not content:
+            return False
+
+        source_label = _response_source_label(source, target_speaker)
+        target_excerpt = _trim_excerpt(seed_text, max_chars=200)
+
+        basis_facts = _coerce_string_list(data.get("basis_facts") or data.get("facts"))[:8]
+        basis_facts = [" ".join(f.split())[:260].strip() for f in basis_facts if str(f).strip()]
+
+        cautions = _coerce_string_list(data.get("cautions") or data.get("risk_notes"))[:6]
+        cautions = [" ".join(c.split())[:260].strip() for c in cautions if str(c).strip()]
+
+        confidence = _normalize_confidence(data.get("confidence"))
+
+        item = ResponseItem(
+            id=str(uuid.uuid4())[:8],
+            content=content,
+            timestamp=datetime.now().strftime("%H:%M:%S"),
+            responding_to_text=target_excerpt,
+            responding_to_source=source_label,
+            responding_to_speaker=(target_speaker or "").strip(),
+            responding_to_timestamp=(target_timestamp or "").strip(),
+            basis_facts=basis_facts,
+            cautions=cautions,
+            confidence=confidence,
+            source="ai",
+            session_id=current_session.id,
+        )
+
+        current = list(current_session.responses or [])
+        if current and _response_signature(current[-1]) == _response_signature(item):
+            return True
+        if not current or (current[-1].content or "").strip().casefold() != content.casefold():
+            current.append(item)
+        else:
+            # Replace the latest item to refresh facts/cautions if wording stayed the same.
+            current[-1] = item
+
+        max_items = int(config.get("response_max_items", 20) or 20)
+        max_items = max(1, min(80, max_items))
+        current_session.responses = current[-max_items:]
+        save_session_throttled(current_session)
+
+        latest = current_session.responses[-1] if current_session.responses else None
+        await _ws_send_json(
+            websocket,
+            {
+                "type": "response_update",
+                "responses": [asdict(r) for r in current_session.responses],
+                "latest": asdict(latest) if latest else None,
+            },
+            send_lock,
+        )
+        log_important(
+            "response.generated",
+            source=source_label,
+            confidence=(confidence or "-"),
+            facts=len(basis_facts),
+            cautions=len(cautions),
+            total=len(current_session.responses),
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Error generating response guidance: {e}")
+        log_important("response.generate.error", level=logging.ERROR, error=e)
+        return False
+    finally:
+        if locked and response_lock is not None and response_lock.locked():
+            response_lock.release()
+
+
+async def generate_fact_checks(
+    websocket: WebSocket,
+    send_lock: asyncio.Lock,
+    *,
+    fact_check_lock: asyncio.Lock | None = None,
+) -> bool:
+    if not config.get("ai_enabled", False):
+        return False
+    if not config.get("fact_check_enabled", True):
+        return False
+    if llm_client is None or current_session is None:
+        return False
+
+    locked = False
+    try:
+        if fact_check_lock is not None:
+            await fact_check_lock.acquire()
+            locked = True
+
+        context_size = int(config.get("fact_check_context_messages", 18) or 18)
+        context_size = max(6, min(80, context_size))
+        conversation_text = llm_client.format_recent_history(limit=context_size)
+        if not conversation_text.strip():
+            current_session.fact_checks = []
+            save_session_throttled(current_session)
+            await _ws_send_json(websocket, {"type": "fact_checks_update", "fact_checks": []}, send_lock)
+            return True
+
+        web_ctx = await _maybe_build_web_search_context(purpose="fact_check", seed_text=conversation_text[-500:])
+        messages = [{"role": "system", "content": _build_fact_check_prompt()}]
+        if web_ctx:
+            messages.append({"role": "system", "content": web_ctx})
+
+        session_ctx = _get_session_context()
+        if session_ctx:
+            messages.append({"role": "system", "content": f"Session context:\n{session_ctx[:4000]}"})
+        messages.append({"role": "user", "content": conversation_text})
+
+        resp = await _llm_chat_create(
+            messages=messages,
+            stream=False,
+            temperature=0,
+            max_tokens=900,
+            response_format={"type": "json_object"},
+        )
+
+        data = _parse_json_object_best_effort(resp.choices[0].message.content or "")
+        checks_raw = data.get("checks", [])
+        if not isinstance(checks_raw, list):
+            checks_raw = []
+
+        normalized: list[FactCheckItem] = []
+        max_items = int(config.get("fact_check_max_items", 12) or 12)
+        max_items = max(1, min(50, max_items))
+        for entry in checks_raw:
+            if len(normalized) >= max_items:
+                break
+            if not isinstance(entry, dict):
+                continue
+
+            claim = " ".join(str(entry.get("claim") or "").split()).strip()[:280]
+            if not claim:
+                continue
+
+            verdict = str(entry.get("verdict") or "").strip().lower()
+            if verdict not in ("supported", "contradicted", "uncertain"):
+                verdict = "uncertain"
+
+            analysis = " ".join(str(entry.get("analysis") or "").split()).strip()[:520]
+            if not analysis:
+                analysis = "Insufficient evidence in available context."
+
+            evidence = _coerce_string_list(entry.get("evidence"))[:6]
+            evidence = [" ".join(ev.split())[:220].strip() for ev in evidence if str(ev).strip()]
+
+            normalized.append(
+                FactCheckItem(
                     id=str(uuid.uuid4())[:8],
-                    text=full_response.strip(),
-                    source="assistant",
+                    claim=claim,
+                    verdict=verdict,
+                    analysis=analysis,
                     timestamp=datetime.now().strftime("%H:%M:%S"),
+                    evidence=evidence,
+                    confidence=_normalize_confidence(entry.get("confidence")),
+                    session_id=current_session.id,
                 )
             )
-            save_session_throttled(current_session)
+
+        existing = list(current_session.fact_checks or [])
+        if len(existing) == len(normalized):
+            same = True
+            for i in range(len(normalized)):
+                if _fact_check_signature(existing[i]) != _fact_check_signature(normalized[i]):
+                    same = False
+                    break
+            if same:
+                return True
+
+        # Keep newest run as the current fact-check snapshot.
+        current_session.fact_checks = normalized
+        save_session_throttled(current_session)
+        await _ws_send_json(
+            websocket,
+            {"type": "fact_checks_update", "fact_checks": [asdict(fc) for fc in current_session.fact_checks]},
+            send_lock,
+        )
+        supported = sum(1 for fc in normalized if (fc.verdict or "").lower() == "supported")
+        contradicted = sum(1 for fc in normalized if (fc.verdict or "").lower() == "contradicted")
+        uncertain = sum(1 for fc in normalized if (fc.verdict or "").lower() == "uncertain")
+        log_important(
+            "fact_checks.updated",
+            total=len(normalized),
+            supported=supported,
+            contradicted=contradicted,
+            uncertain=uncertain,
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Error generating fact checks: {e}")
+        log_important("fact_checks.error", level=logging.ERROR, error=e)
+        return False
+    finally:
+        if locked and fact_check_lock is not None and fact_check_lock.locked():
+            fact_check_lock.release()
 
 
 # ============================================
@@ -2216,8 +3968,7 @@ async def _smart_maintain_ai_notes(
     if web_ctx:
         messages.insert(1, {"role": "system", "content": web_ctx})
 
-    response = await llm_client.client.chat.completions.create(
-        model=llm_client.model,
+    response = await _llm_chat_create(
         messages=messages,
         stream=False,
         response_format={"type": "json_object"},
@@ -2305,6 +4056,7 @@ async def generate_notes(websocket: WebSocket, send_lock: asyncio.Lock, notes_lo
                 )
             except Exception as e:
                 logger.error(f"Error generating smart notes: {e}")
+                log_important("notes.smart.error", level=logging.ERROR, error=e)
                 maintained = []
 
             before = [asdict(n) for n in (current_session.notes or [])]
@@ -2317,6 +4069,13 @@ async def generate_notes(websocket: WebSocket, send_lock: asyncio.Lock, notes_lo
                     websocket,
                     {"type": "notes_update", "notes": after, "new_notes": [asdict(n) for n in maintained]},
                     send_lock,
+                )
+                log_important(
+                    "notes.updated",
+                    mode="smart",
+                    protected=len(protected),
+                    ai=len(maintained),
+                    total=len(current_session.notes),
                 )
                 return True
             return False
@@ -2335,8 +4094,7 @@ async def generate_notes(websocket: WebSocket, send_lock: asyncio.Lock, notes_lo
         if web_ctx:
             messages.insert(1, {"role": "system", "content": web_ctx})
         
-        response = await llm_client.client.chat.completions.create(
-            model=llm_client.model,
+        response = await _llm_chat_create(
             messages=messages,
             stream=False,
             response_format={"type": "json_object"}
@@ -2412,10 +4170,17 @@ async def generate_notes(websocket: WebSocket, send_lock: asyncio.Lock, notes_lo
                 },
                 send_lock,
             )
+            log_important(
+                "notes.updated",
+                mode="standard",
+                added=len(new_notes),
+                total=len(current_session.notes),
+            )
             return True
         
     except Exception as e:
         logger.error(f"Error generating notes: {e}")
+        log_important("notes.error", level=logging.ERROR, error=e)
     finally:
         if notes_lock is not None and notes_lock.locked():
             notes_lock.release()
@@ -2494,7 +4259,7 @@ def _format_recent_history_bounded(*, limit: int = 10, max_chars: int = 24000) -
             break
 
         if len(line) > remaining:
-            suffix = " …[truncated]"
+            suffix = " ...[truncated]"
             keep = max(0, remaining - len(suffix))
             line = (line[:keep] + suffix).strip()
 
@@ -2564,7 +4329,7 @@ def _coerce_string_list(value: Any) -> list[str]:
             ln = line.strip()
             if not ln:
                 continue
-            ln = ln.lstrip("-*• \t").strip()
+            ln = ln.lstrip("-* \t").strip()
             if ln:
                 lines.append(ln)
         return lines or [s]
@@ -2577,9 +4342,10 @@ def _coerce_string_list(value: Any) -> list[str]:
 async def run_notes_loop(websocket: WebSocket, send_lock: asyncio.Lock, notes_lock: asyncio.Lock):
     """Periodically generates notes from conversation history."""
     logger.info("Starting notes generation loop")
-    
+    last_generated_activity_seq = -1
+
     while True:
-        interval = int(config.get("notes_interval_seconds", 30))
+        interval = _cfg_int(config.get("notes_interval_seconds"), 30, min_v=5, max_v=600)
         await asyncio.sleep(interval)
         
         if not config.get("ai_enabled", False):
@@ -2590,8 +4356,41 @@ async def run_notes_loop(websocket: WebSocket, send_lock: asyncio.Lock, notes_lo
 
         if config.get("notes_on_interaction_only", False):
             continue
-        
-        await generate_notes(websocket, send_lock, notes_lock)
+
+        current_seq = int(_TRANSCRIPT_ACTIVITY_SEQ)
+        if current_seq == last_generated_activity_seq:
+            continue
+
+        ok = await generate_notes(websocket, send_lock, notes_lock)
+        if ok:
+            last_generated_activity_seq = current_seq
+
+
+async def run_fact_check_loop(websocket: WebSocket, send_lock: asyncio.Lock, fact_check_lock: asyncio.Lock):
+    """Periodically generates fact checks from conversation history."""
+    logger.info("Starting fact check loop")
+    last_generated_activity_seq = -1
+
+    while True:
+        interval = _cfg_int(config.get("fact_check_interval_seconds"), 25, min_v=5, max_v=600)
+        await asyncio.sleep(interval)
+
+        if not config.get("ai_enabled", False):
+            continue
+
+        if not config.get("fact_check_enabled", True):
+            continue
+
+        if config.get("fact_check_on_interaction_only", False):
+            continue
+
+        current_seq = int(_TRANSCRIPT_ACTIVITY_SEQ)
+        if current_seq == last_generated_activity_seq:
+            continue
+
+        ok = await generate_fact_checks(websocket, send_lock, fact_check_lock=fact_check_lock)
+        if ok:
+            last_generated_activity_seq = current_seq
 
 
 # ============================================
@@ -2603,8 +4402,9 @@ async def run_transcription_loop(
     source: str,
     state: ConnectionState,
     send_lock: asyncio.Lock,
-    ai_queue: asyncio.Queue,
+    response_queue: asyncio.Queue,
     notes_queue: asyncio.Queue,
+    fact_check_queue: asyncio.Queue,
     transcript_cleanup_queue: asyncio.Queue | None = None,
 ):
     """
@@ -2612,9 +4412,11 @@ async def run_transcription_loop(
     Uses a shared transcription model instance (calls are internally serialized).
     """
     logger.info(f"Starting transcription loop for {source}")
+    log_important("transcription.loop.start", source=source)
+    source_label = "microphone" if source == "user" else ("system audio" if source in ("third_party", "loopback") else source)
     if not await _ws_send_json(
         websocket,
-        {"type": "status", "message": f"Audio: transcription loop started for {source}."},
+        {"type": "status", "message": f"Audio: transcribing from {source_label}."},
         send_lock,
     ):
         return
@@ -2622,6 +4424,7 @@ async def run_transcription_loop(
     def transcription_worker():
         if transcription_model is None:
             logger.error("Transcription model not initialized!")
+            log_important("transcription.loop.error", level=logging.ERROR, source=source, reason="model-not-initialized")
             return
 
         diarize = bool(config.get("speaker_diarization_enabled", False)) and source in ("third_party", "loopback")
@@ -2658,8 +4461,9 @@ async def run_transcription_loop(
                     state,
                     send_lock,
                     message_kind="audio",
-                    ai_queue=ai_queue,
+                    response_queue=response_queue,
                     notes_queue=notes_queue,
+                    fact_check_queue=fact_check_queue,
                     transcript_cleanup_queue=transcript_cleanup_queue,
                     speaker_id=speaker_id,
                     speaker_label=speaker_label,
@@ -2705,6 +4509,221 @@ def _should_merge_transcript(prev_text: str, new_text: str) -> bool:
     return False
 
 
+def _is_strong_transcript_continuation(prev_text: str, new_text: str) -> bool:
+    a = (prev_text or "").strip()
+    b = (new_text or "").strip()
+    if not a or not b:
+        return False
+
+    if b.startswith(("#", "@", "http://", "https://")):
+        return False
+
+    if a and a[-1] not in ".?!":
+        return True
+
+    if a and a[-1] in "-,:;":
+        return True
+
+    if b and b[0].islower():
+        return True
+
+    starters = (
+        "and ",
+        "but ",
+        "so ",
+        "to ",
+        "because ",
+        "also ",
+        "then ",
+        "or ",
+        "if ",
+    )
+    b_cf = b.casefold()
+    return any(b_cf.startswith(s) for s in starters)
+
+
+def _strip_prefix_word_tokens(text: str, token_count: int) -> str:
+    import re
+
+    if token_count <= 0:
+        return text
+
+    matches = list(re.finditer(r"[a-z0-9']+", text, flags=re.I))
+    if token_count > len(matches):
+        return text
+
+    cut = matches[token_count - 1].end()
+    remainder = text[cut:]
+    return re.sub(r"^[\s,;:\-.!?]+", "", remainder)
+
+
+def _merge_transcript_text(prev_text: str, new_text: str) -> str:
+    import re
+
+    a = (prev_text or "").rstrip()
+    b = (new_text or "").lstrip()
+    if not a:
+        return b
+    if not b:
+        return a
+
+    # Handle chopped word boundaries like "will-" + "will be".
+    if a.endswith("-"):
+        a = a[:-1].rstrip()
+
+    a_tokens = re.findall(r"[a-z0-9']+", a.casefold(), flags=re.I)
+    b_tokens = re.findall(r"[a-z0-9']+", b.casefold(), flags=re.I)
+    max_overlap = min(8, len(a_tokens), len(b_tokens))
+    overlap = 0
+    for n in range(max_overlap, 1, -1):
+        if a_tokens[-n:] == b_tokens[:n]:
+            overlap = n
+            break
+
+    if overlap > 0:
+        trimmed = _strip_prefix_word_tokens(b, overlap).strip()
+        if trimmed:
+            b = trimmed
+        else:
+            b = ""
+    elif a_tokens and b_tokens:
+        # Conservative 1-token seam dedupe (e.g. "cars. cars", "everyone Everyone").
+        tail = a_tokens[-1]
+        head = b_tokens[0]
+        if tail == head and len(tail) >= 3:
+            trimmed = _strip_prefix_word_tokens(b, 1).strip()
+            if trimmed:
+                b = trimmed
+        elif len(head) >= 4 and tail.endswith(head) and tail != head:
+            a = re.sub(r"[.?!]\s*$", "", a).rstrip()
+            trimmed = _strip_prefix_word_tokens(b, 1).strip()
+            if trimmed:
+                b = trimmed
+
+    if not b:
+        return a
+
+    merged = (a + " " + b).strip()
+    return re.sub(r"\s+([,.;:!?])", r"\1", merged)
+
+
+def _count_word_tokens(text: str) -> int:
+    import re
+
+    t = " ".join((text or "").split()).strip()
+    if not t:
+        return 0
+    return len(re.findall(r"[a-z0-9']+", t, flags=re.I))
+
+
+def _transcript_append_delta(reference_text: str, current_text: str) -> str:
+    import re
+
+    ref = " ".join((reference_text or "").split()).strip()
+    cur = " ".join((current_text or "").split()).strip()
+    if not cur:
+        return ""
+    if not ref:
+        return cur
+    if cur == ref:
+        return ""
+    if cur.startswith(ref):
+        return cur[len(ref) :].strip(" \t\r\n,;:.!?-")
+
+    a_tokens = re.findall(r"[a-z0-9']+", ref.casefold(), flags=re.I)
+    b_tokens = re.findall(r"[a-z0-9']+", cur.casefold(), flags=re.I)
+    if not a_tokens or not b_tokens:
+        return cur
+
+    max_overlap = min(12, len(a_tokens), len(b_tokens))
+    overlap = 0
+    for n in range(max_overlap, 1, -1):
+        if a_tokens[-n:] == b_tokens[:n]:
+            overlap = n
+            break
+
+    if overlap > 0:
+        trimmed = _strip_prefix_word_tokens(cur, overlap).strip()
+        if trimmed:
+            return trimmed
+
+    return cur
+
+
+def _prune_ai_trigger_baseline_cache(max_items: int = 4096) -> None:
+    max_n = int(max(128, max_items))
+    if len(_AI_TRIGGER_BASELINE_TEXT) <= max_n:
+        return
+    to_remove = len(_AI_TRIGGER_BASELINE_TEXT) - max_n
+    for k in list(_AI_TRIGGER_BASELINE_TEXT.keys())[:to_remove]:
+        _AI_TRIGGER_BASELINE_TEXT.pop(k, None)
+
+
+def _should_enqueue_ai_from_transcript_update(
+    feature: str,
+    *,
+    message_id: str,
+    current_text: str,
+    previous_text: str = "",
+    merged: bool = False,
+    message_kind: str = "audio",
+) -> bool:
+    kind = (message_kind or "audio").strip().lower()
+    cur = " ".join((current_text or "").split()).strip()
+    if not cur:
+        return False
+
+    sid = "-"
+    if current_session is not None:
+        try:
+            sid = (current_session.id or "").strip() or "-"
+        except Exception:
+            sid = "-"
+    mid = (message_id or "").strip() or "-"
+    key = f"{sid}:{feature}:{mid}"
+
+    # Manual triggers should stay immediate and explicit.
+    if kind == "manual":
+        _AI_TRIGGER_BASELINE_TEXT[key] = cur
+        _prune_ai_trigger_baseline_cache()
+        return True
+
+    baseline = " ".join((_AI_TRIGGER_BASELINE_TEXT.get(key, "") or "").split()).strip()
+    prev = " ".join((previous_text or "").split()).strip()
+    reference = baseline or (prev if merged else "")
+    delta = _transcript_append_delta(reference, cur) if reference else cur
+    delta = " ".join((delta or "").split()).strip()
+    if not delta:
+        return False
+
+    ends_sentence = cur.endswith((".", "?", "!"))
+    delta_chars = len(delta)
+    delta_words = _count_word_tokens(delta)
+    full_chars = len(cur)
+    full_words = _count_word_tokens(cur)
+
+    # New transcript chunks need stronger evidence before triggering downstream AI.
+    if not reference:
+        substantive = (
+            full_chars >= 42
+            or full_words >= 8
+            or (full_words >= 5 and ends_sentence)
+        )
+    else:
+        substantive = (
+            delta_chars >= 28
+            or delta_words >= 6
+            or (delta_words >= 4 and ends_sentence)
+        )
+
+    if not substantive:
+        return False
+
+    _AI_TRIGGER_BASELINE_TEXT[key] = cur
+    _prune_ai_trigger_baseline_cache()
+    return True
+
+
 async def _transcript_cleanup_text(text: str) -> str:
     if not llm_client:
         return ""
@@ -2723,8 +4742,7 @@ async def _transcript_cleanup_text(text: str) -> str:
         "- Output ONLY valid JSON: {\"clean_text\": \"...\"}\n"
     )
 
-    resp = await llm_client.client.chat.completions.create(
-        model=llm_client.model,
+    resp = await _llm_chat_create(
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": t[:1200]},
@@ -2782,8 +4800,7 @@ async def _transcript_ai_rewrite(text: str, *, mode: str) -> str:
         "- Output ONLY valid JSON: {\"clean_text\": \"...\"}\n"
     )
 
-    resp = await llm_client.client.chat.completions.create(
-        model=llm_client.model,
+    resp = await _llm_chat_create(
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": t[:1200]},
@@ -2897,7 +4914,13 @@ async def _policy_should_respond(text: str, source: str) -> dict:
         {
             "role": "system",
             "content": (
-                "You are a policy gate for an assistant. Decide whether the assistant should respond NOW. "
+                "You are a policy gate for a response assistant. Decide whether the system should generate response guidance NOW. "
+                "Be conservative: default to WAIT unless a response would be materially useful right now.\n"
+                "Allow NOW only when ALL are true:\n"
+                "1) There is a specific statement or claim to respond to.\n"
+                "2) A response would improve the user's position, clarity, or de-escalation.\n"
+                "3) The moment is appropriate (not random filler, tiny acknowledgements, or unclear context).\n"
+                "If uncertain, choose WAIT.\n"
                 "Follow the user's policy prompt exactly. Output ONLY valid JSON as an object with keys: "
                 "allow (boolean), urgency ('now' or 'wait'), reason (string), confidence (number 0..1).\n\n"
                 f"Policy prompt:\n{policy_prompt}"
@@ -2915,14 +4938,13 @@ async def _policy_should_respond(text: str, source: str) -> dict:
     ]
 
     try:
-        resp = await llm_client.client.chat.completions.create(
-            model=llm_client.model,
+        resp = await _llm_chat_create(
             messages=messages,
             stream=False,
             response_format={"type": "json_object"},
         )
         content = resp.choices[0].message.content
-        data = json.loads(content)
+        data = _parse_json_object_best_effort(content)
         allow = bool(data.get("allow"))
         urgency = data.get("urgency")
         reason = str(data.get("reason") or "")
@@ -2947,12 +4969,15 @@ async def process_transcription(
     send_lock: asyncio.Lock | None = None,
     *,
     message_kind: str = "audio",  # "audio" or "manual"
-    ai_queue: asyncio.Queue | None = None,
+    response_queue: asyncio.Queue | None = None,
     notes_queue: asyncio.Queue | None = None,
+    fact_check_queue: asyncio.Queue | None = None,
     transcript_cleanup_queue: asyncio.Queue | None = None,
     speaker_id: str | None = None,
     speaker_label: str | None = None,
 ):
+    global _TRANSCRIPT_ACTIVITY_SEQ
+
     if not isinstance(text, str):
         text = "" if text is None else str(text)
     text = text.strip()
@@ -2978,18 +5003,24 @@ async def process_transcription(
         elif speaker_label is None and source in ("third_party", "loopback"):
             speaker_label = _default_speaker_label_from_id(speaker_id)
 
-    logger.info(f"Transcribed ({source}): {text}")
+    logger.debug("Transcribed (%s): %s", source, text)
+    _TRANSCRIPT_ACTIVITY_SEQ += 1
     
     timestamp = datetime.now().strftime("%H:%M:%S")
     
     # Add to (or merge into) session transcript
     now_ts = time.time()
     merged = False
+    previous_text_for_ai = ""
     msg: TranscriptMessage | None = None
     if current_session:
         merge_enabled = bool(config.get("transcript_merge_enabled", True))
         merge_window = float(config.get("transcript_merge_window_seconds", 4.0) or 4.0)
         merge_window = max(0.0, min(20.0, merge_window))
+        continuation_window = float(
+            config.get("transcript_merge_continuation_window_seconds", max(18.0, merge_window)) or max(18.0, merge_window)
+        )
+        continuation_window = max(merge_window, min(45.0, continuation_window))
 
         if (
             merge_enabled
@@ -2999,8 +5030,17 @@ async def process_transcription(
         ):
             prev = current_session.transcript[-1]
             last_ts = float(_TRANSCRIPT_LAST_UPDATE_TS.get(prev.id, 0.0) or 0.0)
-            if (now_ts - last_ts) <= merge_window and _should_merge_transcript(prev.text, text):
-                prev.text = (prev.text.rstrip() + " " + text.lstrip()).strip()
+            should_merge = _should_merge_transcript(prev.text, text)
+            if should_merge:
+                strong_continuation = _is_strong_transcript_continuation(prev.text, text)
+                allowed_window = continuation_window if strong_continuation else merge_window
+            else:
+                strong_continuation = False
+                allowed_window = merge_window
+
+            if should_merge and (now_ts - last_ts) <= allowed_window:
+                previous_text_for_ai = str(prev.text or "")
+                prev.text = _merge_transcript_text(prev.text, text)
                 prev.clean_text = None  # Invalidate; will be regenerated if enabled.
                 prev.timestamp = timestamp
                 msg = prev
@@ -3032,6 +5072,39 @@ async def process_transcription(
             speaker_label=speaker_label,
         )
 
+    ai_signal_notes = _should_enqueue_ai_from_transcript_update(
+        "notes",
+        message_id=msg.id,
+        current_text=msg.text,
+        previous_text=previous_text_for_ai,
+        merged=merged,
+        message_kind=message_kind,
+    )
+    ai_signal_fact_check = _should_enqueue_ai_from_transcript_update(
+        "fact_check",
+        message_id=msg.id,
+        current_text=msg.text,
+        previous_text=previous_text_for_ai,
+        merged=merged,
+        message_kind=message_kind,
+    )
+    ai_signal_cleanup = _should_enqueue_ai_from_transcript_update(
+        "transcript_cleanup",
+        message_id=msg.id,
+        current_text=msg.text,
+        previous_text=previous_text_for_ai,
+        merged=merged,
+        message_kind=message_kind,
+    )
+    ai_signal_response = _should_enqueue_ai_from_transcript_update(
+        "response",
+        message_id=msg.id,
+        current_text=msg.text,
+        previous_text=previous_text_for_ai,
+        merged=merged,
+        message_kind=message_kind,
+    )
+
     event_type = "transcription_update" if merged else "transcription"
     if not await _ws_send_json(
         websocket,
@@ -3049,7 +5122,7 @@ async def process_transcription(
     ):
         return
 
-    # Always keep transcript history for notes/policy context when configured.
+    # Keep transcript history for notes/policy/response/fact-check context.
     if llm_client is not None:
         if merged and llm_client.history:
             try:
@@ -3065,11 +5138,11 @@ async def process_transcription(
                     else:
                         same_speaker = (last_name == "third_party")
                     if last_role == "user" and same_speaker:
-                        last["content"] = (str(last.get("content") or "").rstrip() + " " + text.lstrip()).strip()
+                        last["content"] = _merge_transcript_text(str(last.get("content") or ""), text)
                     else:
                         llm_client.add_transcript_message(source, text, speaker_id=speaker_id, speaker_label=speaker_label)
                 elif last_role == "user" and last_name == "you":
-                    last["content"] = (str(last.get("content") or "").rstrip() + " " + text.lstrip()).strip()
+                    last["content"] = _merge_transcript_text(str(last.get("content") or ""), text)
                 else:
                     llm_client.add_transcript_message(source, text, speaker_id=speaker_id, speaker_label=speaker_label)
             except Exception:
@@ -3078,13 +5151,30 @@ async def process_transcription(
             llm_client.add_transcript_message(source, text, speaker_id=speaker_id, speaker_label=speaker_label)
 
     if notes_queue is not None and config.get("notes_enabled", True):
-        if config.get("ai_enabled", False) and (config.get("notes_live_on_message", True) or config.get("notes_on_interaction_only", False)):
+        if (
+            ai_signal_notes
+            and config.get("ai_enabled", False)
+            and (config.get("notes_live_on_message", True) or config.get("notes_on_interaction_only", False))
+        ):
             _enqueue_notes_trigger(notes_queue)
 
-    if transcript_cleanup_queue is not None and config.get("ai_enabled", False) and _get_transcript_ai_mode(config) != "off":
+    if fact_check_queue is not None and config.get("fact_check_enabled", True):
+        if (
+            ai_signal_fact_check
+            and config.get("ai_enabled", False)
+            and (config.get("fact_check_live_on_message", True) or config.get("fact_check_on_interaction_only", False))
+        ):
+            _enqueue_fact_check_trigger(fact_check_queue)
+
+    if (
+        transcript_cleanup_queue is not None
+        and ai_signal_cleanup
+        and config.get("ai_enabled", False)
+        and _get_transcript_ai_mode(config) != "off"
+    ):
         _enqueue_transcript_cleanup(transcript_cleanup_queue, msg.id)
 
-    # Trigger AI replies non-blockingly.
+    # Trigger response generation non-blockingly.
     if config.get("ai_enabled", False):
         if llm_client is None:
             if state is None:
@@ -3094,13 +5184,24 @@ async def process_transcription(
                 await _ws_send_json(websocket, {"type": "error", "message": "LLM not configured. Check settings."}, send_lock)
             return
 
-        if ai_queue is None:
+        if response_queue is None:
             return
 
         kind = (message_kind or "audio").strip().lower()
         should_reply = (kind == "manual") or bool(config.get("auto_respond", False))
-        if should_reply:
-            _enqueue_ai_request(ai_queue, {"trigger": ("manual" if kind == "manual" else "audio"), "text": text, "source": source, "ts": time.time()})
+        if should_reply and ai_signal_response:
+            _enqueue_response_request(
+                response_queue,
+                {
+                    "trigger": ("manual" if kind == "manual" else "audio"),
+                    "text": text,
+                    "source": source,
+                    "timestamp": msg.timestamp,
+                    "speaker_label": (msg.speaker_label or ""),
+                    "message_id": msg.id,
+                    "ts": time.time(),
+                },
+            )
 
 
 # ============================================
@@ -3152,13 +5253,28 @@ if __name__ == "__main__":
         # Pre-load model to avoid threading/GUI crashes
         logger.info("Pre-loading Whisper Model...")
         model_size = str(config.get("whisper_model_size", "tiny") or "tiny").strip() or "tiny"
+        runtime_cfg = _resolve_transcription_runtime_config(config)
         transcription_model = TranscriptionEngine(
             model_size=model_size,
-            device=_whisper_device_from_config(config),
+            device=str(runtime_cfg.get("device") or "cpu"),
             preprocess=_speech_preprocess_from_config(config),
             whisper_vad_filter=bool(config.get("whisper_vad_filter", True)),
+            beam_size=int(runtime_cfg.get("beam_size") or 1),
+            chunk_duration_s=float(runtime_cfg.get("chunk_duration_s") or 3.2),
+            chunk_overlap_s=float(runtime_cfg.get("chunk_overlap_s") or 0.16),
+            condition_on_previous_text=bool(runtime_cfg.get("condition_on_previous_text")),
         )
         logger.info("Model loaded.")
+        log_important(
+            "transcription.backend",
+            model=model_size,
+            device=getattr(transcription_model, "device", "unknown"),
+            compute=getattr(transcription_model, "compute_type", "unknown"),
+            profile=str(runtime_cfg.get("resolved_profile") or "manual"),
+            beam=int(runtime_cfg.get("beam_size") or 1),
+            chunk_s=f"{float(runtime_cfg.get('chunk_duration_s') or 0.0):.2f}",
+            overlap_s=f"{float(runtime_cfg.get('chunk_overlap_s') or 0.0):.2f}",
+        )
 
         use_webview = os.environ.get("AI_ASSISTANT_USE_WEBVIEW") == "1"
         if use_webview:
@@ -3203,3 +5319,4 @@ if __name__ == "__main__":
         print("Press Enter to exit...")
         input()
         sys.exit(1)
+

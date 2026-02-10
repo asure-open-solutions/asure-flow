@@ -125,9 +125,11 @@ body {
     letter-spacing: -0.02em;
 }
 
-.logo i {
-    font-size: 1.1rem;
-    color: var(--accent-secondary);
+.logo-icon {
+    width: 20px;
+    height: 20px;
+    display: block;
+    flex-shrink: 0;
 }
 
 .nav-menu {
@@ -447,6 +449,55 @@ body {
     overflow: hidden;
 }
 
+.session-side-tabs {
+    display: flex;
+    gap: 6px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border-subtle);
+    background: var(--bg-panel-elevated);
+    flex-shrink: 0;
+}
+
+.session-side-tab {
+    flex: 1;
+    min-width: 0;
+    border: 1px solid var(--border-default);
+    background: transparent;
+    color: var(--text-muted);
+    border-radius: var(--radius);
+    padding: 8px 6px;
+    font-size: 0.75rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.session-side-tab:hover {
+    background: var(--bg-hover);
+    color: var(--text-secondary);
+    border-color: var(--border-strong);
+}
+
+.session-side-tab.active {
+    background: var(--bg-active);
+    color: var(--text-main);
+    border-color: var(--border-strong);
+}
+
+.session-side-panel {
+    display: none;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.session-side-panel.active {
+    display: flex;
+}
+
 /* ============================================
    LIVE SESSION CONTEXT PANEL
    ============================================ */
@@ -536,6 +587,91 @@ body {
     display: flex;
     flex-direction: column;
     overflow: hidden;
+}
+
+.analysis-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.analysis-list.full {
+    padding: 2px;
+}
+
+.analysis-card {
+    background: var(--bg-dark);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius);
+    padding: 10px 12px;
+    line-height: 1.45;
+}
+
+.analysis-card.latest-response {
+    border-color: rgba(107, 155, 107, 0.75);
+    box-shadow: 0 0 0 1px rgba(107, 155, 107, 0.35), 0 10px 18px rgba(0, 0, 0, 0.28);
+    background: linear-gradient(180deg, rgba(107, 155, 107, 0.1), rgba(17, 17, 17, 1) 45%);
+}
+
+.analysis-badge {
+    display: inline-flex;
+    align-items: center;
+    border-radius: 999px;
+    border: 1px solid rgba(107, 155, 107, 0.6);
+    background: rgba(107, 155, 107, 0.2);
+    color: #d8f0d8;
+    font-size: 0.67rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 3px 8px;
+    margin-bottom: 8px;
+}
+
+.analysis-card .analysis-title {
+    font-size: 0.76rem;
+    color: var(--text-faint);
+    margin-bottom: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.analysis-card .analysis-text {
+    color: var(--text-main);
+    font-size: 0.87rem;
+}
+
+.analysis-card .analysis-meta {
+    margin-top: 8px;
+    font-size: 0.72rem;
+    color: var(--text-faint);
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.analysis-card .analysis-list-inline {
+    margin-top: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.analysis-card .analysis-list-inline div {
+    color: var(--text-secondary);
+    font-size: 0.79rem;
+}
+
+.analysis-card.verdict-supported {
+    border-color: rgba(107, 155, 107, 0.45);
+}
+
+.analysis-card.verdict-contradicted {
+    border-color: rgba(181, 90, 90, 0.45);
+}
+
+.analysis-card.verdict-uncertain {
+    border-color: rgba(184, 155, 90, 0.45);
 }
 
 .notes-header {
@@ -781,6 +917,45 @@ body {
     font-size: 0.9rem;
     border: 1px solid var(--border-default);
     color: var(--text-secondary);
+    position: relative;
+}
+
+.transcript-actions {
+    display: none;
+    position: absolute;
+    top: 6px;
+    right: 8px;
+    gap: 4px;
+}
+
+.message:hover .transcript-actions,
+.message:focus-within .transcript-actions {
+    display: flex;
+}
+
+.transcript-action-btn {
+    width: 22px;
+    height: 22px;
+    border: 1px solid var(--border-default);
+    background: var(--bg-surface);
+    color: var(--text-muted);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-size: 0.7rem;
+    transition: all 0.15s ease;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.transcript-action-btn:hover {
+    border-color: var(--border-strong);
+    color: var(--text-main);
+}
+
+.transcript-action-btn.danger:hover {
+    border-color: var(--accent-error);
+    color: var(--accent-error);
 }
 
 .sender {

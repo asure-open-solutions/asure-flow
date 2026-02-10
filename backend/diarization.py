@@ -1,4 +1,12 @@
 import numpy as np
+from dataclasses import dataclass
+
+
+@dataclass
+class VoiceprintConfig:
+    min_audio_s: float = 0.35
+    max_audio_s: float = 4.0
+    pre_emphasis: float = 0.97
 
 
 def _hz_to_mel(hz: np.ndarray) -> np.ndarray:
@@ -71,7 +79,7 @@ def _dct_basis(n_mfcc: int, n_mels: int) -> np.ndarray:
     return basis
 
 
-def compute_voiceprint(audio: np.ndarray, sample_rate: int) -> np.ndarray | None:
+def compute_voiceprint(audio: np.ndarray, sample_rate: int, cfg: VoiceprintConfig | None = None) -> np.ndarray | None:
     """
     Best-effort session-local speaker fingerprint from raw audio.
     Uses MFCC-ish statistics + simple spectral features; no external deps.
@@ -79,6 +87,8 @@ def compute_voiceprint(audio: np.ndarray, sample_rate: int) -> np.ndarray | None
     """
     if audio is None:
         return None
+    if cfg is None:
+        cfg = VoiceprintConfig()
     x = np.asarray(audio, dtype=np.float32)
     if x.ndim != 1:
         x = x.reshape(-1).astype(np.float32, copy=False)
@@ -89,13 +99,23 @@ def compute_voiceprint(audio: np.ndarray, sample_rate: int) -> np.ndarray | None
     if sr <= 0:
         return None
 
+    min_audio_s = float(getattr(cfg, "min_audio_s", 0.35) or 0.35)
+    max_audio_s = float(getattr(cfg, "max_audio_s", 4.0) or 4.0)
+    min_samples = max(1, int(sr * max(0.01, min_audio_s)))
+    max_samples = max(min_samples, int(sr * max(0.1, max_audio_s)))
+    if x.size > max_samples:
+        # Keep the most recent window; helps stability in long streams.
+        x = x[-max_samples:]
+
     # Too little speech -> unstable fingerprints.
-    if x.size < int(sr * 0.35):
+    if x.size < min_samples:
         return None
 
     # Pre-emphasis to highlight formants a bit.
     x = x.copy()
-    x[1:] = x[1:] - 0.97 * x[:-1]
+    pre = float(getattr(cfg, "pre_emphasis", 0.97) or 0.97)
+    pre = float(np.clip(pre, 0.0, 0.99))
+    x[1:] = x[1:] - pre * x[:-1]
 
     frame_len = max(160, int(0.025 * sr))
     hop = max(80, int(0.010 * sr))
@@ -225,4 +245,3 @@ class SpeakerDiarizer:
         label = f"Speaker {new_idx}"
         self._speakers.append({"id": speaker_id, "label": label, "centroid": vp.astype(np.float32, copy=False), "count": 1})
         return speaker_id, label
-

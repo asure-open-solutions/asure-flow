@@ -21,6 +21,9 @@ document.addEventListener('DOMContentLoaded', () => {
     let sessionStartTime = null;
     let messageCount = 0;
     let allNotes = [];
+    let allResponses = [];
+    let latestResponseId = null;
+    let allFactChecks = [];
     let transcriptDisplayMode = 'raw';
     const transcriptMessagesById = new Map(); // id -> { rawText, cleanText, textSpan, timeDiv, role }
     let transcriptAiMode = 'off';
@@ -66,6 +69,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const notesExportBtn = document.getElementById('notes-export-btn');
     const notesGrid = document.getElementById('notes-grid');
     const notesFullEmpty = document.getElementById('notes-full-empty');
+    const responsesSessionList = document.getElementById('responses-session-list');
+    const responsesEmptyState = document.getElementById('responses-empty-state');
+    const responsesFullList = document.getElementById('responses-full-list');
+    const responsesFullEmpty = document.getElementById('responses-full-empty');
+    const factCheckSessionList = document.getElementById('fact-check-session-list');
+    const factCheckEmptyState = document.getElementById('fact-check-empty-state');
+    const factCheckFullList = document.getElementById('fact-check-full-list');
+    const factCheckFullEmpty = document.getElementById('fact-check-full-empty');
 
     // ============================================
     // TOAST NOTIFICATIONS
@@ -249,40 +260,59 @@ document.addEventListener('DOMContentLoaded', () => {
                 upsertTranscriptMessage(data, { isUpdate: true });
                 break;
 
-            case 'speaker_renamed':
-                updateSpeakerLabels(data.speaker_id || data.speakerId, data.speaker_label || data.speakerLabel);
-                break;
-                
-            case 'llm_chunk':
-                appendToLastAssistantMessage(data.text);
-                break;
-                
-            case 'llm_start':
-                pendingAssistantText = '';
-                if (assistantFlushRaf) {
-                    cancelAnimationFrame(assistantFlushRaf);
-                    assistantFlushRaf = null;
+            case 'transcription_deleted': {
+                const id = String(data.id || data.message_id || '').trim();
+                if (!id) break;
+                if (!removeTranscriptMessage(id)) break;
+                if (typeof data.message_count === 'number' && Number.isFinite(data.message_count)) {
+                    messageCount = Math.max(0, Math.floor(data.message_count));
+                } else {
+                    messageCount = Math.max(0, messageCount - 1);
                 }
-                const now = new Date();
-                const timeStr = now.getHours().toString().padStart(2, '0') + ":" + now.getMinutes().toString().padStart(2, '0');
-                currentAssistantTextSpan = addMessage("", 'assistant', timeStr);
-                messageCount++;
                 updateSessionInfo();
                 break;
-                
-            case 'llm_end':
-                if (assistantFlushRaf) {
-                    cancelAnimationFrame(assistantFlushRaf);
-                    assistantFlushRaf = null;
-                }
-                flushAssistantPending();
-                currentAssistantTextSpan = null;
-                pendingAssistantText = '';
+            }
+
+            case 'speaker_renamed':
+                updateSpeakerLabels(data.speaker_id || data.speakerId, data.speaker_label || data.speakerLabel);
                 break;
                 
             case 'notes_update':
                 allNotes = data.notes || [];
                 renderNotes();
+                break;
+
+            case 'response_update':
+                allResponses = Array.isArray(data.responses) ? data.responses : [];
+                {
+                    const latestIdRaw = data?.latest?.id;
+                    const fallbackId = allResponses.length ? allResponses[allResponses.length - 1]?.id : null;
+                    const resolvedLatest = (latestIdRaw !== undefined && latestIdRaw !== null && String(latestIdRaw).trim() !== '')
+                        ? String(latestIdRaw).trim()
+                        : ((fallbackId !== undefined && fallbackId !== null && String(fallbackId).trim() !== '')
+                            ? String(fallbackId).trim()
+                            : null);
+                    latestResponseId = resolvedLatest;
+                }
+                renderResponses();
+                break;
+
+            case 'responses_cleared':
+                allResponses = [];
+                latestResponseId = null;
+                renderResponses();
+                notify('info', 'Responses cleared', { durationMs: 1500 });
+                break;
+
+            case 'fact_checks_update':
+                allFactChecks = Array.isArray(data.fact_checks) ? data.fact_checks : [];
+                renderFactChecks();
+                break;
+
+            case 'fact_checks_cleared':
+                allFactChecks = [];
+                renderFactChecks();
+                notify('info', 'Fact checks cleared', { durationMs: 1500 });
                 break;
                 
             case 'note_added':
@@ -319,7 +349,14 @@ document.addEventListener('DOMContentLoaded', () => {
                     chatContainer.innerHTML = '';
                     addSystemMessage('New session started.');
                 }
-                setSessionContextText('');
+                setSessionContextText('', { force: true });
+                allNotes = [];
+                allResponses = [];
+                latestResponseId = null;
+                allFactChecks = [];
+                renderNotes();
+                renderResponses();
+                renderFactChecks();
                 break;
 
             case 'session_context':
@@ -328,7 +365,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 
             case 'assistant_policy':
                 if (data.allow === false && data.show_withheld === true) {
-                    notify('info', `Assistant withheld: ${data.reason || 'not appropriate now'}`, {
+                    notify('info', `Response withheld: ${data.reason || 'not appropriate now'}`, {
                         dedupeKey: `withheld:${data.reason || ''}`,
                         durationMs: 2600
                     });
@@ -341,8 +378,16 @@ document.addEventListener('DOMContentLoaded', () => {
                     setActivity(msg.replace(/^Audio:\s*/i, ''));
 
                     if (/capture\s+stopped\.?$/i.test(msg)) return;
+                    if (/capture\s+already\s+stopped\.?$/i.test(msg)) return;
 
-                    if (/disabled|failed|error|did not start|recording did not start|nothing to capture|ignoring/i.test(msg)) {
+                    if (/AI_ASSISTANT_ENABLE_AUDIO=1/i.test(msg)) {
+                        isMicEnabled = false;
+                        isSystemAudioEnabled = false;
+                        micToggleBtn?.classList.remove('active');
+                        systemAudioToggleBtn?.classList.remove('active');
+                    }
+
+                    if (/disabled|unavailable|failed|error|did not start|recording did not start|nothing to capture|ignoring/i.test(msg)) {
                         notify('warning', msg, {
                             dedupeKey: `audio:${msg.toLowerCase()}`,
                             dedupeWindowMs: 6000,
@@ -410,9 +455,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (notesEmptyState) notesEmptyState.classList.remove('hidden');
             } else {
                 if (notesEmptyState) notesEmptyState.classList.add('hidden');
+                const frag = document.createDocumentFragment();
                 sessionNotes.forEach(note => {
-                    notesPointsSession.appendChild(createNoteElement(note, true));
+                    frag.appendChild(createNoteElement(note, true));
                 });
+                notesPointsSession.appendChild(frag);
             }
         }
         
@@ -434,11 +481,185 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (notesFullEmpty) notesFullEmpty.classList.remove('hidden');
             } else {
                 if (notesFullEmpty) notesFullEmpty.classList.add('hidden');
+                const frag = document.createDocumentFragment();
                 filteredNotes.forEach(note => {
-                    notesGrid.appendChild(createNoteElement(note, false));
+                    frag.appendChild(createNoteElement(note, false));
                 });
+                notesGrid.appendChild(frag);
             }
         }
+    }
+
+    function createResponseCard(response, { isLatest = false } = {}) {
+        const card = document.createElement('div');
+        card.className = 'analysis-card';
+        card.dataset.responseId = response.id || '';
+        if (isLatest) card.classList.add('latest-response');
+
+        if (isLatest) {
+            const badge = document.createElement('div');
+            badge.className = 'analysis-badge';
+            badge.textContent = 'Latest Response - Current Context';
+            card.appendChild(badge);
+        }
+
+        const title = document.createElement('div');
+        title.className = 'analysis-title';
+        title.textContent = isLatest ? 'Use This Response Now' : 'Recommended Response';
+        card.appendChild(title);
+
+        const text = document.createElement('div');
+        text.className = 'analysis-text';
+        text.textContent = response.content || '';
+        card.appendChild(text);
+
+        const targetText = (response.responding_to_text || '').toString().trim();
+        const targetSource = (response.responding_to_source || '').toString().trim();
+        const targetTimestamp = (response.responding_to_timestamp || '').toString().trim();
+        if (targetText || targetSource || targetTimestamp) {
+            const targetWrap = document.createElement('div');
+            targetWrap.className = 'analysis-list-inline';
+            const targetLine = document.createElement('div');
+            const sourceLabel = targetSource || 'Unknown';
+            const timeLabel = targetTimestamp ? ` @ ${targetTimestamp}` : '';
+            const textLabel = targetText || '(no message text captured)';
+            targetLine.textContent = `Responding to ${sourceLabel}${timeLabel}: ${textLabel}`;
+            targetWrap.appendChild(targetLine);
+            card.appendChild(targetWrap);
+        }
+
+        const facts = Array.isArray(response.basis_facts) ? response.basis_facts : [];
+        if (facts.length > 0) {
+            const list = document.createElement('div');
+            list.className = 'analysis-list-inline';
+            facts.forEach(f => {
+                const item = document.createElement('div');
+                item.textContent = `Fact: ${f}`;
+                list.appendChild(item);
+            });
+            card.appendChild(list);
+        }
+
+        const cautions = Array.isArray(response.cautions) ? response.cautions : [];
+        if (cautions.length > 0) {
+            const list = document.createElement('div');
+            list.className = 'analysis-list-inline';
+            cautions.forEach(c => {
+                const item = document.createElement('div');
+                item.textContent = `Caution: ${c}`;
+                list.appendChild(item);
+            });
+            card.appendChild(list);
+        }
+
+        const meta = document.createElement('div');
+        meta.className = 'analysis-meta';
+        if (response.timestamp) {
+            const time = document.createElement('span');
+            time.textContent = response.timestamp;
+            meta.appendChild(time);
+        }
+        if (response.confidence) {
+            const confidence = document.createElement('span');
+            confidence.textContent = `Confidence: ${response.confidence}`;
+            meta.appendChild(confidence);
+        }
+        if (meta.childElementCount > 0) card.appendChild(meta);
+
+        return card;
+    }
+
+    function renderResponses() {
+        const renderTo = (container, emptyEl) => {
+            if (!container) return;
+            container.innerHTML = '';
+            if (!Array.isArray(allResponses) || allResponses.length === 0) {
+                if (emptyEl) emptyEl.classList.remove('hidden');
+                return;
+            }
+            if (emptyEl) emptyEl.classList.add('hidden');
+            const frag = document.createDocumentFragment();
+            const sorted = [...allResponses].reverse();
+            const resolvedLatestId = (latestResponseId && String(latestResponseId).trim())
+                ? String(latestResponseId).trim()
+                : String(sorted[0]?.id || '');
+            const hasLatestMatch = resolvedLatestId
+                ? sorted.some(r => String(r?.id || '').trim() === resolvedLatestId)
+                : false;
+            sorted.forEach((r, idx) => {
+                const rid = String(r?.id || '');
+                const isLatest = hasLatestMatch ? (rid === resolvedLatestId) : (idx === 0);
+                frag.appendChild(createResponseCard(r, { isLatest }));
+            });
+            container.appendChild(frag);
+        };
+
+        renderTo(responsesSessionList, responsesEmptyState);
+        renderTo(responsesFullList, responsesFullEmpty);
+    }
+
+    function createFactCheckCard(check) {
+        const verdict = (check.verdict || 'uncertain').toString().trim().toLowerCase();
+        const card = document.createElement('div');
+        card.className = `analysis-card verdict-${verdict}`;
+        card.dataset.factCheckId = check.id || '';
+
+        const title = document.createElement('div');
+        title.className = 'analysis-title';
+        title.textContent = `Claim (${verdict})`;
+        card.appendChild(title);
+
+        const claim = document.createElement('div');
+        claim.className = 'analysis-text';
+        claim.textContent = check.claim || '';
+        card.appendChild(claim);
+
+        const analysis = document.createElement('div');
+        analysis.className = 'analysis-list-inline';
+        const analysisLine = document.createElement('div');
+        analysisLine.textContent = `Reason: ${check.analysis || ''}`;
+        analysis.appendChild(analysisLine);
+
+        const evidence = Array.isArray(check.evidence) ? check.evidence : [];
+        evidence.forEach(ev => {
+            const item = document.createElement('div');
+            item.textContent = `Evidence: ${ev}`;
+            analysis.appendChild(item);
+        });
+        card.appendChild(analysis);
+
+        const meta = document.createElement('div');
+        meta.className = 'analysis-meta';
+        if (check.timestamp) {
+            const time = document.createElement('span');
+            time.textContent = check.timestamp;
+            meta.appendChild(time);
+        }
+        if (check.confidence) {
+            const confidence = document.createElement('span');
+            confidence.textContent = `Confidence: ${check.confidence}`;
+            meta.appendChild(confidence);
+        }
+        if (meta.childElementCount > 0) card.appendChild(meta);
+        return card;
+    }
+
+    function renderFactChecks() {
+        const renderTo = (container, emptyEl) => {
+            if (!container) return;
+            container.innerHTML = '';
+            if (!Array.isArray(allFactChecks) || allFactChecks.length === 0) {
+                if (emptyEl) emptyEl.classList.remove('hidden');
+                return;
+            }
+            if (emptyEl) emptyEl.classList.add('hidden');
+            const frag = document.createDocumentFragment();
+            allFactChecks.forEach(fc => frag.appendChild(createFactCheckCard(fc)));
+            container.appendChild(frag);
+        };
+
+        renderTo(factCheckSessionList, factCheckEmptyState);
+        renderTo(factCheckFullList, factCheckFullEmpty);
     }
     
     function createNoteElement(note, compact = false) {
@@ -589,7 +810,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const existing = transcriptMessagesById.get(id);
         if (existing) {
-            if (typeof rawText === 'string' && rawText) existing.rawText = rawText;
+            if (typeof rawText === 'string') existing.rawText = rawText;
             if (hasCleanKey) existing.cleanText = (typeof cleanText === 'string' ? cleanText : '') || '';
             if (existing.textSpan) existing.textSpan.textContent = getTranscriptDisplayText(existing.rawText, existing.cleanText);
             if (existing.timeDiv && timestamp) existing.timeDiv.textContent = timestamp;
@@ -612,25 +833,72 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         // If we get an update before the create, treat it as a create.
-        const span = addMessage(getTranscriptDisplayText(rawText, cleanText), role, timestamp, { id, rawText, cleanText, speakerId, speakerLabel });
+        addMessage(getTranscriptDisplayText(rawText, cleanText), role, timestamp, { id, rawText, cleanText, speakerId, speakerLabel });
         // addMessage stores into transcriptMessagesById when id provided.
         if (!isUpdate) return;
         // For safety: avoid counting this as a new message if it's an update-only event.
+    }
+
+    function removeTranscriptMessage(messageId) {
+        const id = String(messageId || '').trim();
+        if (!id) return false;
+        const existing = transcriptMessagesById.get(id);
+        if (!existing) return false;
+        if (existing.messageDiv && existing.messageDiv.parentNode) {
+            existing.messageDiv.parentNode.removeChild(existing.messageDiv);
+        }
+        transcriptMessagesById.delete(id);
+        return true;
+    }
+
+    function sendTranscriptMutation(payload) {
+        if (!socket || socket.readyState !== WebSocket.OPEN) {
+            notify('error', 'Not connected.', { durationMs: 2500 });
+            return false;
+        }
+        socket.send(JSON.stringify(payload));
+        return true;
+    }
+
+    function requestEditTranscriptMessage(messageId) {
+        const id = String(messageId || '').trim();
+        if (!id) return;
+        const existing = transcriptMessagesById.get(id);
+        const currentRaw = String(existing?.rawText || '').trim();
+        if (!currentRaw) {
+            notify('warning', 'Nothing to edit for this message.', { durationMs: 2000 });
+            return;
+        }
+
+        const nextText = prompt('Edit transcript message:', currentRaw);
+        if (nextText === null) return;
+        const text = String(nextText || '').trim();
+        if (!text) {
+            notify('warning', 'Message cannot be empty.', { durationMs: 2200 });
+            return;
+        }
+        if (text === currentRaw) return;
+        sendTranscriptMutation({ type: 'update_transcript_message', id, text });
+    }
+
+    function requestDeleteTranscriptMessage(messageId) {
+        const id = String(messageId || '').trim();
+        if (!id) return;
+        if (!confirm('Delete this transcript message?')) return;
+        sendTranscriptMutation({ type: 'delete_transcript_message', id });
     }
 
     function addMessage(text, role, timestamp, meta = null) {
         const normalizedRole = (() => {
             const r = (role || '').toString().trim().toLowerCase();
             if (r === 'loopback' || r === 'third-party' || r === 'third_party') return 'third_party';
-            if (r === 'ai') return 'assistant';
+            if (r === 'ai' || r === 'assistant') return 'system';
             if (r === 'you') return 'user';
             return r || 'user';
         })();
+        const id = meta && meta.id ? String(meta.id) : null;
 
-        const cssClass =
-            normalizedRole === 'assistant'
-                ? 'assistant'
-                : (normalizedRole === 'system' ? 'system' : (normalizedRole === 'third_party' ? 'third-party' : 'user'));
+        const cssClass = normalizedRole === 'system' ? 'system' : (normalizedRole === 'third_party' ? 'third-party' : 'user');
 
         const messageDiv = document.createElement('div');
         messageDiv.className = `message ${cssClass}`;
@@ -638,9 +906,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const avatarDiv = document.createElement('div');
         avatarDiv.className = 'avatar';
         
-        if (normalizedRole === 'assistant') {
-            avatarDiv.innerHTML = '<i class="fa-solid fa-robot"></i>';
-        } else if (normalizedRole === 'third_party') {
+        if (normalizedRole === 'third_party') {
             avatarDiv.innerHTML = '<i class="fa-solid fa-desktop"></i>';
         } else if (normalizedRole === 'system') {
             avatarDiv.innerHTML = '<i class="fa-solid fa-info"></i>';
@@ -655,10 +921,40 @@ document.addEventListener('DOMContentLoaded', () => {
             const senderDiv = document.createElement('div');
             senderDiv.className = 'sender';
             const requestedSpeaker = (meta && typeof meta.speakerLabel === 'string') ? meta.speakerLabel.trim() : '';
-            if (normalizedRole === 'assistant') senderDiv.textContent = 'AI';
-            else if (normalizedRole === 'third_party') senderDiv.textContent = requestedSpeaker || 'Third-Party';
+            if (normalizedRole === 'third_party') senderDiv.textContent = requestedSpeaker || 'Third-Party';
             else senderDiv.textContent = 'You';
             bubbleDiv.appendChild(senderDiv);
+        }
+
+        if (id && normalizedRole !== 'system') {
+            const actionsDiv = document.createElement('div');
+            actionsDiv.className = 'transcript-actions';
+
+            const editBtn = document.createElement('button');
+            editBtn.type = 'button';
+            editBtn.className = 'transcript-action-btn';
+            editBtn.title = 'Edit message';
+            editBtn.innerHTML = '<i class="fa-solid fa-pen"></i>';
+            editBtn.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                requestEditTranscriptMessage(id);
+            });
+
+            const deleteBtn = document.createElement('button');
+            deleteBtn.type = 'button';
+            deleteBtn.className = 'transcript-action-btn danger';
+            deleteBtn.title = 'Delete message';
+            deleteBtn.innerHTML = '<i class="fa-solid fa-trash-can"></i>';
+            deleteBtn.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                requestDeleteTranscriptMessage(id);
+            });
+
+            actionsDiv.appendChild(editBtn);
+            actionsDiv.appendChild(deleteBtn);
+            bubbleDiv.appendChild(actionsDiv);
         }
 
         const textSpan = document.createElement('span');
@@ -680,7 +976,6 @@ document.addEventListener('DOMContentLoaded', () => {
         chatContainer.appendChild(messageDiv);
         scrollToBottom();
 
-        const id = meta && meta.id ? String(meta.id) : null;
         if (id) {
             messageDiv.dataset.transcriptId = id;
             const senderDiv = messageDiv.querySelector('.sender');
@@ -700,6 +995,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 cleanText: (meta.cleanText ?? '') || '',
                 textSpan,
                 timeDiv,
+                messageDiv,
                 senderDiv,
                 senderLabel,
                 speakerId: speakerId || null,
@@ -709,45 +1005,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         return textSpan;
-    }
-
-    let currentAssistantTextSpan = null;
-    let pendingAssistantText = '';
-    let assistantFlushRaf = null;
-
-    function appendToLastAssistantMessage(text) {
-        pendingAssistantText += (text || '');
-        scheduleAssistantFlush();
-    }
-
-    function scheduleAssistantFlush() {
-        if (assistantFlushRaf) return;
-        assistantFlushRaf = requestAnimationFrame(() => {
-            assistantFlushRaf = null;
-            flushAssistantPending();
-        });
-    }
-
-    function flushAssistantPending() {
-        if (!pendingAssistantText) return;
-
-        if (!currentAssistantTextSpan) {
-            const msgs = chatContainer.querySelectorAll('.message.assistant .bubble .content-text');
-            if (msgs.length > 0) {
-                currentAssistantTextSpan = msgs[msgs.length - 1];
-            }
-        }
-
-        if (!currentAssistantTextSpan) {
-            currentAssistantTextSpan = addMessage("", 'assistant', "");
-        }
-
-        currentAssistantTextSpan.textContent += pendingAssistantText;
-        pendingAssistantText = '';
-
-        if (currentAssistantTextSpan) {
-            scrollToBottom();
-        }
     }
 
     function updateSpeakerLabels(speakerId, speakerLabel) {
@@ -795,6 +1052,58 @@ document.addEventListener('DOMContentLoaded', () => {
                 setTranscriptDisplayMode('raw');
             }
         }
+    }
+
+    function setControlsDisabled(controlIds, disabled) {
+        const isDisabled = !!disabled;
+        (controlIds || []).forEach((id) => {
+            const el = document.getElementById(id);
+            if (el) el.disabled = isDisabled;
+        });
+    }
+
+    function syncSettingsDependencies() {
+        const responseEnabled = !!document.getElementById('setting-response-enabled')?.checked;
+        setControlsDisabled(
+            [
+                'setting-response-prompt',
+                'setting-auto-respond',
+                'setting-response-context',
+                'setting-web-search',
+                'setting-ai-interval',
+            ],
+            !responseEnabled,
+        );
+
+        const factCheckEnabled = !!document.getElementById('setting-fact-check-enabled')?.checked;
+        setControlsDisabled(
+            [
+                'setting-fact-check-live-on-message',
+                'setting-fact-check-interaction-only',
+                'setting-fact-check-interval',
+                'setting-fact-check-context',
+                'setting-fact-check-prompt',
+            ],
+            !factCheckEnabled,
+        );
+
+        const notesEnabled = !!document.getElementById('setting-notes-enabled')?.checked;
+        setControlsDisabled(
+            [
+                'setting-notes-smart',
+                'setting-notes-max-ai',
+                'setting-notes-interval',
+                'setting-notes-interaction-only',
+                'setting-notes-format',
+                'setting-notes-prompt',
+                'setting-notes-context',
+                'setting-notes-decisions',
+                'setting-notes-actions',
+                'setting-notes-risks',
+                'setting-notes-facts',
+            ],
+            !notesEnabled,
+        );
     }
 
     function scrollToBottom() {
@@ -850,20 +1159,48 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    function getSettingsFormStateForCompare() {
+    function apiRoutesCompareToken() {
+        const routesEl = document.getElementById('setting-api-routes');
+        const raw = String(routesEl?.value || '').trim();
+        if (!raw) return [];
+        try {
+            const parsed = JSON.parse(raw);
+            if (!Array.isArray(parsed)) throw new Error('Additional API routes must be a JSON array');
+            return normalizeJsonValueForCompare(parsed);
+        } catch (e) {
+            return [{ __invalid_json__: raw }];
+        }
+    }
+
+    function collectSettingsFormPayload({ forCompare = false } = {}) {
+        const extraHeaders = forCompare ? extraHeadersCompareToken() : parseExtraHeadersOrNull();
+        if (extraHeaders === null) return null;
+        const apiRoutes = forCompare ? apiRoutesCompareToken() : parseApiRoutesOrNull();
+        if (apiRoutes === null) return null;
+
         return {
             // API
             api_provider: document.getElementById('setting-provider')?.value,
             api_key: document.getElementById('setting-api-key')?.value,
             base_url: document.getElementById('setting-base-url')?.value,
             model: document.getElementById('setting-model')?.value,
-            api_extra_headers: extraHeadersCompareToken(),
+            api_extra_headers: extraHeaders,
+            api_fallback_enabled: !!document.getElementById('setting-api-fallback')?.checked,
+            api_routes: apiRoutes,
 
             // Assistant
-            system_prompt: document.getElementById('setting-prompt')?.value,
+            response_enabled: !!document.getElementById('setting-response-enabled')?.checked,
+            response_prompt: document.getElementById('setting-response-prompt')?.value,
             auto_respond: !!document.getElementById('setting-auto-respond')?.checked,
             web_search_enabled: !!document.getElementById('setting-web-search')?.checked,
+            response_context_messages: parseInt(document.getElementById('setting-response-context')?.value) || 14,
             ai_min_interval_seconds: parseFloat(document.getElementById('setting-ai-interval')?.value) || 8,
+            fact_check_enabled: !!document.getElementById('setting-fact-check-enabled')?.checked,
+            fact_check_live_on_message: !!document.getElementById('setting-fact-check-live-on-message')?.checked,
+            fact_check_on_interaction_only: !!document.getElementById('setting-fact-check-interaction-only')?.checked,
+            fact_check_interval_seconds: parseInt(document.getElementById('setting-fact-check-interval')?.value) || 25,
+            fact_check_context_messages: parseInt(document.getElementById('setting-fact-check-context')?.value) || 18,
+            fact_check_prompt: document.getElementById('setting-fact-check-prompt')?.value,
 
             // Notes
             notes_enabled: !!document.getElementById('setting-notes-enabled')?.checked,
@@ -895,6 +1232,7 @@ document.addEventListener('DOMContentLoaded', () => {
             whisper_vad_filter: !!document.getElementById('setting-whisper-vad')?.checked,
             whisper_model_size: document.getElementById('setting-whisper-model-size')?.value,
             whisper_device: document.getElementById('setting-whisper-device')?.value,
+            transcription_profile: document.getElementById('setting-transcription-profile')?.value || 'auto',
             speaker_diarization_enabled: !!document.getElementById('setting-speaker-diarization')?.checked,
 
             // Policy
@@ -908,6 +1246,10 @@ document.addEventListener('DOMContentLoaded', () => {
             session_timeout_minutes: parseInt(document.getElementById('setting-session-timeout')?.value) || 30,
             verbose_logging: !!document.getElementById('setting-verbose')?.checked,
         };
+    }
+
+    function getSettingsFormStateForCompare() {
+        return collectSettingsFormPayload({ forCompare: true }) || {};
     }
 
     function markSettingsBaselineNow() {
@@ -960,21 +1302,44 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    function setSessionContextText(text) {
-        const value = (typeof text === 'string' ? text : '').trim();
-        sessionContextDraft = value;
-        if (sessionContextInput && sessionContextInput.value !== value) {
-            sessionContextInput.value = value;
+    function setSessionContextText(text, { force = false } = {}) {
+        const value = (typeof text === 'string' ? text : String(text || ''));
+
+        const isTypingInContext = !!(sessionContextInput && document.activeElement === sessionContextInput);
+        const shouldApplyIncoming = !!(force || !isTypingInContext || (sessionContextInput && sessionContextInput.value === value));
+        if (shouldApplyIncoming) {
+            sessionContextDraft = value;
+        } else if (sessionContextInput) {
+            // Preserve in-progress local draft; ignore stale incoming echo while typing.
+            sessionContextDraft = sessionContextInput.value || '';
         }
+
+        if (sessionContextInput) {
+            // Avoid clobbering in-progress typing from websocket echo updates.
+            if (shouldApplyIncoming) {
+                if (sessionContextInput.value !== value) {
+                    sessionContextInput.value = value;
+                }
+            }
+        }
+
+        const effective = (sessionContextInput && isTypingInContext) ? sessionContextInput.value : value;
+        const hasNonWhitespace = !!String(effective || '').trim();
         if (sessionContextSubtitle) {
-            sessionContextSubtitle.textContent = value ? 'Session context (used by AI)' : 'Optional session context (used by AI)';
+            sessionContextSubtitle.textContent = hasNonWhitespace
+                ? 'Session context (used by AI systems)'
+                : 'Optional session context (used by AI systems)';
         }
-        if (value && !isContextExpanded) setContextExpanded(true);
-        if (!value && isContextExpanded) setContextExpanded(false);
+        if (hasNonWhitespace && !isContextExpanded) setContextExpanded(true);
+        if (!hasNonWhitespace && isContextExpanded) setContextExpanded(false);
     }
 
     function sendSessionContextNow() {
         if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        if (sessionContextInput) {
+            // Always send the literal text currently visible to the user.
+            sessionContextDraft = sessionContextInput.value || '';
+        }
         socket.send(JSON.stringify({ type: 'set_session_context', context: sessionContextDraft }));
     }
 
@@ -987,7 +1352,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     sessionContextInput?.addEventListener('input', () => {
-        sessionContextDraft = (sessionContextInput.value || '').trim();
+        sessionContextDraft = (sessionContextInput.value || '');
         scheduleSessionContextSend();
     });
 
@@ -996,7 +1361,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     contextClearBtn?.addEventListener('click', () => {
-        setSessionContextText('');
+        setSessionContextText('', { force: true });
         sendSessionContextNow();
         notify('info', 'Context cleared', { durationMs: 1500, dedupeKey: 'ctx-cleared' });
     });
@@ -1007,10 +1372,28 @@ document.addEventListener('DOMContentLoaded', () => {
     // ============================================
     // TAB NAVIGATION
     // ============================================
+
+    function applySessionPanelSelection(panelName, btn) {
+        document.querySelectorAll('.session-side-tab').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.session-side-panel').forEach(p => p.classList.remove('active'));
+        btn?.classList.add('active');
+        const panel = document.getElementById(`session-panel-${panelName}`);
+        if (panel) panel.classList.add('active');
+    }
+
+    document.querySelectorAll('.session-side-tab').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const panelName = btn.dataset.sessionPanel;
+            if (!panelName) return;
+            applySessionPanelSelection(panelName, btn);
+        });
+    });
     
     const tabTitles = {
         chat: { title: 'Current Session', subtitle: 'Real-time transcription & AI analysis' },
         notes: { title: 'Notes', subtitle: 'Manage AI-generated and manual notes' },
+        responses: { title: 'Responses', subtitle: 'Generated response guidance you can use directly' },
+        'fact-check': { title: 'Fact Check', subtitle: 'Claim checks based on conversation context' },
         history: { title: 'History', subtitle: 'Browse past sessions' },
         settings: { title: 'Settings', subtitle: 'Configure your AI assistant' }
     };
@@ -1033,6 +1416,12 @@ document.addEventListener('DOMContentLoaded', () => {
         // Render notes when switching to notes tab
         if (tabName === 'notes') {
             renderNotes();
+        }
+        if (tabName === 'responses') {
+            renderResponses();
+        }
+        if (tabName === 'fact-check') {
+            renderFactChecks();
         }
         // Load history when switching to history tab
         if (tabName === 'history') {
@@ -1126,6 +1515,42 @@ document.addEventListener('DOMContentLoaded', () => {
 
     notesExportBtn?.addEventListener('click', exportNotes);
     document.getElementById('export-all-notes-btn')?.addEventListener('click', exportNotes);
+    document.getElementById('response-refresh-btn')?.addEventListener('click', refreshResponsesNow);
+    document.getElementById('response-clear-btn')?.addEventListener('click', clearResponsesNow);
+    document.getElementById('responses-refresh-full-btn')?.addEventListener('click', refreshResponsesNow);
+    document.getElementById('responses-clear-full-btn')?.addEventListener('click', clearResponsesNow);
+    document.getElementById('fact-check-refresh-btn')?.addEventListener('click', refreshFactChecksNow);
+    document.getElementById('fact-check-clear-btn')?.addEventListener('click', clearFactChecksNow);
+    document.getElementById('fact-check-refresh-full-btn')?.addEventListener('click', refreshFactChecksNow);
+    document.getElementById('fact-check-clear-full-btn')?.addEventListener('click', clearFactChecksNow);
+
+    function refreshResponsesNow() {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: 'refresh_response' }));
+            notify('info', 'Generating response guidance...', { durationMs: 2000 });
+        }
+    }
+
+    function clearResponsesNow() {
+        if (!confirm('Clear all generated responses for this session?')) return;
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: 'clear_responses' }));
+        }
+    }
+
+    function refreshFactChecksNow() {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: 'refresh_fact_checks' }));
+            notify('info', 'Running fact checks...', { durationMs: 2000 });
+        }
+    }
+
+    function clearFactChecksNow() {
+        if (!confirm('Clear all fact checks for this session?')) return;
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: 'clear_fact_checks' }));
+        }
+    }
 
     function exportNotes() {
         if (allNotes.length === 0) {
@@ -1284,7 +1709,11 @@ document.addEventListener('DOMContentLoaded', () => {
             if (socket && socket.readyState === WebSocket.OPEN) {
                 socket.send(JSON.stringify({ type: 'new_session' }));
                 allNotes = [];
+                allResponses = [];
+                allFactChecks = [];
                 renderNotes();
+                renderResponses();
+                renderFactChecks();
                 notify('success', 'New session started');
             }
         }
@@ -1305,8 +1734,11 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     
     setupRangeSlider('setting-ai-interval', 'ai-interval-value', 's');
+    setupRangeSlider('setting-response-context', 'response-context-value');
     setupRangeSlider('setting-notes-interval', 'notes-interval-value', 's');
     setupRangeSlider('setting-notes-context', 'notes-context-value');
+    setupRangeSlider('setting-fact-check-interval', 'fact-check-interval-value', 's');
+    setupRangeSlider('setting-fact-check-context', 'fact-check-context-value');
     setupRangeSlider('setting-transcript-merge-window', 'transcript-merge-window-value', 's');
     setupRangeSlider('setting-vad-threshold', 'vad-threshold-value', '', v => parseFloat(v).toFixed(2));
     setupRangeSlider('setting-denoise-strength', 'denoise-strength-value');
@@ -1414,6 +1846,18 @@ document.addEventListener('DOMContentLoaded', () => {
             base_url: 'https://router.huggingface.co/v1',
             model: 'HuggingFaceTB/SmolLM2-1.7B-Instruct:groq',
         },
+        gemini: {
+            base_url: 'https://generativelanguage.googleapis.com/v1beta/openai',
+            model: 'gemini-2.5-flash',
+        },
+        github_models: {
+            base_url: 'https://models.github.ai/inference',
+            model: 'openai/gpt-4.1',
+            api_extra_headers: {
+                Accept: 'application/vnd.github+json',
+                'X-GitHub-Api-Version': '2022-11-28',
+            },
+        },
         custom: {},
     };
 
@@ -1421,6 +1865,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const v = String(p || '').trim().toLowerCase().replace(/[-\\s]+/g, '_');
         if (v === 'canopy' || v === 'canopy_wave') return 'canopywave';
         if (v === 'hugging_face' || v === 'hf') return 'huggingface';
+        if (v === 'google' || v === 'google_ai' || v === 'google_gemini') return 'gemini';
+        if (v === 'github' || v === 'github_model' || v === 'githubmodels' || v === 'gh_models' || v === 'gh_model') return 'github_models';
         if (v === 'open_router') return 'openrouter';
         if (v in providerPresets) return v;
         return 'custom';
@@ -1433,11 +1879,22 @@ document.addEventListener('DOMContentLoaded', () => {
         if (u.includes('api.openai.com')) return 'openai';
         if (u.includes('inference.canopywave.io')) return 'canopywave';
         if (u.includes('router.huggingface.co') || u.includes('api-inference.huggingface.co')) return 'huggingface';
+        if (u.includes('generativelanguage.googleapis.com')) return 'gemini';
+        if (u.includes('models.github.ai')) return 'github_models';
         return 'custom';
     }
 
     function formatExtraHeaders(val) {
         if (!val || typeof val !== 'object') return '';
+        try {
+            return JSON.stringify(val, null, 2);
+        } catch (e) {
+            return '';
+        }
+    }
+
+    function formatApiRoutes(val) {
+        if (!Array.isArray(val) || val.length === 0) return '';
         try {
             return JSON.stringify(val, null, 2);
         } catch (e) {
@@ -1461,13 +1918,31 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    function parseApiRoutesOrNull() {
+        const routesEl = document.getElementById('setting-api-routes');
+        const raw = (routesEl?.value || '').trim();
+        if (!raw) return [];
+        try {
+            const parsed = JSON.parse(raw);
+            if (!Array.isArray(parsed)) {
+                throw new Error('Additional API routes must be a JSON array');
+            }
+            return parsed;
+        } catch (e) {
+            notify('error', `Additional API routes JSON is invalid: ${e?.message || e}`, { durationMs: 6000 });
+            return null;
+        }
+    }
+
     function applyProviderPreset(provider) {
         const p = normalizeProvider(provider);
         const preset = providerPresets[p] || {};
         const baseUrlEl = document.getElementById('setting-base-url');
         const modelEl = document.getElementById('setting-model');
+        const extraHeadersEl = document.getElementById('setting-extra-headers');
         if (baseUrlEl && preset.base_url) baseUrlEl.value = preset.base_url;
         if (modelEl && preset.model) modelEl.value = preset.model;
+        if (extraHeadersEl) extraHeadersEl.value = formatExtraHeaders(preset.api_extra_headers);
     }
     
     async function loadSettings() {
@@ -1484,24 +1959,54 @@ document.addEventListener('DOMContentLoaded', () => {
             const baseUrlEl = document.getElementById('setting-base-url');
             const modelEl = document.getElementById('setting-model');
             const extraHeadersEl = document.getElementById('setting-extra-headers');
+            const apiFallbackEl = document.getElementById('setting-api-fallback');
+            const apiRoutesEl = document.getElementById('setting-api-routes');
             if (providerEl) providerEl.value = normalizeProvider(cfg.api_provider || inferProviderFromBaseUrl(cfg.base_url));
             if (apiKeyEl) apiKeyEl.value = cfg.api_key || '';
             if (baseUrlEl) baseUrlEl.value = cfg.base_url || '';
             if (modelEl) modelEl.value = cfg.model || '';
             if (extraHeadersEl) extraHeadersEl.value = formatExtraHeaders(cfg.api_extra_headers);
+            if (apiFallbackEl) apiFallbackEl.checked = cfg.api_fallback_enabled !== false;
+            if (apiRoutesEl) apiRoutesEl.value = formatApiRoutes(cfg.api_routes);
 
             // Assistant settings
-            const promptEl = document.getElementById('setting-prompt');
+            const responseEnabledEl = document.getElementById('setting-response-enabled');
+            const responsePromptEl = document.getElementById('setting-response-prompt');
             const autoRespondEl = document.getElementById('setting-auto-respond');
             const webSearchEl = document.getElementById('setting-web-search');
+            const responseContextEl = document.getElementById('setting-response-context');
             const aiIntervalEl = document.getElementById('setting-ai-interval');
-            if (promptEl) promptEl.value = cfg.system_prompt || '';
+            const factCheckEnabledEl = document.getElementById('setting-fact-check-enabled');
+            const factCheckLiveEl = document.getElementById('setting-fact-check-live-on-message');
+            const factCheckInteractionOnlyEl = document.getElementById('setting-fact-check-interaction-only');
+            const factCheckIntervalEl = document.getElementById('setting-fact-check-interval');
+            const factCheckContextEl = document.getElementById('setting-fact-check-context');
+            const factCheckPromptEl = document.getElementById('setting-fact-check-prompt');
+
+            if (responseEnabledEl) responseEnabledEl.checked = cfg.response_enabled !== false;
+            if (responsePromptEl) responsePromptEl.value = cfg.response_prompt || cfg.system_prompt || '';
             if (autoRespondEl) autoRespondEl.checked = !!cfg.auto_respond;
             if (webSearchEl) webSearchEl.checked = !!cfg.web_search_enabled;
+            if (responseContextEl) {
+                responseContextEl.value = cfg.response_context_messages || 14;
+                document.getElementById('response-context-value')?.textContent && (document.getElementById('response-context-value').textContent = String(responseContextEl.value));
+            }
             if (aiIntervalEl) {
                 aiIntervalEl.value = cfg.ai_min_interval_seconds || 8;
                 document.getElementById('ai-interval-value')?.textContent && (document.getElementById('ai-interval-value').textContent = aiIntervalEl.value + 's');
             }
+            if (factCheckEnabledEl) factCheckEnabledEl.checked = cfg.fact_check_enabled !== false;
+            if (factCheckLiveEl) factCheckLiveEl.checked = cfg.fact_check_live_on_message !== false;
+            if (factCheckInteractionOnlyEl) factCheckInteractionOnlyEl.checked = cfg.fact_check_on_interaction_only === true;
+            if (factCheckIntervalEl) {
+                factCheckIntervalEl.value = cfg.fact_check_interval_seconds || 25;
+                document.getElementById('fact-check-interval-value')?.textContent && (document.getElementById('fact-check-interval-value').textContent = factCheckIntervalEl.value + 's');
+            }
+            if (factCheckContextEl) {
+                factCheckContextEl.value = cfg.fact_check_context_messages || 18;
+                document.getElementById('fact-check-context-value')?.textContent && (document.getElementById('fact-check-context-value').textContent = String(factCheckContextEl.value));
+            }
+            if (factCheckPromptEl) factCheckPromptEl.value = cfg.fact_check_prompt || '';
 
             // Notes settings
             const notesEnabledEl = document.getElementById('setting-notes-enabled');
@@ -1558,6 +2063,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (transcriptDisplayEl) transcriptDisplayEl.value = (cfg.transcript_display_mode === 'clean') ? 'clean' : 'raw';
             setTranscriptDisplayMode(cfg.transcript_display_mode === 'clean' ? 'clean' : 'raw');
             syncTranscriptControls();
+            syncSettingsDependencies();
 
             // Audio settings
             const vadEnabledEl = document.getElementById('setting-vad-enabled');
@@ -1566,6 +2072,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const denoiseStrengthEl = document.getElementById('setting-denoise-strength');
             const whisperModelSizeEl = document.getElementById('setting-whisper-model-size');
             const whisperDeviceEl = document.getElementById('setting-whisper-device');
+            const transcriptionProfileEl = document.getElementById('setting-transcription-profile');
             const speakerDiarizationEl = document.getElementById('setting-speaker-diarization');
             const whisperVadEl = document.getElementById('setting-whisper-vad');
             
@@ -1593,6 +2100,11 @@ document.addEventListener('DOMContentLoaded', () => {
             if (whisperDeviceEl) {
                 const d = String(cfg.whisper_device || 'cpu').trim().toLowerCase();
                 whisperDeviceEl.value = (d === 'cuda' || d === 'gpu') ? 'cuda' : 'cpu';
+            }
+            if (transcriptionProfileEl) {
+                const p = String(cfg.transcription_profile || 'auto').trim().toLowerCase();
+                const allowed = new Set(['auto', 'manual', 'cpu_realtime', 'cpu_accuracy', 'gpu_realtime', 'gpu_balanced', 'gpu_quality']);
+                transcriptionProfileEl.value = allowed.has(p) ? p : 'auto';
             }
             if (speakerDiarizationEl) speakerDiarizationEl.checked = !!cfg.speaker_diarization_enabled;
             if (whisperVadEl) whisperVadEl.checked = cfg.whisper_vad_filter !== false;
@@ -1665,6 +2177,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('setting-transcript-display')?.addEventListener('change', (e) => {
         setTranscriptDisplayMode(String(e?.target?.value || 'raw'));
+    });
+
+    [
+        'setting-response-enabled',
+        'setting-fact-check-enabled',
+        'setting-notes-enabled',
+    ].forEach((id) => {
+        document.getElementById(id)?.addEventListener('change', () => {
+            syncSettingsDependencies();
+        });
     });
 
     // Reset + presets
@@ -1807,71 +2329,11 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     async function saveSettings() {
-        const extraHeaders = parseExtraHeadersOrNull();
-        if (extraHeaders === null) return false;
-
-        const cfg = {
-            // API
-            api_provider: document.getElementById('setting-provider')?.value,
-            api_key: document.getElementById('setting-api-key')?.value,
-            base_url: document.getElementById('setting-base-url')?.value,
-            model: document.getElementById('setting-model')?.value,
-            api_extra_headers: extraHeaders,
-            
-            // Assistant
-            system_prompt: document.getElementById('setting-prompt')?.value,
-            auto_respond: document.getElementById('setting-auto-respond')?.checked,
-            web_search_enabled: document.getElementById('setting-web-search')?.checked,
-            ai_min_interval_seconds: parseFloat(document.getElementById('setting-ai-interval')?.value) || 8,
-            
-            // Notes
-            notes_enabled: document.getElementById('setting-notes-enabled')?.checked,
-            notes_interval_seconds: parseInt(document.getElementById('setting-notes-interval')?.value) || 30,
-            notes_on_interaction_only: document.getElementById('setting-notes-interaction-only')?.checked,
-            notes_format: document.getElementById('setting-notes-format')?.value,
-            notes_prompt: document.getElementById('setting-notes-prompt')?.value,
-            notes_context_messages: parseInt(document.getElementById('setting-notes-context')?.value) || 10,
-            notes_smart_enabled: document.getElementById('setting-notes-smart')?.checked,
-            notes_smart_max_ai_notes: parseInt(document.getElementById('setting-notes-max-ai')?.value) || 18,
-            notes_extract_decisions: document.getElementById('setting-notes-decisions')?.checked,
-            notes_extract_actions: document.getElementById('setting-notes-actions')?.checked,
-            notes_extract_risks: document.getElementById('setting-notes-risks')?.checked,
-            notes_extract_facts: document.getElementById('setting-notes-facts')?.checked,
-
-            // Transcript
-            transcript_merge_enabled: document.getElementById('setting-transcript-merge')?.checked,
-            transcript_merge_window_seconds: parseFloat(document.getElementById('setting-transcript-merge-window')?.value) || 4,
-            transcript_ai_mode: document.getElementById('setting-transcript-ai-mode')?.value,
-            transcript_display_mode: document.getElementById('setting-transcript-display')?.value,
-             
-            // Audio
-            mic_device: getSelectedMicDeviceForCompareAndSave(),
-            loopback_device: getSelectedLoopbackDeviceForCompareAndSave(),
-            speech_vad_enabled: document.getElementById('setting-vad-enabled')?.checked,
-            speech_vad_threshold: parseFloat(document.getElementById('setting-vad-threshold')?.value) || 0.5,
-            speech_denoise_enabled: document.getElementById('setting-denoise-enabled')?.checked,
-            speech_denoise_strength: parseFloat(document.getElementById('setting-denoise-strength')?.value) || 0.8,
-            whisper_vad_filter: document.getElementById('setting-whisper-vad')?.checked,
-            whisper_model_size: document.getElementById('setting-whisper-model-size')?.value,
-            whisper_device: document.getElementById('setting-whisper-device')?.value,
-            speaker_diarization_enabled: document.getElementById('setting-speaker-diarization')?.checked,
-            
-            // Policy
-            policy_enabled: document.getElementById('setting-policy-enabled')?.checked,
-            policy_prompt: document.getElementById('setting-policy-prompt')?.value,
-            policy_show_withheld: document.getElementById('setting-policy-show-withheld')?.checked,
-            policy_min_interval_seconds: parseFloat(document.getElementById('setting-policy-interval')?.value) || 4,
-            
-            // Advanced
-            autosave_enabled: document.getElementById('setting-autosave')?.checked,
-            session_timeout_minutes: parseInt(document.getElementById('setting-session-timeout')?.value) || 30,
-            verbose_logging: document.getElementById('setting-verbose')?.checked,
-            
-            // Current toggle states
-            ai_enabled: isAiEnabled,
-            mic_enabled: isMicEnabled,
-            loopback_enabled: isSystemAudioEnabled,
-        };
+        const cfg = collectSettingsFormPayload({ forCompare: false });
+        if (!cfg) return false;
+        cfg.ai_enabled = isAiEnabled;
+        cfg.mic_enabled = isMicEnabled;
+        cfg.loopback_enabled = isSystemAudioEnabled;
 
         try {
             const res = await fetch('/api/settings', {
@@ -1909,6 +2371,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const extraHeaders = parseExtraHeadersOrNull();
             if (extraHeaders === null) return;
+            const apiRoutes = parseApiRoutesOrNull();
+            if (apiRoutes === null) return;
 
             const payload = {
                 api_provider: document.getElementById('setting-provider')?.value,
@@ -1916,6 +2380,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 base_url: document.getElementById('setting-base-url')?.value,
                 model: document.getElementById('setting-model')?.value,
                 api_extra_headers: extraHeaders,
+                api_fallback_enabled: !!document.getElementById('setting-api-fallback')?.checked,
+                api_routes: apiRoutes,
             };
 
             const res = await fetch('/api/test_connection', {
@@ -1935,8 +2401,11 @@ document.addEventListener('DOMContentLoaded', () => {
             const modelFound = data.model_list_ok
                 ? (data.model_found === true ? 'model found' : (data.model_found === false ? 'model not in /models' : 'model unknown'))
                 : 'model list unavailable';
+            const routeInfo = (typeof data.route_index === 'number' && data.route_index > 1)
+                ? `, fallback route #${data.route_index}`
+                : '';
 
-            notify('success', `Connection OK (${latency}, ${modelFound})`, { durationMs: 3500, dedupeKey: 'test-ok' });
+            notify('success', `Connection OK (${latency}, ${modelFound}${routeInfo})`, { durationMs: 3500, dedupeKey: 'test-ok' });
         } catch (e) {
             notify('error', `Connection test error: ${e?.message || e}`, { durationMs: 6000 });
         } finally {
@@ -1983,7 +2452,8 @@ document.addEventListener('DOMContentLoaded', () => {
             historyList.innerHTML = '<div class="empty-state"><p>No sessions found</p></div>';
             return;
         }
-        
+        const frag = document.createDocumentFragment();
+
         filtered.forEach(session => {
             const item = document.createElement('div');
             item.className = 'history-item';
@@ -1996,15 +2466,16 @@ document.addEventListener('DOMContentLoaded', () => {
             const meta = document.createElement('div');
             meta.className = 'history-item-meta';
             const date = new Date(session.started_at);
-            meta.innerHTML = `<span>${date.toLocaleDateString()}</span><span>${session.message_count} messages</span><span>${session.note_count} notes</span>`;
+            meta.innerHTML = `<span>${date.toLocaleDateString()}</span><span>${session.message_count} messages</span><span>${session.note_count} notes</span><span>${session.response_count || 0} responses</span><span>${session.fact_check_count || 0} checks</span>`;
             
             item.appendChild(title);
             item.appendChild(meta);
             
             item.addEventListener('click', () => loadSessionDetail(session.id));
             
-            historyList.appendChild(item);
+            frag.appendChild(item);
         });
+        historyList.appendChild(frag);
     }
 
     async function loadSessionDetail(sessionId) {
@@ -2052,17 +2523,43 @@ document.addEventListener('DOMContentLoaded', () => {
 
                     // Replace chat with loaded transcript
                     chatContainer.innerHTML = '';
+                    transcriptMessagesById.clear();
                     addSystemMessage(`Loaded session: ${loaded.title || loaded.id}`);
                     (loaded.transcript || []).forEach(msg => {
-                        addMessage(msg.text || '', msg.source || 'user', msg.timestamp || '');
+                        addMessage(
+                            msg.text || '',
+                            msg.source || 'user',
+                            msg.timestamp || '',
+                            {
+                                id: msg.id || null,
+                                rawText: msg.text || '',
+                                cleanText: msg.clean_text || '',
+                                speakerId: msg.speaker_id || '',
+                                speakerLabel: msg.speaker_label || '',
+                            }
+                        );
                     });
 
                     // Load notes too (so Notes tab matches)
                     allNotes = loaded.notes || [];
                     renderNotes();
+                    allResponses = loaded.responses || [];
+                    {
+                        const loadedLatestRaw = loaded?.latest_response?.id ?? loaded?.latest_response_id;
+                        const fallbackId = allResponses.length ? allResponses[allResponses.length - 1]?.id : null;
+                        const resolvedLatest = (loadedLatestRaw !== undefined && loadedLatestRaw !== null && String(loadedLatestRaw).trim() !== '')
+                            ? String(loadedLatestRaw).trim()
+                            : ((fallbackId !== undefined && fallbackId !== null && String(fallbackId).trim() !== '')
+                                ? String(fallbackId).trim()
+                                : null);
+                        latestResponseId = resolvedLatest;
+                    }
+                    renderResponses();
+                    allFactChecks = loaded.fact_checks || [];
+                    renderFactChecks();
 
                     // Load session context (if present)
-                    setSessionContextText(typeof loaded.context === 'string' ? loaded.context : '');
+                    setSessionContextText(typeof loaded.context === 'string' ? loaded.context : '', { force: true });
 
                     notify('success', 'Session loaded into Live Session', { durationMs: 2000 });
                     switchToTab('chat');
@@ -2119,23 +2616,23 @@ document.addEventListener('DOMContentLoaded', () => {
                 const normalizedSource =
                     (source === 'loopback' || source === 'third-party' || source === 'third_party')
                         ? 'third_party'
-                        : (source === 'ai' ? 'assistant' : (source || 'user'));
+                        : ((source === 'ai' || source === 'assistant') ? 'system' : (source || 'user'));
 
                 const msgDiv = document.createElement('div');
                 msgDiv.className =
-                    normalizedSource === 'assistant'
-                        ? 'message assistant'
+                    normalizedSource === 'system'
+                        ? 'message system'
                         : (normalizedSource === 'third_party' ? 'message third-party' : 'message user');
 
                 const icon =
-                    normalizedSource === 'assistant'
-                        ? 'robot'
+                    normalizedSource === 'system'
+                        ? 'info'
                         : (normalizedSource === 'third_party' ? 'desktop' : 'user');
 
                 const sender =
-                    normalizedSource === 'assistant'
-                        ? 'AI'
-                        : (normalizedSource === 'third_party' ? 'Third-Party' : 'You');
+                    normalizedSource === 'system'
+                        ? 'System'
+                        : (normalizedSource === 'third_party' ? (msg.speaker_label || msg.speakerLabel || 'Third-Party') : 'You');
 
                 const bubble = document.createElement('div');
                 bubble.className = 'bubble';
@@ -2175,6 +2672,39 @@ document.addEventListener('DOMContentLoaded', () => {
             notesSection.appendChild(notesList);
             historyContent.appendChild(notesSection);
         }
+
+        if (session.responses && session.responses.length > 0) {
+            const responseSection = document.createElement('div');
+            responseSection.className = 'history-section';
+            responseSection.innerHTML = '<h4>Response Guidance</h4>';
+
+            const list = document.createElement('div');
+            list.className = 'analysis-list';
+            const sortedResponses = [...(session.responses || [])].reverse();
+            const sessionLatestId = String(sortedResponses[0]?.id || '').trim();
+            const hasSessionLatestMatch = sessionLatestId
+                ? sortedResponses.some(r => String(r?.id || '').trim() === sessionLatestId)
+                : false;
+            sortedResponses.forEach((r, idx) => {
+                const rid = String(r?.id || '').trim();
+                const isLatest = hasSessionLatestMatch ? (rid === sessionLatestId) : (idx === 0);
+                list.appendChild(createResponseCard(r, { isLatest }));
+            });
+            responseSection.appendChild(list);
+            historyContent.appendChild(responseSection);
+        }
+
+        if (session.fact_checks && session.fact_checks.length > 0) {
+            const factSection = document.createElement('div');
+            factSection.className = 'history-section';
+            factSection.innerHTML = '<h4>Fact Checks</h4>';
+
+            const list = document.createElement('div');
+            list.className = 'analysis-list';
+            (session.fact_checks || []).forEach(fc => list.appendChild(createFactCheckCard(fc)));
+            factSection.appendChild(list);
+            historyContent.appendChild(factSection);
+        }
     }
 
     historySearch?.addEventListener('input', (e) => {
@@ -2192,7 +2722,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     allSessions = [];
                     renderHistoryList();
                     if (historyContent) {
-                        historyContent.innerHTML = '<div class="history-empty"><i class="fa-solid fa-clock-rotate-left"></i><p>Select a session from the list to view its transcript and notes</p></div>';
+                        historyContent.innerHTML = '<div class="history-empty"><i class="fa-solid fa-clock-rotate-left"></i><p>Select a session from the list to view transcript, notes, responses, and fact checks</p></div>';
                     }
                 } else {
                     notify('error', data.message || 'Failed to clear history');
@@ -2232,6 +2762,10 @@ document.addEventListener('DOMContentLoaded', () => {
     // INITIALIZATION
     // ============================================
     
+    syncSettingsDependencies();
+    renderNotes();
+    renderResponses();
+    renderFactChecks();
     connectData();
     loadSettings();
     loadDevices();
