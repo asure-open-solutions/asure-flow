@@ -13,7 +13,7 @@ import { OverlayHUD } from "@/components/overlay/OverlayHUD";
 import { WindowControls } from "@/components/WindowControls";
 import { AudioCapture } from "@/services/audioCapture";
 import { AudioWebSocket, SessionWebSocket } from "@/services/websocket";
-import { setServerUrl, getServerConfig, isServerReachable, renameSession } from "@/services/api";
+import { setServerUrl, getServerConfig, isServerReachable, renameSession, createSession, listSessions } from "@/services/api";
 import { cn } from "@/lib/utils";
 import {
   Mic,
@@ -48,6 +48,8 @@ function MainApp() {
   const clearAgentLog = useSessionStore((s) => s.clearAgentLog);
   const insightsDrawerOpen = useSessionStore((s) => s.insightsDrawerOpen);
   const setInsightsDrawerOpen = useSessionStore((s) => s.setInsightsDrawerOpen);
+  const setCurrentSession = useSessionStore((s) => s.setCurrentSession);
+  const setSessions = useSessionStore((s) => s.setSessions);
 
   const serverUrl = useSettingsStore((s) => s.serverUrl);
   const effectiveToggles = useSettingsStore((s) => s.getEffectiveToggles());
@@ -179,12 +181,12 @@ function MainApp() {
       }
       if ((e.ctrlKey || e.metaKey) && e.key === "i") {
         e.preventDefault();
-        setInsightsDrawerOpen(!insightsDrawerOpen);
+        setInsightsDrawerOpen((v) => !v);
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [insightsDrawerOpen, setInsightsDrawerOpen]);
+  }, []);
 
   const handleSessionContextChange = useCallback(
     (context: string) => {
@@ -400,8 +402,16 @@ function MainApp() {
                 Create a new session to begin capturing and analyzing conversations in real time.
               </p>
               <button
-                onClick={() => {
-                  if (!showSidebar) setShowSidebar(true);
+                onClick={async () => {
+                  try {
+                    const session = await createSession();
+                    setCurrentSession(session);
+                    const list = await listSessions();
+                    setSessions(list);
+                    if (!showSidebar) setShowSidebar(true);
+                  } catch (err) {
+                    console.error("Failed to create session:", err);
+                  }
                 }}
                 className="inline-flex items-center gap-2 rounded-lg bg-blue-500/15 border border-blue-500/20 px-4 py-2 text-sm text-blue-400 hover:bg-blue-500/25 transition-colors"
               >

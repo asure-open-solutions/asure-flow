@@ -138,14 +138,20 @@ async def ws_session(websocket: WebSocket, session_id: str):
                     session.context = msg["session_context"]
                 # Privacy mode update
                 if "privacy_mode" in msg:
-                    from asure_flow.config import update_settings
-                    update_settings(privacy_mode=msg["privacy_mode"])
-                    if msg["privacy_mode"]:
-                        update_settings(pii_redaction=True)
-                        toggles.web_search = False
+                    try:
+                        from asure_flow.config import update_settings
+                        update_settings(privacy_mode=msg["privacy_mode"])
+                        if msg["privacy_mode"]:
+                            update_settings(pii_redaction=True)
+                            toggles.web_search = False
+                    except Exception:
+                        logger.warning("Failed to persist privacy_mode setting", exc_info=True)
                 if "pii_redaction" in msg:
-                    from asure_flow.config import update_settings
-                    update_settings(pii_redaction=msg["pii_redaction"])
+                    try:
+                        from asure_flow.config import update_settings
+                        update_settings(pii_redaction=msg["pii_redaction"])
+                    except Exception:
+                        logger.warning("Failed to persist pii_redaction setting", exc_info=True)
                 logger.info("Feature toggles updated: %s", toggles)
 
             elif msg_type == "transcription":
@@ -236,9 +242,13 @@ async def ws_session(websocket: WebSocket, session_id: str):
                             except Exception:
                                 pass
 
-                    # Cancel previous agent task if still running
+                    # Cancel previous agent task if still running and wait for it
                     if agent_task and not agent_task.done():
                         agent_task.cancel()
+                        try:
+                            await agent_task
+                        except asyncio.CancelledError:
+                            pass
                     agent_task = asyncio.create_task(process_agent())
 
             elif msg_type == "relabel":

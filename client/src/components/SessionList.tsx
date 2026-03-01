@@ -90,10 +90,11 @@ export function SessionList() {
       }
       // Update in session list
       setSessions(sessions.map((s) => (s.id === id ? { ...s, name: trimmed } : s)));
+      setRenamingId(null);
     } catch (err) {
       console.error("Failed to rename session:", err);
+      // Leave rename mode active so the user can retry
     }
-    setRenamingId(null);
   };
 
   const [exportingId, setExportingId] = useState<string | null>(null);

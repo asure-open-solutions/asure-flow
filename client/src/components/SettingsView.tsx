@@ -391,8 +391,7 @@ function LLMTab() {
   const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null);
   const [expandedProvider, setExpandedProvider] = useState<string | null>(null);
   const [formState, setFormState] = useState<Record<string, string>>({});
-  const [saving, setSaving] = useState(false);
-  const [saveSuccess, setSaveSuccess] = useState(false);
+  const [savedFields, setSavedFields] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     getServerConfig()
@@ -404,20 +403,17 @@ function LLMTab() {
     setFormState((prev) => ({ ...prev, [field]: value }));
   };
 
-  const handleSave = async () => {
-    if (Object.keys(formState).length === 0) return;
-    setSaving(true);
-    setSaveSuccess(false);
+  const handleFieldBlur = async (field: string) => {
+    const value = formState[field];
+    if (value === undefined) return;
     try {
-      const config = await updateServerConfig(formState);
+      const config = await updateServerConfig({ [field]: value });
       setServerConfig(config);
-      setFormState({});
-      setSaveSuccess(true);
-      setTimeout(() => setSaveSuccess(false), 2000);
+      setFormState((prev) => { const next = { ...prev }; delete next[field]; return next; });
+      setSavedFields((prev) => ({ ...prev, [field]: true }));
+      setTimeout(() => setSavedFields((prev) => { const next = { ...prev }; delete next[field]; return next; }), 2000);
     } catch (err) {
       console.error("Failed to save config:", err);
-    } finally {
-      setSaving(false);
     }
   };
 
@@ -558,8 +554,9 @@ function LLMTab() {
                 {isExpanded && (
                   <div className="px-4 pb-4 space-y-3 border-t border-white/5">
                     <div className="pt-3">
-                      <label className="text-xs text-white/50 mb-1 block">
+                      <label className="text-xs text-white/50 mb-1 flex items-center gap-1.5">
                         API Key
+                        {savedFields[provider.apiKeyField] && <Check className="h-3 w-3 text-emerald-400" />}
                       </label>
                       <input
                         type="password"
@@ -567,13 +564,15 @@ function LLMTab() {
                         onChange={(e) =>
                           handleFieldChange(provider.apiKeyField, e.target.value)
                         }
+                        onBlur={() => handleFieldBlur(provider.apiKeyField)}
                         placeholder={providerConfig?.api_key_hint || "Enter API key"}
                         className="w-full rounded-md bg-white/5 border border-white/10 px-3 py-1.5 text-sm text-white placeholder-white/20 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
                       />
                     </div>
                     <div>
-                      <label className="text-xs text-white/50 mb-1 block">
+                      <label className="text-xs text-white/50 mb-1 flex items-center gap-1.5">
                         Model
+                        {savedFields[provider.modelField] && <Check className="h-3 w-3 text-emerald-400" />}
                       </label>
                       <input
                         type="text"
@@ -585,14 +584,16 @@ function LLMTab() {
                         onChange={(e) =>
                           handleFieldChange(provider.modelField, e.target.value)
                         }
+                        onBlur={() => handleFieldBlur(provider.modelField)}
                         placeholder="Model name"
                         className="w-full rounded-md bg-white/5 border border-white/10 px-3 py-1.5 text-sm text-white placeholder-white/20 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
                       />
                     </div>
                     {"hasBase" in provider && provider.hasBase && (
                       <div>
-                        <label className="text-xs text-white/50 mb-1 block">
+                        <label className="text-xs text-white/50 mb-1 flex items-center gap-1.5">
                           API Base URL
+                          {savedFields["custom_api_base"] && <Check className="h-3 w-3 text-emerald-400" />}
                         </label>
                         <input
                           type="url"
@@ -604,6 +605,7 @@ function LLMTab() {
                           onChange={(e) =>
                             handleFieldChange("custom_api_base", e.target.value)
                           }
+                          onBlur={() => handleFieldBlur("custom_api_base")}
                           placeholder="http://localhost:11434/v1"
                           className="w-full rounded-md bg-white/5 border border-white/10 px-3 py-1.5 text-sm text-white placeholder-white/20 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
                         />
@@ -617,27 +619,6 @@ function LLMTab() {
         </div>
       </div>
 
-      {/* Save button */}
-      {Object.keys(formState).length > 0 && (
-        <button
-          onClick={handleSave}
-          disabled={saving}
-          className={cn(
-            "flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors",
-            saveSuccess
-              ? "bg-emerald-600 text-white"
-              : "bg-blue-600 text-white hover:bg-blue-500",
-            saving && "opacity-60 cursor-not-allowed",
-          )}
-        >
-          {saving ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : saveSuccess ? (
-            <Check className="h-4 w-4" />
-          ) : null}
-          {saveSuccess ? "Saved" : saving ? "Saving\u2026" : "Save Changes"}
-        </button>
-      )}
     </div>
   );
 }
