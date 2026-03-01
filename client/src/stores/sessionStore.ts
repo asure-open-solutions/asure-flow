@@ -35,6 +35,12 @@ export interface CodeAnalysis {
   analysis: string;
 }
 
+export interface SuggestionEntry {
+  id: string;
+  text: string;
+  timestamp: string;
+}
+
 interface SessionState {
   // Current session
   currentSession: Session | null;
@@ -44,7 +50,7 @@ interface SessionState {
   sessionContext: string;
 
   // AI state
-  latestSuggestion: string | null;
+  suggestions: SuggestionEntry[];
   aiStreaming: boolean;
   currentToolName: string | null;
   searchResults: SearchResult[];
@@ -86,7 +92,7 @@ interface SessionState {
   renameCurrentSession: (name: string) => void;
   deleteTranscriptEntry: (entryId: string) => void;
   editTranscriptEntry: (entryId: string, newText: string) => void;
-  setSuggestion: (text: string | null) => void;
+  addSuggestion: (text: string) => void;
   setAIStreaming: (streaming: boolean) => void;
   setServerOnline: (online: boolean) => void;
   setAudioConnected: (connected: boolean) => void;
@@ -102,6 +108,7 @@ interface SessionState {
   incrementUnseenInsights: () => void;
   clearUnseenInsights: () => void;
   syncFromMain: (data: { transcript: TranscriptEntry[]; latestSuggestion: string | null; notes: NoteEntry[] }) => void;
+  clearSuggestions: () => void;
   reset: () => void;
 }
 
@@ -143,7 +150,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   notes: [],
   participants: [],
   sessionContext: "",
-  latestSuggestion: null,
+  suggestions: [],
   aiStreaming: false,
   currentToolName: null,
   searchResults: [],
@@ -173,7 +180,11 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
       notes: session?.notes ?? [],
       participants: session?.participants ?? [],
       sessionContext: session?.context ?? "",
-      latestSuggestion: null,
+      suggestions: (session?.suggestions ?? []).map((s) => ({
+        id: s.id,
+        text: s.text,
+        timestamp: s.timestamp,
+      })),
       agentLog: [],
     });
   },
@@ -271,7 +282,14 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
       ),
     })),
 
-  setSuggestion: (text) => set({ latestSuggestion: text }),
+  addSuggestion: (text) =>
+    set((state) => ({
+      suggestions: [
+        ...state.suggestions,
+        { id: genId(), text, timestamp: new Date().toISOString() },
+      ],
+    })),
+  clearSuggestions: () => set({ suggestions: [] }),
   setAIStreaming: (streaming) => set({ aiStreaming: streaming }),
   setServerOnline: (online) => set({ serverOnline: online }),
   setAudioConnected: (connected) => set({ audioConnected: connected }),
@@ -299,10 +317,10 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
     switch (event.type) {
       case "content_delta": {
         const isFirst = !state.aiStreaming;
-        const updates: Partial<SessionState> = {
-          aiStreaming: true,
-          latestSuggestion: (state.latestSuggestion || "") + event.text,
-        };
+        // Do NOT write content_delta text to latestSuggestion — these deltas contain
+        // raw LLM output which may include function-call XML from providers that stream
+        // tool calls as text. The real suggestion arrives via tool_result.
+        const updates: Partial<SessionState> = { aiStreaming: true };
         // Add "Thinking..." log entry only on first delta
         if (isFirst) {
           updates.agentLog = [
@@ -310,7 +328,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
             { id: genId(), timestamp: now, type: "thinking", summary: "Thinking..." },
           ];
         }
-        set(updates as SessionState);
+        set(updates);
         break;
       }
 
@@ -362,7 +380,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
         } else if (event.name === "suggest_response") {
           const result = event.result as { suggestion?: string };
           if (result.suggestion) {
-            set({ latestSuggestion: result.suggestion });
+            get().addSuggestion(result.suggestion);
             get().incrementUnseenInsights();
           }
         } else if (event.name === "extract_notes") {
@@ -465,7 +483,9 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   syncFromMain: (data) =>
     set({
       transcript: data.transcript,
-      latestSuggestion: data.latestSuggestion,
+      suggestions: data.latestSuggestion
+        ? [{ id: "overlay", text: data.latestSuggestion, timestamp: new Date().toISOString() }]
+        : [],
       notes: data.notes,
     }),
 
@@ -476,7 +496,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
       notes: [],
       participants: [],
       sessionContext: "",
-      latestSuggestion: null,
+      suggestions: [],
       aiStreaming: false,
       currentToolName: null,
       searchResults: [],

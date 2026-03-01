@@ -9,7 +9,7 @@ import { Logo } from "../Logo";
 
 export function OverlayCards() {
   const transcript = useSessionStore((s) => s.transcript);
-  const suggestion = useSessionStore((s) => s.latestSuggestion);
+  const suggestion = useSessionStore((s) => s.suggestions[s.suggestions.length - 1]?.text ?? null);
   const notes = useSessionStore((s) => s.notes);
   const overlaySettings = useSettingsStore((s) => s.overlaySettings);
   const setOverlaySettings = useSettingsStore((s) => s.setOverlaySettings);

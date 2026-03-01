@@ -101,6 +101,12 @@ export interface SessionSettings {
 
 export type SessionStatus = "active" | "paused" | "ended";
 
+export interface SessionSuggestion {
+  id: string;
+  text: string;
+  timestamp: string;
+}
+
 export interface Session {
   id: string;
   name: string;
@@ -110,6 +116,7 @@ export interface Session {
   context?: string;
   transcript: TranscriptEntry[];
   notes: NoteEntry[];
+  suggestions?: SessionSuggestion[];
   participants: Participant[];
   topics: string[];
   entities: SessionEntities;

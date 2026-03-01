@@ -17,7 +17,7 @@ from asure_flow.config import settings
 from asure_flow.search.embeddings import embedding_engine
 from asure_flow.search.index import get_index
 from asure_flow.sessions.manager import session_manager
-from asure_flow.sessions.models import FactCheck, NoteEntry, NoteType
+from asure_flow.sessions.models import FactCheck, NoteEntry, NoteType, SuggestionEntry
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -103,8 +103,11 @@ async def ws_session(websocket: WebSocket, session_id: str):
             if hasattr(toggles, k):
                 setattr(toggles, k, v)
     agent_task: asyncio.Task | None = None
+    debounce_task: asyncio.Task | None = None
+    pending_entries: list[tuple[str, str, str]] = []  # (speaker, text, entry_id)
     rolling_summary: str | None = None
     last_summarized_index = 0
+    DEBOUNCE_SECONDS = 3.0
 
     # Auto-save task
     async def autosave_loop():
@@ -167,11 +170,6 @@ async def ws_session(websocket: WebSocket, session_id: str):
                     if pii_matches:
                         logger.debug("Redacted %d PII items", len(pii_matches))
 
-                # Privacy mode: force-disable web search
-                effective_web_search = toggles.web_search
-                if settings.privacy_mode:
-                    effective_web_search = False
-
                 # Resolve display name for speaker
                 speaker = session.get_display_name(speaker)
 
@@ -188,12 +186,39 @@ async def ws_session(websocket: WebSocket, session_id: str):
                 if embedding_engine.available:
                     asyncio.create_task(_embed_entry(session.id, entry.id, text))
 
-                # Run AI agent if any features are enabled and a router is available
-                llm_router = get_router()
-                if llm_router and _any_enabled(toggles):
-                    # Refresh rolling summary if enough new entries have accumulated
+                # Buffer entry for debounced agent run
+                pending_entries.append((speaker, text, entry.id))
+
+                # Cancel previous debounce timer and start a new one
+                if debounce_task and not debounce_task.done():
+                    debounce_task.cancel()
+
+                async def _fire_agent() -> None:
+                    nonlocal agent_task, rolling_summary, last_summarized_index
+
+                    await asyncio.sleep(DEBOUNCE_SECONDS)
+
+                    # Snapshot and clear the buffer
+                    entries = pending_entries[:]
+                    pending_entries.clear()
+                    if not entries:
+                        return
+
+                    llm_router = get_router()
+                    if not llm_router or not _any_enabled(toggles):
+                        return
+
+                    # Cancel previous agent task if still running
+                    if agent_task and not agent_task.done():
+                        agent_task.cancel()
+                        try:
+                            await agent_task
+                        except asyncio.CancelledError:
+                            pass
+
+                    # Refresh rolling summary if needed
                     if needs_summary_refresh(session, last_summarized_index):
-                        new_end = len(session.transcript) - 5  # leave recent ones unsummarized
+                        new_end = len(session.transcript) - 5
                         if new_end > last_summarized_index:
                             rolling_summary = await generate_summary(
                                 router=llm_router,
@@ -208,12 +233,19 @@ async def ws_session(websocket: WebSocket, session_id: str):
                     system_prompt = _resolve_system_prompt(toggles)
                     deep_think_enabled = toggles.deep_think != "off"
                     session_context = session.context
+                    effective_ws = toggles.web_search and not settings.privacy_mode
+
+                    # Combine all buffered entries
+                    transcript_text = "\n".join(
+                        f"[{s}]: {t}" for s, t, _ in entries
+                    )
+                    last_entry_id = entries[-1][2]
 
                     async def process_agent():
                         try:
                             async for event in run_agent(
                                 router=llm_router,
-                                transcript_text=f"[{speaker}]: {text}",
+                                transcript_text=transcript_text,
                                 conversation_context=context,
                                 session_context=session_context,
                                 fact_checking=toggles.fact_checking,
@@ -221,16 +253,14 @@ async def ws_session(websocket: WebSocket, session_id: str):
                                 notes=toggles.notes,
                                 search_transcript=toggles.search_transcript,
                                 search_sessions=toggles.search_sessions,
-                                web_search=effective_web_search,
+                                web_search=effective_ws,
                                 format_code=toggles.format_code,
                                 deep_think=deep_think_enabled,
                                 system_prompt=system_prompt,
                                 session=session,
                             ):
-                                # Persist tool results into the session
                                 if event["type"] == "tool_result":
-                                    _persist_tool_result(session, entry.id, event)
-
+                                    _persist_tool_result(session, last_entry_id, event)
                                 await websocket.send_json({"type": "ai_event", "event": event})
                         except Exception:
                             logger.exception("Agent processing error")
@@ -242,14 +272,9 @@ async def ws_session(websocket: WebSocket, session_id: str):
                             except Exception:
                                 pass
 
-                    # Cancel previous agent task if still running and wait for it
-                    if agent_task and not agent_task.done():
-                        agent_task.cancel()
-                        try:
-                            await agent_task
-                        except asyncio.CancelledError:
-                            pass
                     agent_task = asyncio.create_task(process_agent())
+
+                debounce_task = asyncio.create_task(_fire_agent())
 
             elif msg_type == "relabel":
                 # Speaker diarization relabel: update transcript entry speaker
@@ -301,6 +326,8 @@ async def ws_session(websocket: WebSocket, session_id: str):
         logger.exception("Session WebSocket error")
     finally:
         save_task.cancel()
+        if debounce_task and not debounce_task.done():
+            debounce_task.cancel()
         if agent_task and not agent_task.done():
             agent_task.cancel()
         # Final save
@@ -312,7 +339,12 @@ def _persist_tool_result(session, transcript_id: str, event: dict) -> None:
     name = event.get("name", "")
     result = event.get("result", {})
 
-    if name == "fact_check":
+    if name == "suggest_response":
+        suggestion_text = result.get("suggestion", "")
+        if suggestion_text:
+            session.add_suggestion(suggestion_text)
+
+    elif name == "fact_check":
         claims = result.get("claims", [])
         checks = [
             FactCheck(

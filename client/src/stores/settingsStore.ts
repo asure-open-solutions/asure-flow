@@ -161,6 +161,24 @@ export const useSettingsStore = create<SettingsState>()(
         const { sessionOverrides, ...rest } = state;
         return rest;
       },
+      // Deep-merge stored state so new nested keys (e.g. overlaySettings.overlayMode)
+      // are preserved from the default when an old persisted schema lacks them.
+      merge: (persisted, current) => ({
+        ...current,
+        ...(persisted as object),
+        overlaySettings: {
+          ...(current as SettingsState).overlaySettings,
+          ...((persisted as SettingsState).overlaySettings ?? {}),
+        },
+        featureToggles: {
+          ...(current as SettingsState).featureToggles,
+          ...((persisted as SettingsState).featureToggles ?? {}),
+        },
+        audioToggles: {
+          ...(current as SettingsState).audioToggles,
+          ...((persisted as SettingsState).audioToggles ?? {}),
+        },
+      }),
     },
   ),
 );

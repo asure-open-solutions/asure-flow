@@ -152,7 +152,8 @@ function MainApp() {
   // Sync session state to overlay window via IPC
   useEffect(() => {
     const sendSync = () => {
-      const { transcript, latestSuggestion, notes } = useSessionStore.getState();
+      const { transcript, suggestions, notes } = useSessionStore.getState();
+      const latestSuggestion = suggestions[suggestions.length - 1]?.text ?? null;
       window.electronAPI?.sendOverlaySync({
         transcript: transcript.slice(-20),
         latestSuggestion,

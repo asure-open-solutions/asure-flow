@@ -100,9 +100,8 @@ def build_router() -> Router | None:
         num_retries=2,
         retry_after=1,
         allowed_fails=1,
-        cooldown_time=60,
+        cooldown_time=15,
         timeout=30,
-        fallbacks=[{"assistant": ["assistant"]}],
     )
 
 
