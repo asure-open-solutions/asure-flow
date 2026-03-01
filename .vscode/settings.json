@@ -1,0 +1,26 @@
+{
+  // Python
+  "python.defaultInterpreterPath": "${workspaceFolder}/server/.venv/Scripts/python.exe",
+  "python.envFile": "${workspaceFolder}/.env",
+  "python.analysis.extraPaths": ["${workspaceFolder}/server/src"],
+
+  // Editor
+  "editor.formatOnSave": true,
+  "editor.defaultFormatter": "esbenp.prettier-vscode",
+  "[python]": {
+    "editor.defaultFormatter": "ms-python.black-formatter"
+  },
+
+  // Files
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/*.pyc": true,
+    "**/node_modules": true,
+    "server/.venv": true,
+    "client/dist": true,
+    "client/dist-electron": true
+  },
+
+  // TypeScript
+  "typescript.tsdk": "client/node_modules/typescript/lib"
+}
