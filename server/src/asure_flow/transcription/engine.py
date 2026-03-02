@@ -19,6 +19,12 @@ _VAD_CHECK_INTERVAL = int(0.5 * SAMPLE_RATE)  # ~500 ms
 # Speech probability below this value is treated as silence by the flush gate.
 _VAD_SILENCE_THRESHOLD = 0.35
 
+# ── Whisper hallucination filters ──
+# Segments with no_speech_prob above this are likely hallucinations on noise.
+_NO_SPEECH_PROB_THRESHOLD = 0.6
+# Segments with avg_logprob below this are low-confidence garbage.
+_AVG_LOGPROB_THRESHOLD = -1.0
+
 
 @dataclass
 class TranscriptSegment:
@@ -92,8 +98,23 @@ class WhisperEngine:
         results: list[TranscriptSegment] = []
         for seg in raw_segments:
             text = seg.text.strip()
-            if text:
-                results.append(TranscriptSegment(start=seg.start, end=seg.end, text=text))
+            if not text:
+                continue
+            # Filter hallucinations: high no-speech probability
+            if seg.no_speech_prob > _NO_SPEECH_PROB_THRESHOLD:
+                logger.debug(
+                    "Dropping segment (no_speech_prob=%.2f): %s",
+                    seg.no_speech_prob, text,
+                )
+                continue
+            # Filter hallucinations: very low confidence
+            if seg.avg_logprob < _AVG_LOGPROB_THRESHOLD:
+                logger.debug(
+                    "Dropping segment (avg_logprob=%.2f): %s",
+                    seg.avg_logprob, text,
+                )
+                continue
+            results.append(TranscriptSegment(start=seg.start, end=seg.end, text=text))
         return results
 
 
@@ -184,9 +205,10 @@ class AudioBuffer:
         duration = len(audio) / SAMPLE_RATE
         rms = float(np.sqrt(np.mean(audio ** 2)))
         peak = float(np.max(np.abs(audio)))
+        had_speech = self._has_speech
         logger.info(
             "AudioBuffer flush [%s]: %.2fs, RMS=%.4f, peak=%.4f, had_speech=%s",
-            self.speaker_label, duration, rms, peak, self._has_speech,
+            self.speaker_label, duration, rms, peak, had_speech,
         )
 
         # Clean cut — no overlap needed when flushing at silence boundaries
@@ -194,6 +216,11 @@ class AudioBuffer:
         self._last_vad_len = 0
         self._cached_ready = False
         self._has_speech = False
+
+        # Skip transcription when VAD never detected speech (e.g. max-buffer
+        # timeout on ambient noise) — avoids Whisper hallucinations.
+        if not had_speech:
+            return []
 
         # Pass previous text as prompt so Whisper keeps sentence context
         prompt = self._prev_text[-200:] if self._prev_text else None
