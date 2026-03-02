@@ -76,26 +76,43 @@ class WhisperEngine:
     def _load_model(self):
         from faster_whisper import WhisperModel
 
+        _OOM_PHRASES = ("out of memory", "failed to allocate", "mkl_malloc")
+
+        def _is_oom(exc: RuntimeError) -> bool:
+            msg = str(exc).lower()
+            return any(p in msg for p in _OOM_PHRASES)
+
         device = settings.detect_device()
         compute_type = settings.detect_compute_type()
-        try:
-            return WhisperModel(
-                settings.whisper_model,
-                device=device,
-                compute_type=compute_type,
-            )
-        except RuntimeError as exc:
-            if device == "cuda" and "out of memory" in str(exc).lower():
-                logger.warning(
-                    "CUDA out of memory loading %s — falling back to CPU (int8)",
-                    settings.whisper_model,
-                )
-                return WhisperModel(
-                    settings.whisper_model,
-                    device="cpu",
-                    compute_type="int8",
-                )
-            raise
+
+        # Cascade: (model, device, compute_type)
+        candidates = [(settings.whisper_model, device, compute_type)]
+        if device == "cuda":
+            candidates += [
+                (settings.whisper_model, "cpu", "int8"),
+                ("small", "cpu", "int8"),
+            ]
+        else:
+            candidates.append(("small", "cpu", "int8"))
+
+        last_exc: RuntimeError | None = None
+        for model_name, dev, ct in candidates:
+            try:
+                if (model_name, dev, ct) != (settings.whisper_model, device, compute_type):
+                    logger.warning(
+                        "Retrying with model=%s device=%s compute_type=%s",
+                        model_name, dev, ct,
+                    )
+                return WhisperModel(model_name, device=dev, compute_type=ct)
+            except RuntimeError as exc:
+                if _is_oom(exc):
+                    last_exc = exc
+                    continue
+                raise
+        raise RuntimeError(
+            f"Could not load any Whisper model — all candidates OOM'd. "
+            f"Last error: {last_exc}"
+        ) from last_exc
 
     async def transcribe(
         self, audio: np.ndarray, initial_prompt: str | None = None,
