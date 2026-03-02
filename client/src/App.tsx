@@ -63,6 +63,7 @@ function MainApp() {
   const sessionWsRef = useRef<SessionWebSocket | null>(null);
   const audioCaptureRef = useRef<AudioCapture | null>(null);
   const serverHandlesSystemRef = useRef(false);
+  const serverConfigLoaded = useRef(false);
 
   // Keep server URL in sync
   useEffect(() => {
@@ -84,6 +85,16 @@ function MainApp() {
       clearInterval(id);
     };
   }, [serverOnline, serverUrl]);
+
+  // Load server config once on first successful connection to sync server-authoritative settings
+  useEffect(() => {
+    if (serverOnline && !serverConfigLoaded.current) {
+      serverConfigLoaded.current = true;
+      getServerConfig()
+        .then((cfg) => useSettingsStore.getState().initFromServerConfig(cfg))
+        .catch(() => {});
+    }
+  }, [serverOnline]);
 
   // Connect WebSockets when session changes
   useEffect(() => {
@@ -252,8 +263,10 @@ function MainApp() {
     let serverHandlesSystem = false;
     try {
       const cfg = await getServerConfig();
-      if (cfg.audio_capture_source === "client" && cfg.mic_device_id) {
-        micDeviceId = cfg.mic_device_id;
+      if (cfg.audio_capture_source === "client") {
+        // Use the client-local device preference (not the server-stored one,
+        // which may refer to hardware on a different machine)
+        micDeviceId = useSettingsStore.getState().micDeviceId ?? undefined;
       }
       // If system_device_id is set, server handles system audio via loopback
       serverHandlesSystem = !!cfg.system_device_id;

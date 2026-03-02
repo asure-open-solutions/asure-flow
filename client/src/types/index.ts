@@ -203,6 +203,9 @@ export interface AppSettings {
   overlaySettings: OverlaySettings;
   piiRedaction: boolean;
   privacyMode: boolean;
+  // Client-local audio device selection (used when audio_capture_source === "client")
+  micDeviceId: string | null;
+  systemDeviceId: string | null;
 }
 
 // ── Presets ──
@@ -242,6 +245,7 @@ export interface ServerConfig {
   hf_diarization_token_hint: string;
   pii_redaction: boolean;
   privacy_mode: boolean;
+  locked_settings: string[];
   llm_providers: Record<string, LLMProviderConfig>;
 }
 

@@ -40,6 +40,8 @@ _PERSISTABLE_FIELDS = frozenset({
     "diarization_buffer_sec",
     # Safety
     "pii_redaction", "privacy_mode",
+    # Admin locks
+    "locked_settings",
 })
 
 
@@ -134,6 +136,11 @@ class Settings(BaseSettings):
     pii_redaction: bool = False
     privacy_mode: bool = False  # Master toggle: disables web_search + enables PII redaction
 
+    # ── Admin ──
+    locked_settings: list[str] = Field(default_factory=list)
+    # Fields in this list cannot be updated via PUT /api/config from a client.
+    # Example: ["whisper_model", "provider_order", "openrouter_enabled"]
+
     # ── Sessions ──
     session_dir: str = Field(default_factory=_default_session_dir)
 
@@ -181,6 +188,7 @@ class Settings(BaseSettings):
             "hf_diarization_token_hint": _mask(self.hf_diarization_token),
             "pii_redaction": self.pii_redaction,
             "privacy_mode": self.privacy_mode,
+            "locked_settings": self.locked_settings,
             "llm_providers": {
                 "openrouter": {
                     "configured": bool(self.openrouter_api_key),

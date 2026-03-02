@@ -5,6 +5,7 @@ import type {
   AudioToggles,
   FeatureToggles,
   OverlaySettings,
+  ServerConfig,
   SessionSettings,
 } from "@/types";
 
@@ -54,6 +55,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   },
   piiRedaction: false,
   privacyMode: false,
+  micDeviceId: null,
+  systemDeviceId: null,
 };
 
 interface SettingsState extends AppSettings {
@@ -67,6 +70,10 @@ interface SettingsState extends AppSettings {
   setOverlaySettings: (settings: Partial<OverlaySettings>) => void;
   setPiiRedaction: (enabled: boolean) => void;
   setPrivacyMode: (enabled: boolean) => void;
+  setMicDeviceId: (id: string | null) => void;
+  setSystemDeviceId: (id: string | null) => void;
+  /** Sync server-authoritative values (piiRedaction, privacyMode) from a fetched ServerConfig. */
+  initFromServerConfig: (config: ServerConfig) => void;
   resetAll: () => void;
 
   // Session overrides management
@@ -118,6 +125,20 @@ export const useSettingsStore = create<SettingsState>()(
                 piiRedaction: true,
                 featureToggles: { ...state.featureToggles, web_search: false },
               }
+            : {}),
+        })),
+
+      setMicDeviceId: (id) => set({ micDeviceId: id }),
+
+      setSystemDeviceId: (id) => set({ systemDeviceId: id }),
+
+      initFromServerConfig: (config) =>
+        set((state) => ({
+          piiRedaction: config.pii_redaction,
+          privacyMode: config.privacy_mode,
+          // Apply privacy mode side-effects if it's being activated
+          ...(config.privacy_mode && !state.privacyMode
+            ? { featureToggles: { ...state.featureToggles, web_search: false } }
             : {}),
         })),
 
@@ -177,9 +198,10 @@ export const useSettingsStore = create<SettingsState>()(
     }),
     {
       name: "asure-flow-settings",
-      // Don't persist sessionOverrides — they come from the loaded session
+      // Don't persist sessionOverrides — they come from the loaded session.
+      // Don't persist piiRedaction/privacyMode — server is authoritative; loaded via initFromServerConfig.
       partialize: (state) => {
-        const { sessionOverrides, ...rest } = state;
+        const { sessionOverrides, piiRedaction, privacyMode, ...rest } = state;
         return rest;
       },
       // Deep-merge stored state so new nested keys (e.g. overlaySettings.overlayMode)

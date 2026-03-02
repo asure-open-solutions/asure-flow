@@ -285,6 +285,15 @@ async def update_config(body: UpdateConfigRequest):
     if not changes:
         return settings.to_client_config()
 
+    # Reject changes to admin-locked fields
+    if settings.locked_settings:
+        blocked = [k for k in changes if k in settings.locked_settings]
+        if blocked:
+            raise HTTPException(
+                403,
+                f"Settings are locked by server admin: {', '.join(sorted(blocked))}",
+            )
+
     device_change = changes.pop("whisper_device", None)
     model_change = changes.pop("whisper_model", None)
 

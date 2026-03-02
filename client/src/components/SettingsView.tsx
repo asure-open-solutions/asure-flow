@@ -22,6 +22,7 @@ import {
   Cpu,
   Layers,
   Shield,
+  Lock,
   ChevronDown,
   ChevronRight,
   ChevronUp,
@@ -442,6 +443,9 @@ function LLMTab() {
     }
   };
 
+  const lockedSettings = serverConfig?.locked_settings ?? [];
+  const isLocked = (field: string) => lockedSettings.includes(field);
+
   // Render providers in server-defined priority order
   const orderedProviders: ProviderMeta[] = serverConfig?.provider_order
     ? (serverConfig.provider_order
@@ -494,20 +498,22 @@ function LLMTab() {
                   <div className="flex flex-col items-center mr-2 -my-1">
                     <button
                       onClick={() => handleMoveProvider(provider.key, "up")}
-                      disabled={idx === 0}
+                      disabled={idx === 0 || isLocked("provider_order")}
+                      title={isLocked("provider_order") ? "Managed by server admin" : undefined}
                       className={cn(
                         "p-0.5 rounded hover:bg-white/10",
-                        idx === 0 && "opacity-20 pointer-events-none",
+                        (idx === 0 || isLocked("provider_order")) && "opacity-20 pointer-events-none",
                       )}
                     >
                       <ChevronUp className="h-3 w-3 text-white/50" />
                     </button>
                     <button
                       onClick={() => handleMoveProvider(provider.key, "down")}
-                      disabled={idx === orderedProviders.length - 1}
+                      disabled={idx === orderedProviders.length - 1 || isLocked("provider_order")}
+                      title={isLocked("provider_order") ? "Managed by server admin" : undefined}
                       className={cn(
                         "p-0.5 rounded hover:bg-white/10",
-                        idx === orderedProviders.length - 1 &&
+                        (idx === orderedProviders.length - 1 || isLocked("provider_order")) &&
                           "opacity-20 pointer-events-none",
                       )}
                     >
@@ -531,10 +537,14 @@ function LLMTab() {
                   {/* Enable/disable toggle (only when configured) */}
                   <div className="flex items-center gap-2 ml-2">
                     {isConfigured && (
-                      <Toggle
-                        checked={isEnabled}
-                        onChange={(v) => handleToggleProvider(provider, v)}
-                      />
+                      isLocked(provider.enabledField) ? (
+                        <Lock className="h-3.5 w-3.5 text-white/25" title="Managed by server admin" />
+                      ) : (
+                        <Toggle
+                          checked={isEnabled}
+                          onChange={(v) => handleToggleProvider(provider, v)}
+                        />
+                      )
                     )}
                     <button
                       onClick={() =>
@@ -556,23 +566,30 @@ function LLMTab() {
                     <div className="pt-3">
                       <label className="text-xs text-white/50 mb-1 flex items-center gap-1.5">
                         API Key
-                        {savedFields[provider.apiKeyField] && <Check className="h-3 w-3 text-emerald-400" />}
+                        {isLocked(provider.apiKeyField) && <Lock className="h-3 w-3 text-white/25" title="Managed by server admin" />}
+                        {!isLocked(provider.apiKeyField) && savedFields[provider.apiKeyField] && <Check className="h-3 w-3 text-emerald-400" />}
                       </label>
                       <input
                         type="password"
                         value={formState[provider.apiKeyField] ?? ""}
                         onChange={(e) =>
-                          handleFieldChange(provider.apiKeyField, e.target.value)
+                          !isLocked(provider.apiKeyField) && handleFieldChange(provider.apiKeyField, e.target.value)
                         }
-                        onBlur={() => handleFieldBlur(provider.apiKeyField)}
+                        onBlur={() => !isLocked(provider.apiKeyField) && handleFieldBlur(provider.apiKeyField)}
                         placeholder={providerConfig?.api_key_hint || "Enter API key"}
-                        className="w-full rounded-md bg-white/5 border border-white/10 px-3 py-1.5 text-sm text-white placeholder-white/20 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+                        disabled={isLocked(provider.apiKeyField)}
+                        title={isLocked(provider.apiKeyField) ? "Managed by server admin" : undefined}
+                        className={cn(
+                          "w-full rounded-md bg-white/5 border border-white/10 px-3 py-1.5 text-sm text-white placeholder-white/20 focus:outline-none focus:ring-2 focus:ring-blue-500/50",
+                          isLocked(provider.apiKeyField) && "opacity-40 cursor-not-allowed",
+                        )}
                       />
                     </div>
                     <div>
                       <label className="text-xs text-white/50 mb-1 flex items-center gap-1.5">
                         Model
-                        {savedFields[provider.modelField] && <Check className="h-3 w-3 text-emerald-400" />}
+                        {isLocked(provider.modelField) && <Lock className="h-3 w-3 text-white/25" title="Managed by server admin" />}
+                        {!isLocked(provider.modelField) && savedFields[provider.modelField] && <Check className="h-3 w-3 text-emerald-400" />}
                       </label>
                       <input
                         type="text"
@@ -582,11 +599,16 @@ function LLMTab() {
                           ""
                         }
                         onChange={(e) =>
-                          handleFieldChange(provider.modelField, e.target.value)
+                          !isLocked(provider.modelField) && handleFieldChange(provider.modelField, e.target.value)
                         }
-                        onBlur={() => handleFieldBlur(provider.modelField)}
+                        onBlur={() => !isLocked(provider.modelField) && handleFieldBlur(provider.modelField)}
                         placeholder="Model name"
-                        className="w-full rounded-md bg-white/5 border border-white/10 px-3 py-1.5 text-sm text-white placeholder-white/20 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+                        disabled={isLocked(provider.modelField)}
+                        title={isLocked(provider.modelField) ? "Managed by server admin" : undefined}
+                        className={cn(
+                          "w-full rounded-md bg-white/5 border border-white/10 px-3 py-1.5 text-sm text-white placeholder-white/20 focus:outline-none focus:ring-2 focus:ring-blue-500/50",
+                          isLocked(provider.modelField) && "opacity-40 cursor-not-allowed",
+                        )}
                       />
                     </div>
                     {"hasBase" in provider && provider.hasBase && (
@@ -908,7 +930,8 @@ function DeepThinkSelector() {
 // ── Audio Tab ──
 
 function AudioTab() {
-  const { audioToggles, setAudioToggles, diarization, setDiarization, serverUrl } =
+  const { audioToggles, setAudioToggles, diarization, setDiarization, serverUrl,
+          micDeviceId, setMicDeviceId, systemDeviceId, setSystemDeviceId } =
     useSettingsStore();
   const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null);
   const [clientDevices, setClientDevices] = useState<ClientAudioDevice[]>([]);
@@ -939,24 +962,30 @@ function AudioTab() {
   };
 
   const handleMicDeviceChange = async (deviceId: string) => {
-    try {
-      const config = await updateServerConfig({
-        mic_device_id: deviceId || null,
-      });
-      setServerConfig(config);
-    } catch (err) {
-      console.error("Failed to update mic device:", err);
+    if (captureSource === "client") {
+      // Client-local preference — stays in localStorage, not sent to server
+      setMicDeviceId(deviceId || null);
+    } else {
+      try {
+        const config = await updateServerConfig({ mic_device_id: deviceId || null });
+        setServerConfig(config);
+      } catch (err) {
+        console.error("Failed to update mic device:", err);
+      }
     }
   };
 
   const handleSystemDeviceChange = async (deviceId: string) => {
-    try {
-      const config = await updateServerConfig({
-        system_device_id: deviceId || null,
-      });
-      setServerConfig(config);
-    } catch (err) {
-      console.error("Failed to update system device:", err);
+    // System audio loopback is always server-side capture
+    if (captureSource === "client") {
+      setSystemDeviceId(deviceId || null);
+    } else {
+      try {
+        const config = await updateServerConfig({ system_device_id: deviceId || null });
+        setServerConfig(config);
+      } catch (err) {
+        console.error("Failed to update system device:", err);
+      }
     }
   };
 
@@ -1070,7 +1099,7 @@ function AudioTab() {
                       .filter((d) => d.is_input)
                       .map((d) => ({ id: String(d.id), name: d.name }))
               }
-              selectedId={serverConfig?.mic_device_id ?? ""}
+              selectedId={captureSource === "client" ? (micDeviceId ?? "") : (serverConfig?.mic_device_id ?? "")}
               onChange={handleMicDeviceChange}
             />
             {serverAudioAvailable && (
@@ -1082,7 +1111,7 @@ function AudioTab() {
                     id: String(d.id),
                     name: d.name,
                   }))}
-                selectedId={serverConfig?.system_device_id ?? ""}
+                selectedId={captureSource === "client" ? (systemDeviceId ?? "") : (serverConfig?.system_device_id ?? "")}
                 onChange={handleSystemDeviceChange}
               />
             )}
@@ -1102,11 +1131,7 @@ function AudioTab() {
                   id: d.deviceId,
                   name: d.label,
                 }))}
-                selectedId={
-                  captureSource === "client"
-                    ? (serverConfig?.mic_device_id ?? "")
-                    : ""
-                }
+                selectedId={captureSource === "client" ? (micDeviceId ?? "") : ""}
                 onChange={handleMicDeviceChange}
                 disabled={captureSource !== "client"}
               />
@@ -1122,11 +1147,7 @@ function AudioTab() {
                 devices={serverDevices
                   .filter((d) => d.is_input)
                   .map((d) => ({ id: String(d.id), name: d.name }))}
-                selectedId={
-                  captureSource === "server"
-                    ? (serverConfig?.mic_device_id ?? "")
-                    : ""
-                }
+                selectedId={captureSource === "server" ? (serverConfig?.mic_device_id ?? "") : ""}
                 onChange={handleMicDeviceChange}
                 disabled={captureSource !== "server"}
               />
@@ -1154,6 +1175,9 @@ function AudioTab() {
 function TranscriptionTab() {
   const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null);
   const [switching, setSwitching] = useState(false);
+
+  const lockedSettings = serverConfig?.locked_settings ?? [];
+  const isLocked = (field: string) => lockedSettings.includes(field);
 
   useEffect(() => {
     getServerConfig()
@@ -1192,15 +1216,19 @@ function TranscriptionTab() {
     <div className="space-y-5">
       {/* Model selector */}
       <div>
-        <h3 className="text-sm font-medium text-white/80 mb-2">Whisper Model</h3>
+        <h3 className="text-sm font-medium text-white/80 mb-2 flex items-center gap-2">
+          Whisper Model
+          {isLocked("whisper_model") && <Lock className="h-3.5 w-3.5 text-white/25" title="Managed by server admin" />}
+        </h3>
         <select
           value={serverConfig?.whisper_model ?? ""}
           onChange={(e) => handleModelChange(e.target.value)}
-          disabled={switching || !serverConfig}
+          disabled={switching || !serverConfig || isLocked("whisper_model")}
+          title={isLocked("whisper_model") ? "Managed by server admin" : undefined}
           className={cn(
             "w-full rounded-md bg-white/5 border border-white/10 px-3 py-2 text-sm text-white",
             "focus:outline-none focus:ring-2 focus:ring-blue-500/50",
-            switching && "opacity-60 cursor-not-allowed",
+            (switching || isLocked("whisper_model")) && "opacity-60 cursor-not-allowed",
           )}
         >
           {WHISPER_MODELS.map((m) => (
@@ -1213,31 +1241,36 @@ function TranscriptionTab() {
 
       {/* Device selector */}
       <div>
-        <h3 className="text-sm font-medium text-white/80 mb-3">Compute Device</h3>
+        <h3 className="text-sm font-medium text-white/80 mb-3 flex items-center gap-2">
+          Compute Device
+          {isLocked("whisper_device") && <Lock className="h-3.5 w-3.5 text-white/25" title="Managed by server admin" />}
+        </h3>
         <div className="flex gap-2">
           <button
-            onClick={currentDevice !== "cpu" ? handleSwitch : undefined}
-            disabled={switching}
+            onClick={currentDevice !== "cpu" && !isLocked("whisper_device") ? handleSwitch : undefined}
+            disabled={switching || isLocked("whisper_device")}
+            title={isLocked("whisper_device") ? "Managed by server admin" : undefined}
             className={cn(
               "flex-1 flex items-center justify-center gap-2 rounded-lg border px-4 py-3 text-sm font-medium transition-colors",
               currentDevice === "cpu"
                 ? "border-blue-500/30 bg-blue-500/10 text-blue-400"
                 : "border-white/10 bg-white/[0.02] text-white/50 hover:bg-white/5 cursor-pointer",
-              switching && "opacity-60 cursor-not-allowed",
+              (switching || isLocked("whisper_device")) && "opacity-60 cursor-not-allowed",
             )}
           >
             <Cpu className="h-4 w-4" />
             CPU
           </button>
           <button
-            onClick={currentDevice !== "cuda" ? handleSwitch : undefined}
-            disabled={switching}
+            onClick={currentDevice !== "cuda" && !isLocked("whisper_device") ? handleSwitch : undefined}
+            disabled={switching || isLocked("whisper_device")}
+            title={isLocked("whisper_device") ? "Managed by server admin" : undefined}
             className={cn(
               "flex-1 flex items-center justify-center gap-2 rounded-lg border px-4 py-3 text-sm font-medium transition-colors",
               currentDevice === "cuda"
                 ? "border-blue-500/30 bg-blue-500/10 text-blue-400"
                 : "border-white/10 bg-white/[0.02] text-white/50 hover:bg-white/5 cursor-pointer",
-              switching && "opacity-60 cursor-not-allowed",
+              (switching || isLocked("whisper_device")) && "opacity-60 cursor-not-allowed",
             )}
           >
             <Cpu className="h-4 w-4" />
@@ -1275,8 +1308,7 @@ function TranscriptionTab() {
 // ── Privacy Tab ──
 
 function PrivacyTab() {
-  const { piiRedaction, privacyMode, setPiiRedaction, setPrivacyMode, getEffectivePrivacyMode, getEffectivePiiRedaction } =
-    useSettingsStore();
+  const { setPiiRedaction, setPrivacyMode } = useSettingsStore();
 
   const effectivePrivacy = useSettingsStore((s) => s.getEffectivePrivacyMode());
   const effectivePii = useSettingsStore((s) => s.getEffectivePiiRedaction());
@@ -1291,7 +1323,16 @@ function PrivacyTab() {
           description="Master toggle: enables PII redaction and disables web search"
           settingsKey="privacyMode"
           checked={effectivePrivacy}
-          onGlobalChange={setPrivacyMode}
+          onGlobalChange={async (v) => {
+            setPrivacyMode(v);
+            try {
+              // Sync to server — privacy_mode is server-authoritative.
+              // When enabling, also sync pii_redaction since setPrivacyMode forces it on.
+              await updateServerConfig({ privacy_mode: v, ...(v ? { pii_redaction: true } : {}) });
+            } catch (err) {
+              console.error("Failed to sync privacy mode to server:", err);
+            }
+          }}
         />
       </div>
 
@@ -1303,7 +1344,14 @@ function PrivacyTab() {
           description="Automatically redact emails, phone numbers, SSNs, and credit card numbers from transcripts"
           settingsKey="piiRedaction"
           checked={effectivePii}
-          onGlobalChange={setPiiRedaction}
+          onGlobalChange={async (v) => {
+            setPiiRedaction(v);
+            try {
+              await updateServerConfig({ pii_redaction: v });
+            } catch (err) {
+              console.error("Failed to sync PII redaction to server:", err);
+            }
+          }}
         />
         {effectivePrivacy && !effectivePii && (
           <p className="mt-1 text-xs text-amber-400">
