@@ -2,13 +2,15 @@ import { useEffect, useRef, useState } from "react";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { cn } from "@/lib/utils";
-import { ChevronDown, CheckSquare, X, LayoutGrid, MessageSquare } from "lucide-react";
+import { ChevronDown, CheckSquare, X, LayoutGrid, Circle, Square, Mic, MicOff, Volume2, VolumeX } from "lucide-react";
 import { Logo } from "../Logo";
 
 export function OverlayTopBar() {
   const transcript = useSessionStore((s) => s.transcript);
   const suggestion = useSessionStore((s) => s.suggestions[s.suggestions.length - 1]?.text ?? null);
   const notes = useSessionStore((s) => s.notes);
+  const recording = useSessionStore((s) => s.recording);
+  const audioToggles = useSessionStore((s) => s.overlayAudioToggles);
   const overlaySettings = useSettingsStore((s) => s.overlaySettings);
   const setOverlaySettings = useSettingsStore((s) => s.setOverlaySettings);
   const [expanded, setExpanded] = useState(false);
@@ -78,6 +80,51 @@ export function OverlayTopBar() {
               {actionItems.length}
             </span>
           )}
+
+          {/* Audio toggles */}
+          <button
+            onClick={(e) => { e.stopPropagation(); window.electronAPI?.setAudioToggle({ mic: !audioToggles.mic }); }}
+            className={cn(
+              "rounded-md p-1 transition-colors",
+              audioToggles.mic
+                ? "text-white/25 hover:text-white/60 hover:bg-white/10"
+                : "text-red-400/60 hover:text-red-400 hover:bg-red-500/10",
+            )}
+            title={audioToggles.mic ? "Mute mic" : "Unmute mic"}
+          >
+            {audioToggles.mic ? <Mic className="h-3 w-3" /> : <MicOff className="h-3 w-3" />}
+          </button>
+
+          <button
+            onClick={(e) => { e.stopPropagation(); window.electronAPI?.setAudioToggle({ system: !audioToggles.system }); }}
+            className={cn(
+              "rounded-md p-1 transition-colors",
+              audioToggles.system
+                ? "text-white/25 hover:text-white/60 hover:bg-white/10"
+                : "text-red-400/60 hover:text-red-400 hover:bg-red-500/10",
+            )}
+            title={audioToggles.system ? "Mute system audio" : "Unmute system audio"}
+          >
+            {audioToggles.system ? <Volume2 className="h-3 w-3" /> : <VolumeX className="h-3 w-3" />}
+          </button>
+
+          {/* Record button */}
+          <button
+            onClick={(e) => { e.stopPropagation(); window.electronAPI?.toggleRecording(); }}
+            className={cn(
+              "rounded-md p-1 transition-colors",
+              recording
+                ? "text-red-400 hover:bg-red-500/20"
+                : "text-white/25 hover:text-white/60 hover:bg-white/10",
+            )}
+            title={recording ? "Stop recording" : "Start recording"}
+          >
+            {recording ? (
+              <Square className="h-3 w-3 fill-red-400" />
+            ) : (
+              <Circle className="h-3 w-3" />
+            )}
+          </button>
 
           <ChevronDown className={cn(
             "h-3.5 w-3.5 text-white/25 transition-transform",

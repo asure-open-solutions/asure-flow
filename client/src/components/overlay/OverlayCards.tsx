@@ -4,13 +4,15 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { OverlayCardWidget } from "./OverlayCardWidget";
 import { FactCheckBadge } from "../FactCheckBadge";
 import { cn } from "@/lib/utils";
-import { MessageSquare, CheckSquare, AlignLeft, X, Monitor } from "lucide-react";
+import { MessageSquare, CheckSquare, AlignLeft, X, Monitor, Circle, Square, Mic, MicOff, Volume2, VolumeX } from "lucide-react";
 import { Logo } from "../Logo";
 
 export function OverlayCards() {
   const transcript = useSessionStore((s) => s.transcript);
   const suggestion = useSessionStore((s) => s.suggestions[s.suggestions.length - 1]?.text ?? null);
   const notes = useSessionStore((s) => s.notes);
+  const recording = useSessionStore((s) => s.recording);
+  const audioToggles = useSessionStore((s) => s.overlayAudioToggles);
   const overlaySettings = useSettingsStore((s) => s.overlaySettings);
   const setOverlaySettings = useSettingsStore((s) => s.setOverlaySettings);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -52,7 +54,7 @@ export function OverlayCards() {
 
   return (
     <div className="h-screen w-screen" style={{ background: "transparent" }}>
-      {/* Mode switch + close — top-right corner */}
+      {/* Controls — top-right corner */}
       <div
         className="absolute top-2 right-4 flex items-center gap-1 z-50"
         onMouseEnter={() => window.electronAPI?.setIgnoreMouseEvents(false, false)}
@@ -60,6 +62,54 @@ export function OverlayCards() {
       >
         <div className="flex items-center gap-1 rounded-xl bg-zinc-900/85 backdrop-blur-xl border border-white/10 px-2 py-1 shadow-lg">
           <Logo size={14} className="opacity-50" />
+
+          {/* Audio toggles */}
+          <button
+            onClick={() => window.electronAPI?.setAudioToggle({ mic: !audioToggles.mic })}
+            className={cn(
+              "rounded-md p-1 transition-colors",
+              audioToggles.mic
+                ? "text-white/30 hover:text-white/70 hover:bg-white/10"
+                : "text-red-400/60 hover:text-red-400 hover:bg-red-500/10",
+            )}
+            title={audioToggles.mic ? "Mute mic" : "Unmute mic"}
+          >
+            {audioToggles.mic ? <Mic className="h-3.5 w-3.5" /> : <MicOff className="h-3.5 w-3.5" />}
+          </button>
+
+          <button
+            onClick={() => window.electronAPI?.setAudioToggle({ system: !audioToggles.system })}
+            className={cn(
+              "rounded-md p-1 transition-colors",
+              audioToggles.system
+                ? "text-white/30 hover:text-white/70 hover:bg-white/10"
+                : "text-red-400/60 hover:text-red-400 hover:bg-red-500/10",
+            )}
+            title={audioToggles.system ? "Mute system audio" : "Unmute system audio"}
+          >
+            {audioToggles.system ? <Volume2 className="h-3.5 w-3.5" /> : <VolumeX className="h-3.5 w-3.5" />}
+          </button>
+
+          {/* Record button */}
+          <button
+            onClick={() => window.electronAPI?.toggleRecording()}
+            className={cn(
+              "rounded-md p-1 transition-colors",
+              recording
+                ? "text-red-400 hover:bg-red-500/20"
+                : "text-white/30 hover:text-white/70 hover:bg-white/10",
+            )}
+            title={recording ? "Stop recording" : "Start recording"}
+          >
+            {recording ? (
+              <Square className="h-3.5 w-3.5 fill-red-400" />
+            ) : (
+              <Circle className="h-3.5 w-3.5" />
+            )}
+          </button>
+
+          <div className="w-px h-3 bg-white/10 mx-0.5" />
+
           <button
             onClick={switchToTopBar}
             className="rounded-md p-1 text-white/30 hover:text-white/70 hover:bg-white/10 transition-colors"

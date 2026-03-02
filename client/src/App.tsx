@@ -13,10 +13,13 @@ import { OverlayHUD } from "@/components/overlay/OverlayHUD";
 import { WindowControls } from "@/components/WindowControls";
 import { AudioCapture } from "@/services/audioCapture";
 import { AudioWebSocket, SessionWebSocket } from "@/services/websocket";
-import { setServerUrl, getServerConfig, isServerReachable, renameSession, createSession, listSessions } from "@/services/api";
+import { setServerUrl, getServerConfig, checkServerHealth, renameSession, createSession, listSessions } from "@/services/api";
 import { cn } from "@/lib/utils";
 import {
   Mic,
+  MicOff,
+  Volume2,
+  VolumeX,
   Settings,
   Square,
   ServerOff,
@@ -55,9 +58,12 @@ function MainApp() {
   const clearRerunRequest = useSessionStore((s) => s.clearRerunRequest);
 
   const serverUrl = useSettingsStore((s) => s.serverUrl);
+  const hydrated = useSettingsStore((s) => s._hydrated);
   const effectiveToggles = useSettingsStore((s) => s.getEffectiveToggles());
   const audioToggles = useSettingsStore((s) => s.audioToggles);
+  const setAudioToggles = useSettingsStore((s) => s.setAudioToggles);
   const contentProtection = useSettingsStore((s) => s.overlaySettings.contentProtection);
+  const setLlmStatus = useSessionStore((s) => s.setLlmStatus);
 
   const audioWsRef = useRef<AudioWebSocket | null>(null);
   const sessionWsRef = useRef<SessionWebSocket | null>(null);
@@ -66,17 +72,21 @@ function MainApp() {
   const serverConfigLoaded = useRef(false);
   const startingRecordingRef = useRef(false);
 
-  // Keep server URL in sync
+  // Keep server URL in sync — wait for hydration to avoid overwriting with default
   useEffect(() => {
-    setServerUrl(serverUrl);
-  }, [serverUrl]);
+    if (hydrated) setServerUrl(serverUrl);
+  }, [serverUrl, hydrated]);
 
-  // Poll server health
+  // Poll server health — wait for hydration so we use the correct server URL
   useEffect(() => {
+    if (!hydrated) return;
     let active = true;
     const check = async () => {
-      const online = await isServerReachable();
-      if (active) setServerOnline(online);
+      const health = await checkServerHealth();
+      if (active) {
+        setServerOnline(health.online);
+        setLlmStatus(health.llmAvailable, health.llmProvider);
+      }
     };
     check();
     const ms = serverOnline ? 30_000 : 3_000;
@@ -85,7 +95,7 @@ function MainApp() {
       active = false;
       clearInterval(id);
     };
-  }, [serverOnline, serverUrl]);
+  }, [serverOnline, serverUrl, hydrated]);
 
   // Load server config once on first successful connection to sync server-authoritative settings
   useEffect(() => {
@@ -208,12 +218,15 @@ function MainApp() {
   // Sync session state to overlay window via IPC (debounced to avoid flooding during AI streaming)
   useEffect(() => {
     const sendSync = () => {
-      const { transcript, suggestions, notes } = useSessionStore.getState();
+      const { transcript, suggestions, notes, recording: rec, recordingStartedAt: rsa } = useSessionStore.getState();
       const latestSuggestion = suggestions[suggestions.length - 1]?.text ?? null;
       window.electronAPI?.sendOverlaySync({
         transcript: transcript.slice(-20),
         latestSuggestion,
         notes,
+        recording: rec,
+        recordingStartedAt: rsa,
+        audioToggles: useSettingsStore.getState().audioToggles,
       });
     };
 
@@ -250,6 +263,29 @@ function MainApp() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
+  }, []);
+
+  // IPC: overlay requests recording toggle
+  const startRecordingRef = useRef<() => void>(undefined);
+  const stopRecordingRef = useRef<() => void>(undefined);
+  useEffect(() => {
+    const cleanup = window.electronAPI?.onToggleRecording(() => {
+      const store = useSessionStore.getState();
+      if (store.recording) {
+        stopRecordingRef.current?.();
+      } else if (store.currentSession) {
+        startRecordingRef.current?.();
+      }
+    });
+    return () => cleanup?.();
+  }, []);
+
+  // IPC: overlay requests audio toggle change
+  useEffect(() => {
+    const cleanup = window.electronAPI?.onAudioToggle((toggle) => {
+      useSettingsStore.getState().setAudioToggles(toggle);
+    });
+    return () => cleanup?.();
   }, []);
 
   const handleSessionContextChange = useCallback(
@@ -351,6 +387,10 @@ function MainApp() {
     setAudioConnected(false);
   }, [setRecording, setAudioConnected]);
 
+  // Keep refs in sync for IPC callbacks (which can't capture latest closures)
+  startRecordingRef.current = startRecording;
+  stopRecordingRef.current = stopRecording;
+
   return (
     <div className="flex h-screen bg-zinc-950 text-white">
       {/* Sidebar */}
@@ -429,6 +469,37 @@ function MainApp() {
           <div className="flex items-center gap-1">
             {currentSession && (
               <SessionContextInput onContextChange={handleSessionContextChange} />
+            )}
+
+            {currentSession && (
+              <div className="flex items-center gap-0.5">
+                <button
+                  onClick={() => setAudioToggles({ mic: !audioToggles.mic })}
+                  className={cn(
+                    "rounded-lg p-1.5 transition-colors",
+                    audioToggles.mic
+                      ? "text-white/40 hover:text-white/70 hover:bg-white/5"
+                      : "text-red-400/60 hover:text-red-400 hover:bg-red-500/10",
+                  )}
+                  title={audioToggles.mic ? "Mute microphone" : "Unmute microphone"}
+                  style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
+                >
+                  {audioToggles.mic ? <Mic className="h-3.5 w-3.5" /> : <MicOff className="h-3.5 w-3.5" />}
+                </button>
+                <button
+                  onClick={() => setAudioToggles({ system: !audioToggles.system })}
+                  className={cn(
+                    "rounded-lg p-1.5 transition-colors",
+                    audioToggles.system
+                      ? "text-white/40 hover:text-white/70 hover:bg-white/5"
+                      : "text-red-400/60 hover:text-red-400 hover:bg-red-500/10",
+                  )}
+                  title={audioToggles.system ? "Mute system audio" : "Unmute system audio"}
+                  style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
+                >
+                  {audioToggles.system ? <Volume2 className="h-3.5 w-3.5" /> : <VolumeX className="h-3.5 w-3.5" />}
+                </button>
+              </div>
             )}
 
             {currentSession && (

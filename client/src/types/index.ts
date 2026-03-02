@@ -277,12 +277,33 @@ declare global {
     electronAPI?: {
       toggleOverlay: () => Promise<boolean>;
       getAudioSources: () => Promise<{ id: string; name: string }[]>;
+      getEnvServerUrl: () => string | null;
       setIgnoreMouseEvents: (ignore: boolean, forward: boolean) => void;
       setContentProtection: (enabled: boolean) => Promise<void>;
-      onOverlayToggle: (callback: (isOverlay: boolean) => void) => () => void;
       setOverlayBounds: (bounds: { x?: number; y?: number; width?: number; height?: number }) => Promise<void>;
       getScreenSize: () => Promise<{ width: number; height: number }>;
       getPlatform: () => Promise<string>;
+
+      // Window controls
+      windowMinimize: () => void;
+      windowMaximize: () => void;
+      windowClose: () => void;
+      windowIsMaximized: () => Promise<boolean>;
+      onMaximizeChange: (callback: (maximized: boolean) => void) => () => void;
+
+      // Overlay state sync
+      sendOverlaySync: (data: unknown) => void;
+      onOverlaySync: (callback: (data: unknown) => void) => () => void;
+      onOverlayOpened: (callback: () => void) => () => void;
+      onOverlayToggle: (callback: (isOverlay: boolean) => void) => () => void;
+
+      // Recording toggle (overlay ↔ main window)
+      toggleRecording: () => void;
+      onToggleRecording: (callback: () => void) => () => void;
+
+      // Audio toggle (overlay → main window)
+      setAudioToggle: (toggle: { mic?: boolean; system?: boolean }) => void;
+      onAudioToggle: (callback: (toggle: { mic?: boolean; system?: boolean }) => void) => () => void;
     };
   }
 }

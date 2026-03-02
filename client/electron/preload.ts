@@ -42,9 +42,27 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
   // Listen for events from main process
   onOverlayToggle: (callback: (isOverlay: boolean) => void) => {
-    ipcRenderer.on("overlay-toggled", (_event, value) => callback(value));
+    const handler = (_event: unknown, value: boolean) => callback(value);
+    ipcRenderer.on("overlay-toggled", handler);
     return () => {
-      ipcRenderer.removeAllListeners("overlay-toggled");
+      ipcRenderer.removeListener("overlay-toggled", handler);
     };
+  },
+
+  // Recording toggle (overlay ↔ main window via main process relay)
+  toggleRecording: () => ipcRenderer.send("toggle-recording"),
+  onToggleRecording: (callback: () => void) => {
+    const handler = () => callback();
+    ipcRenderer.on("toggle-recording", handler);
+    return () => { ipcRenderer.removeListener("toggle-recording", handler); };
+  },
+
+  // Audio toggle (overlay → main window via main process relay)
+  setAudioToggle: (toggle: { mic?: boolean; system?: boolean }) =>
+    ipcRenderer.send("set-audio-toggle", toggle),
+  onAudioToggle: (callback: (toggle: { mic?: boolean; system?: boolean }) => void) => {
+    const handler = (_event: unknown, toggle: { mic?: boolean; system?: boolean }) => callback(toggle);
+    ipcRenderer.on("set-audio-toggle", handler);
+    return () => { ipcRenderer.removeListener("set-audio-toggle", handler); };
   },
 });

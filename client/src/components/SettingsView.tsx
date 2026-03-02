@@ -468,6 +468,7 @@ function LLMTab() {
           placeholder="http://localhost:8000"
           className="w-full rounded-lg bg-white/5 border border-white/10 px-3 py-2 text-sm text-white placeholder-white/30 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
         />
+        <p className="text-[11px] text-white/30 mt-1.5">Saved on this device. LLM and transcription settings are stored on the server.</p>
       </div>
 
       {/* Providers */}

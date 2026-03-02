@@ -11,7 +11,14 @@ export function OverlayHUD() {
   // Receive session state from the main window via IPC relay
   useEffect(() => {
     const cleanup = window.electronAPI?.onOverlaySync((data: unknown) => {
-      const d = data as { transcript: any[]; latestSuggestion: string | null; notes: any[] };
+      const d = data as {
+        transcript: any[];
+        latestSuggestion: string | null;
+        notes: any[];
+        recording?: boolean;
+        recordingStartedAt?: number | null;
+        audioToggles?: { mic: boolean; system: boolean };
+      };
       syncFromMain(d);
     });
     return () => cleanup?.();

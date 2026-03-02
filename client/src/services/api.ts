@@ -38,20 +38,37 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 // ── Health ──
 
+export interface HealthStatus {
+  online: boolean;
+  llmAvailable: boolean;
+  llmProvider: string | null;
+}
+
 export async function checkHealth(): Promise<{ status: string; llm_available: boolean }> {
   return request("/api/health");
 }
 
-/** Non-throwing connectivity check — returns true if server responds to /api/health. */
-export async function isServerReachable(): Promise<boolean> {
+/** Non-throwing health check — returns server online status + LLM availability. */
+export async function checkServerHealth(): Promise<HealthStatus> {
   try {
     const res = await fetch(`${baseUrl}/api/health`, {
       signal: AbortSignal.timeout(3000),
     });
-    return res.ok;
+    if (!res.ok) return { online: false, llmAvailable: false, llmProvider: null };
+    const data = await res.json();
+    return {
+      online: true,
+      llmAvailable: data.llm_available ?? false,
+      llmProvider: data.llm_provider ?? null,
+    };
   } catch {
-    return false;
+    return { online: false, llmAvailable: false, llmProvider: null };
   }
+}
+
+/** Non-throwing connectivity check — returns true if server responds to /api/health. */
+export async function isServerReachable(): Promise<boolean> {
+  return (await checkServerHealth()).online;
 }
 
 // ── Sessions ──

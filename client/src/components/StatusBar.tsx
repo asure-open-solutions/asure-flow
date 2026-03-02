@@ -1,13 +1,7 @@
 import { useEffect, useState } from "react";
 import { useSessionStore } from "@/stores/sessionStore";
 import { cn } from "@/lib/utils";
-
-function formatElapsed(ms: number): string {
-  const totalSec = Math.floor(ms / 1000);
-  const min = Math.floor(totalSec / 60);
-  const sec = totalSec % 60;
-  return `${min}:${sec.toString().padStart(2, "0")}`;
-}
+import { formatElapsed } from "@/lib/formatElapsed";
 
 function friendlyToolName(name: string): string {
   const map: Record<string, string> = {
@@ -25,6 +19,8 @@ function friendlyToolName(name: string): string {
 
 export function StatusBar() {
   const serverOnline = useSessionStore((s) => s.serverOnline);
+  const llmAvailable = useSessionStore((s) => s.llmAvailable);
+  const llmProvider = useSessionStore((s) => s.llmProvider);
   const audioConnected = useSessionStore((s) => s.audioConnected);
   const sessionConnected = useSessionStore((s) => s.sessionConnected);
   const recording = useSessionStore((s) => s.recording);
@@ -77,6 +73,16 @@ export function StatusBar() {
         <span className={cn("h-1.5 w-1.5 rounded-full", connColor)} />
         {connLabel}
       </span>
+
+      {serverOnline && (
+        <span
+          className="flex items-center gap-1.5"
+          title={llmAvailable ? `Active provider: ${llmProvider}` : "No LLM provider configured"}
+        >
+          <span className={cn("h-1.5 w-1.5 rounded-full", llmAvailable ? "bg-emerald-400" : "bg-amber-400")} />
+          {llmAvailable ? "LLM" : "No LLM"}
+        </span>
+      )}
 
       {recording && (
         <span className="flex items-center gap-1.5 text-red-400">

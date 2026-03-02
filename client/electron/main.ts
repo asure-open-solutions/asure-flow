@@ -107,6 +107,8 @@ function toggleOverlay() {
     // Close overlay, show main window
     overlayWindow?.close();
     overlayWindow = null;
+    if (overlayThrottle) { clearTimeout(overlayThrottle); overlayThrottle = null; }
+    pendingOverlayData = null;
     mainWindow?.show();
     isOverlayMode = false;
   } else {
@@ -197,6 +199,16 @@ ipcMain.handle("get-screen-size", () => {
 });
 
 ipcMain.handle("get-platform", () => process.platform);
+
+// ── Recording + Audio Toggle Relay (overlay ↔ main window) ──
+
+ipcMain.on("toggle-recording", () => {
+  mainWindow?.webContents.send("toggle-recording");
+});
+
+ipcMain.on("set-audio-toggle", (_event, toggle: { mic?: boolean; system?: boolean }) => {
+  mainWindow?.webContents.send("set-audio-toggle", toggle);
+});
 
 // ── Window Controls ──
 

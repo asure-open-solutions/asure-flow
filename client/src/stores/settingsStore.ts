@@ -63,6 +63,9 @@ interface SettingsState extends AppSettings {
   // Session-level overrides (not persisted in localStorage — loaded from session)
   sessionOverrides: SessionSettings | null;
 
+  // Hydration flag — true once persist middleware has restored values from localStorage
+  _hydrated: boolean;
+
   setServerUrl: (url: string) => void;
   setFeatureToggles: (toggles: Partial<FeatureToggles>) => void;
   setDiarization: (enabled: boolean) => void;
@@ -94,6 +97,7 @@ export const useSettingsStore = create<SettingsState>()(
     (set, get) => ({
       ...DEFAULT_SETTINGS,
       sessionOverrides: null,
+      _hydrated: false,
 
       setServerUrl: (url) => set({ serverUrl: url }),
 
@@ -201,8 +205,11 @@ export const useSettingsStore = create<SettingsState>()(
       // Don't persist sessionOverrides — they come from the loaded session.
       // Don't persist piiRedaction/privacyMode — server is authoritative; loaded via initFromServerConfig.
       partialize: (state) => {
-        const { sessionOverrides, piiRedaction, privacyMode, ...rest } = state;
+        const { sessionOverrides, piiRedaction, privacyMode, _hydrated, ...rest } = state;
         return rest;
+      },
+      onRehydrateStorage: () => (state) => {
+        if (state) state._hydrated = true;
       },
       // Deep-merge stored state so new nested keys (e.g. overlaySettings.overlayMode)
       // are preserved from the default when an old persisted schema lacks them.

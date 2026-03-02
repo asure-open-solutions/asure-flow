@@ -110,8 +110,11 @@ export class AudioCapture {
     // Register the worklet processor
     const blob = new Blob([WORKLET_CODE], { type: "application/javascript" });
     const workletUrl = URL.createObjectURL(blob);
-    await this.audioContext.audioWorklet.addModule(workletUrl);
-    URL.revokeObjectURL(workletUrl);
+    try {
+      await this.audioContext.audioWorklet.addModule(workletUrl);
+    } finally {
+      URL.revokeObjectURL(workletUrl);
+    }
 
     if (options.mic) {
       try {

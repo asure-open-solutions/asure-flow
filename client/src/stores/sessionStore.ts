@@ -63,11 +63,16 @@ interface SessionState {
 
   // Connection state
   serverOnline: boolean;
+  llmAvailable: boolean;
+  llmProvider: string | null;
   audioConnected: boolean;
   sessionConnected: boolean;
   recording: boolean;
   recordingStartedAt: number | null;
   audioWarning: string | null;
+
+  // Overlay-synced audio toggles (read-only in overlay)
+  overlayAudioToggles: { mic: boolean; system: boolean };
 
   // Session list
   sessions: SessionSummary[];
@@ -100,6 +105,7 @@ interface SessionState {
   addSuggestion: (text: string, respondingTo?: string) => void;
   setAIStreaming: (streaming: boolean) => void;
   setServerOnline: (online: boolean) => void;
+  setLlmStatus: (available: boolean, provider: string | null) => void;
   setAudioConnected: (connected: boolean) => void;
   setSessionConnected: (connected: boolean) => void;
   setRecording: (recording: boolean) => void;
@@ -113,7 +119,14 @@ interface SessionState {
   setInsightsDrawerTab: (tab: InsightsTab) => void;
   incrementUnseenInsights: () => void;
   clearUnseenInsights: () => void;
-  syncFromMain: (data: { transcript: TranscriptEntry[]; latestSuggestion: string | null; notes: NoteEntry[] }) => void;
+  syncFromMain: (data: {
+    transcript: TranscriptEntry[];
+    latestSuggestion: string | null;
+    notes: NoteEntry[];
+    recording?: boolean;
+    recordingStartedAt?: number | null;
+    audioToggles?: { mic: boolean; system: boolean };
+  }) => void;
   clearSuggestions: () => void;
   requestRerun: () => void;
   clearRerunRequest: () => void;
@@ -166,11 +179,14 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   codeAnalysis: null,
   agentLog: [],
   serverOnline: false,
+  llmAvailable: false,
+  llmProvider: null,
   audioConnected: false,
   sessionConnected: false,
   recording: false,
   recordingStartedAt: null,
   audioWarning: null,
+  overlayAudioToggles: { mic: true, system: true },
   sessions: [],
   insightsDrawerOpen: false,
   insightsDrawerTab: "suggestions" as InsightsTab,
@@ -305,6 +321,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   clearRerunRequest: () => set({ rerunRequested: false }),
   setAIStreaming: (streaming) => set({ aiStreaming: streaming }),
   setServerOnline: (online) => set({ serverOnline: online }),
+  setLlmStatus: (available, provider) => set({ llmAvailable: available, llmProvider: provider }),
   setAudioConnected: (connected) => set({ audioConnected: connected }),
   setSessionConnected: (connected) => set({ sessionConnected: connected }),
   setRecording: (recording) =>
@@ -504,6 +521,9 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
         ? [{ id: "overlay", text: data.latestSuggestion, responding_to: "", timestamp: new Date().toISOString() }]
         : [],
       notes: data.notes,
+      recording: data.recording ?? false,
+      recordingStartedAt: data.recordingStartedAt ?? null,
+      overlayAudioToggles: data.audioToggles ?? { mic: true, system: true },
     }),
 
   reset: () =>

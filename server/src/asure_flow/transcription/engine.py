@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
@@ -28,13 +29,16 @@ _AVG_LOGPROB_THRESHOLD = -1.0
 
 # ── Cached VAD model (lazy-loaded once) ──
 _vad_model = None
+_vad_lock = threading.Lock()
 
 
 def _get_cached_vad_model():
     global _vad_model
     if _vad_model is None:
-        from faster_whisper.vad import get_vad_model
-        _vad_model = get_vad_model()
+        with _vad_lock:
+            if _vad_model is None:
+                from faster_whisper.vad import get_vad_model
+                _vad_model = get_vad_model()
     return _vad_model
 
 

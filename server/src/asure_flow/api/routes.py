@@ -24,9 +24,14 @@ router = APIRouter(prefix="/api")
 
 @router.get("/health")
 async def health():
+    llm = get_router()
+    provider_name = None
+    if llm and llm.model_list:
+        provider_name = llm.model_list[0].get("model_name", "unknown")
     return {
         "status": "ok",
-        "llm_available": get_router() is not None,
+        "llm_available": llm is not None,
+        "llm_provider": provider_name,
     }
 
 
