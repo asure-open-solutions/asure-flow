@@ -78,11 +78,10 @@ class WhisperEngine:
     ) -> list[TranscriptSegment]:
         kwargs: dict = dict(
             beam_size=5,
-            vad_filter=True,
-            vad_parameters=dict(
-                min_silence_duration_ms=1000,
-                speech_pad_ms=300,
-            ),
+            # AudioBuffer already gates flushes with Silero VAD (speech-then-silence).
+            # A second VAD pass here is redundant and harmful for short (~1-2 s) chunks
+            # that arrive from remote clients — it aggressively strips them as "silence".
+            vad_filter=False,
         )
         if settings.whisper_language:
             kwargs["language"] = settings.whisper_language
@@ -121,6 +120,7 @@ class AudioBuffer:
         # Rate-limiting state for VAD checks
         self._last_vad_len: int = 0
         self._cached_ready: bool = False
+        self._has_speech: bool = False  # set True when any window exceeds threshold
 
     def add_audio(self, pcm_bytes: bytes) -> None:
         chunk = pcm16_bytes_to_float32(pcm_bytes)
@@ -136,12 +136,17 @@ class AudioBuffer:
         # Rate-limit: only re-run VAD after ~500 ms of new audio
         if buf_len - self._last_vad_len < _VAD_CHECK_INTERVAL:
             return self._cached_ready
-        self._cached_ready = self._has_trailing_silence()
+        self._cached_ready = self._check_vad_state()
         self._last_vad_len = buf_len
         return self._cached_ready
 
-    def _has_trailing_silence(self) -> bool:
-        """Run Silero VAD on the buffer and check for trailing silence."""
+    def _check_vad_state(self) -> bool:
+        """Run Silero VAD and check for speech followed by trailing silence.
+
+        Returns True only if the buffer contains at least some speech AND
+        the trailing windows are silence (i.e. the speaker has paused).
+        Pure-silence buffers are never flushed, preventing wasted Whisper calls.
+        """
         from faster_whisper.vad import get_vad_model
 
         model = get_vad_model()
@@ -157,7 +162,14 @@ class AudioBuffer:
         if len(probs) < self._silence_windows:
             return False
 
-        # Check that the trailing N windows are all below the silence threshold
+        # Track whether the buffer ever contained speech
+        if not self._has_speech:
+            self._has_speech = bool(np.any(probs >= _VAD_SILENCE_THRESHOLD))
+
+        # Only flush when speech was detected AND trailing windows are now silent
+        if not self._has_speech:
+            return False
+
         return bool(np.all(probs[-self._silence_windows:] < _VAD_SILENCE_THRESHOLD))
 
     async def flush(self) -> list[TranscriptSegment]:
@@ -169,10 +181,19 @@ class AudioBuffer:
             return []
 
         audio = self._buffer.copy()
+        duration = len(audio) / SAMPLE_RATE
+        rms = float(np.sqrt(np.mean(audio ** 2)))
+        peak = float(np.max(np.abs(audio)))
+        logger.info(
+            "AudioBuffer flush [%s]: %.2fs, RMS=%.4f, peak=%.4f, had_speech=%s",
+            self.speaker_label, duration, rms, peak, self._has_speech,
+        )
+
         # Clean cut — no overlap needed when flushing at silence boundaries
         self._buffer = np.array([], dtype=np.float32)
         self._last_vad_len = 0
         self._cached_ready = False
+        self._has_speech = False
 
         # Pass previous text as prompt so Whisper keeps sentence context
         prompt = self._prev_text[-200:] if self._prev_text else None
@@ -191,6 +212,7 @@ class AudioBuffer:
         self._prev_text = ""
         self._last_vad_len = 0
         self._cached_ready = False
+        self._has_speech = False
 
 
 # Singleton engine
