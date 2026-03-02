@@ -193,8 +193,9 @@ Configure up to 6 LLM providers with automatic failover. If one goes down, Asur�
 ```bash
 git clone https://github.com/asure-solutions/asure-flow.git
 cd asure-flow
-./scripts/setup.sh
 ```
+
+Setup happens automatically on first launch. Or run it manually: `./scripts/setup.sh` (macOS/Linux) or `scripts\setup.ps1` (Windows).
 
 ### Configure
 
@@ -213,31 +214,18 @@ OPENROUTER_API_KEY=sk-or-...
 
 ### Run
 
-**All-in-one** (server + client on the same machine):
+Every launcher auto-installs dependencies on first run. Just double-click (or run from terminal) and go.
 
-| Platform | Command |
-|:---|:---|
-| **Windows** | Double-click `start.bat` |
-| **macOS / Linux** | `./scripts/dev.sh` |
-| **PowerShell** | `.\scripts\start.ps1` |
+| | Windows | macOS | Linux / Terminal |
+|:---|:---|:---|:---|
+| **All-in-one** | `start.bat` | `start.command` | `./start.sh` |
+| **Server only** | `start-server.bat` | `start-server.command` | `./start-server.sh` |
+| **Client only** | `start-client.bat` | `start-client.command` | `./start-client.sh` |
 
-**Server only** (for running the client on a different machine):
-
-| Platform | Command |
-|:---|:---|
-| **Windows** | Double-click `start-server.bat` |
-| **macOS / Linux** | `./scripts/start-server.sh` |
-| **PowerShell** | `.\scripts\start-server.ps1` |
-
-**Client only** (connects to a remote server):
-
-| Platform | Command |
-|:---|:---|
-| **macOS / Linux** | `ASUREFLOW_SERVER=http://SERVER_IP:8000 ./scripts/start-client.sh` |
-| **Windows** | `start-client.bat http://SERVER_IP:8000` |
-| **PowerShell** | `.\scripts\start-client.ps1 -Server http://SERVER_IP:8000` |
-
-> All scripts auto-detect first run and install dependencies automatically.
+> **Tip:** To connect the client to a remote server, pass the URL as an argument:
+> `./start-client.sh http://192.168.1.50:8000` or `start-client.bat http://192.168.1.50:8000`
+> Or change it in **Settings → Server URL** inside the app — it persists across restarts.
+>
 > Server scripts display your LAN IP on startup so you can copy-paste it on the client machine.
 
 The server starts at `http://localhost:8000` and the Electron app opens automatically.
@@ -262,8 +250,8 @@ echo "OPENROUTER_API_KEY=sk-or-..." > .env
 
 # Start the server
 # Windows:     double-click start-server.bat
-# macOS/Linux: ./scripts/start-server.sh
-# PowerShell:  .\scripts\start-server.ps1
+# macOS:       double-click start-server.command
+# Linux:       ./start-server.sh
 ```
 
 The script prints your LAN IP on startup, e.g. `Network: http://192.168.1.50:8000`.
@@ -278,14 +266,15 @@ The script prints your LAN IP on startup, e.g. `Network: http://192.168.1.50:800
 Only needs **Node.js 18+** — no Python, no GPU.
 
 ```bash
-# Clone (or just copy the client/ folder + scripts/)
+# Clone (or just copy the client/ folder + launchers)
 git clone https://github.com/asure-solutions/asure-flow.git
 cd asure-flow
 
 # Start the client, pointing at your server
-ASUREFLOW_SERVER=http://192.168.1.50:8000 ./scripts/start-client.sh
+./start-client.sh http://192.168.1.50:8000
 ```
 
+On macOS: double-click `start-client.command` (set server URL in Settings after launch)
 On Windows: `start-client.bat http://192.168.1.50:8000`
 
 You can also set the server URL in **Settings → Server URL** inside the app — it persists across restarts.
@@ -363,8 +352,10 @@ asure-flow/
 │       ├── services/      Audio capture, WebSocket clients, REST client
 │       └── stores/        Zustand state management
 │
-├── scripts/               Setup and dev scripts
-└── start.bat              Windows one-click launcher
+├── scripts/               Setup scripts (setup.sh / setup.ps1)
+├── start.bat / start.sh / start.command             All-in-one launchers
+├── start-server.bat / .sh / .command                Server-only launchers
+└── start-client.bat / .sh / .command                Client-only launchers
 ```
 
 **Communication:**
@@ -385,7 +376,7 @@ cd asure-flow
 ./scripts/setup.sh
 
 # Development mode (hot reload for server + client)
-./scripts/dev.sh
+./start.sh
 ```
 
 **Where to start:**

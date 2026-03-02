@@ -1,31 +1,48 @@
 @echo off
-title Asure Flow — Client
+setlocal
+title AsuréFlow - Client
 cd /d "%~dp0"
+
 echo.
-echo === Asure Flow — Client ===
+echo   AsuréFlow - Client
+echo   ==================
 echo.
 
-:: Accept server URL as argument: start-client.bat http://192.168.1.50:8000
-if "%~1"=="" (
-    if "%ASUREFLOW_SERVER%"=="" (
-        set ASUREFLOW_SERVER=http://localhost:8000
-    )
-) else (
-    set ASUREFLOW_SERVER=%~1
+:: ---- Check Node.js ----
+where node >nul 2>&1
+if errorlevel 1 (
+    echo   ERROR: Node.js is not installed.
+    echo   Download: https://nodejs.org/
+    echo.
+    pause
+    exit /b 1
 )
 
-echo Connecting to server: %ASUREFLOW_SERVER%
-echo.
+:: ---- Server URL ----
+if not "%~1"=="" (
+    set "ASUREFLOW_SERVER=%~1"
+) else if not defined ASUREFLOW_SERVER (
+    set "ASUREFLOW_SERVER=http://localhost:8000"
+)
 
-:: Auto-install on first run
-if not exist "%~dp0client\node_modules" (
-    echo First run — installing client dependencies...
+:: ---- Auto-setup ----
+if not exist "client\node_modules" (
+    echo   [setup] First run - installing client dependencies...
     cd /d "%~dp0client"
     call npm install
     cd /d "%~dp0"
     echo.
+    echo   [setup] Client ready.
+    echo.
 )
 
+echo   Server: %ASUREFLOW_SERVER%
+echo.
+echo   Tip: Change server URL in Settings inside the app.
+echo   Press Ctrl+C to stop.
+echo.
+
+:: ---- Run ----
 cd /d "%~dp0client"
 call npm run dev
 pause

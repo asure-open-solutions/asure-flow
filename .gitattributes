@@ -1,0 +1,5 @@
+# Line endings
+*.sh        eol=lf
+*.command   eol=lf
+*.bat       eol=crlf
+*.ps1       eol=crlf

@@ -72,8 +72,8 @@ Write-Host ""
 Write-Host "=== Setup complete! ===" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "To start:"
-Write-Host "  Double-click:  start.bat" -ForegroundColor White
-Write-Host "  PowerShell:    .\scripts\start.ps1" -ForegroundColor White
-Write-Host "  VS Code:       F5 or Run > 'Server + Client (parallel)'" -ForegroundColor White
+Write-Host "  Double-click:  start.bat  (Windows)" -ForegroundColor White
+Write-Host "  Double-click:  start.command  (macOS)" -ForegroundColor White
+Write-Host "  Terminal:      ./start.sh  (Linux)" -ForegroundColor White
 Write-Host ""
 Read-Host "Press Enter to exit"
