@@ -139,7 +139,7 @@ async def _handle_mixed_capture(websocket: WebSocket) -> None:
                     "end": seg.end,
                 })
         except Exception:
-            pass
+            logger.debug("Failed to flush remaining buffer on disconnect", exc_info=True)
 
 
 def _get_speaker_tracker():
@@ -238,4 +238,4 @@ async def _handle_client_capture(websocket: WebSocket) -> None:
                         "end": seg.end,
                     })
             except Exception:
-                pass
+                logger.debug("Failed to flush remaining buffer on disconnect", exc_info=True)

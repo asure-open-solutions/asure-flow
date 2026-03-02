@@ -205,7 +205,7 @@ function MainApp() {
     window.electronAPI?.setContentProtection(contentProtection);
   }, [contentProtection]);
 
-  // Sync session state to overlay window via IPC
+  // Sync session state to overlay window via IPC (debounced to avoid flooding during AI streaming)
   useEffect(() => {
     const sendSync = () => {
       const { transcript, suggestions, notes } = useSessionStore.getState();
@@ -217,13 +217,20 @@ function MainApp() {
       });
     };
 
-    // Subscribe to store changes — relay to overlay
-    const unsub = useSessionStore.subscribe(sendSync);
+    let syncTimer: ReturnType<typeof setTimeout> | null = null;
+    const debouncedSync = () => {
+      if (syncTimer) clearTimeout(syncTimer);
+      syncTimer = setTimeout(sendSync, 200);
+    };
 
-    // When overlay opens, send current state immediately
+    // Subscribe to store changes — relay to overlay (debounced)
+    const unsub = useSessionStore.subscribe(debouncedSync);
+
+    // When overlay opens, send current state immediately (not debounced)
     const cleanupOpened = window.electronAPI?.onOverlayOpened(sendSync);
 
     return () => {
+      if (syncTimer) clearTimeout(syncTimer);
       unsub();
       cleanupOpened?.();
     };

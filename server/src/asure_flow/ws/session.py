@@ -26,8 +26,8 @@ router = APIRouter()
 AUTOSAVE_INTERVAL = 30  # seconds
 
 # ── Agent trigger timing ──
-OTHER_SPEAKER_DEBOUNCE = 0.8   # Fire quickly after the other speaker stops
-USER_DEBOUNCE = 2.0            # Fire after the user stops (less urgent)
+OTHER_SPEAKER_DEBOUNCE = 0.6   # Fire quickly after the other speaker stops
+USER_DEBOUNCE = 1.2            # Fire after the user stops
 MONOLOGUE_INTERVAL = 20.0      # Periodic fire during long unbroken speech
 RERUN_CONTEXT_ENTRIES = 5      # How many recent entries to use for rerun triggers
 
@@ -285,7 +285,7 @@ async def ws_session(websocket: WebSocket, session_id: str):
     async def autosave_loop():
         while True:
             await asyncio.sleep(AUTOSAVE_INTERVAL)
-            session_manager.save(session)
+            await session_manager.save_async(session)
             try:
                 await websocket.send_json({"type": "session_saved"})
             except Exception:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -24,6 +25,17 @@ _VAD_SILENCE_THRESHOLD = 0.35
 _NO_SPEECH_PROB_THRESHOLD = 0.6
 # Segments with avg_logprob below this are low-confidence garbage.
 _AVG_LOGPROB_THRESHOLD = -1.0
+
+# ── Cached VAD model (lazy-loaded once) ──
+_vad_model = None
+
+
+def _get_cached_vad_model():
+    global _vad_model
+    if _vad_model is None:
+        from faster_whisper.vad import get_vad_model
+        _vad_model = get_vad_model()
+    return _vad_model
 
 
 @dataclass
@@ -83,7 +95,7 @@ class WhisperEngine:
         self, audio: np.ndarray, initial_prompt: str | None = None,
     ) -> list[TranscriptSegment]:
         kwargs: dict = dict(
-            beam_size=5,
+            beam_size=1,
             # AudioBuffer already gates flushes with Silero VAD (speech-then-silence).
             # A second VAD pass here is redundant and harmful for short (~1-2 s) chunks
             # that arrive from remote clients — it aggressively strips them as "silence".
@@ -130,7 +142,8 @@ class AudioBuffer:
     def __init__(self, engine: WhisperEngine, speaker_label: str = "Unknown") -> None:
         self.engine = engine
         self.speaker_label = speaker_label
-        self._buffer = np.array([], dtype=np.float32)
+        self._chunks: deque[np.ndarray] = deque()
+        self._total_samples: int = 0
         self._prev_text: str = ""  # last flush output — used as Whisper prompt context
 
         # Derived sample counts from settings
@@ -143,13 +156,22 @@ class AudioBuffer:
         self._cached_ready: bool = False
         self._has_speech: bool = False  # set True when any window exceeds threshold
 
+    def _get_buffer(self) -> np.ndarray:
+        """Concatenate all queued chunks into a single array."""
+        if not self._chunks:
+            return np.array([], dtype=np.float32)
+        if len(self._chunks) == 1:
+            return self._chunks[0]
+        return np.concatenate(list(self._chunks))
+
     def add_audio(self, pcm_bytes: bytes) -> None:
         chunk = pcm16_bytes_to_float32(pcm_bytes)
-        self._buffer = np.concatenate([self._buffer, chunk])
+        self._chunks.append(chunk)
+        self._total_samples += len(chunk)
 
     @property
     def ready(self) -> bool:
-        buf_len = len(self._buffer)
+        buf_len = self._total_samples
         if buf_len < self._min_samples:
             return False
         if buf_len >= self._max_samples:
@@ -168,10 +190,8 @@ class AudioBuffer:
         the trailing windows are silence (i.e. the speaker has paused).
         Pure-silence buffers are never flushed, preventing wasted Whisper calls.
         """
-        from faster_whisper.vad import get_vad_model
-
-        model = get_vad_model()
-        audio = self._buffer.copy()
+        model = _get_cached_vad_model()
+        audio = self._get_buffer()
 
         # Pad to a multiple of 512 (VAD window size)
         remainder = len(audio) % 512
@@ -198,10 +218,10 @@ class AudioBuffer:
 
         Because we flush at silence boundaries, no overlap is kept — a clean cut.
         """
-        if len(self._buffer) == 0:
+        if self._total_samples == 0:
             return []
 
-        audio = self._buffer.copy()
+        audio = self._get_buffer()
         duration = len(audio) / SAMPLE_RATE
         rms = float(np.sqrt(np.mean(audio ** 2)))
         peak = float(np.max(np.abs(audio)))
@@ -212,7 +232,8 @@ class AudioBuffer:
         )
 
         # Clean cut — no overlap needed when flushing at silence boundaries
-        self._buffer = np.array([], dtype=np.float32)
+        self._chunks.clear()
+        self._total_samples = 0
         self._last_vad_len = 0
         self._cached_ready = False
         self._has_speech = False
@@ -235,7 +256,8 @@ class AudioBuffer:
         return segments
 
     def clear(self) -> None:
-        self._buffer = np.array([], dtype=np.float32)
+        self._chunks.clear()
+        self._total_samples = 0
         self._prev_text = ""
         self._last_vad_len = 0
         self._cached_ready = False

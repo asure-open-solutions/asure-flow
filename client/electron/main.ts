@@ -124,9 +124,22 @@ function toggleOverlay() {
 
 // ── IPC Handlers ──
 
-// Relay session state from main window to overlay window
+// Relay session state from main window to overlay window (throttled)
+let overlayThrottle: ReturnType<typeof setTimeout> | null = null;
+let pendingOverlayData: unknown = null;
+
 ipcMain.on("overlay-sync", (_event, data) => {
-  overlayWindow?.webContents.send("overlay-sync", data);
+  pendingOverlayData = data;
+  if (!overlayThrottle) {
+    overlayWindow?.webContents.send("overlay-sync", data);
+    overlayThrottle = setTimeout(() => {
+      overlayThrottle = null;
+      if (pendingOverlayData !== null) {
+        overlayWindow?.webContents.send("overlay-sync", pendingOverlayData);
+        pendingOverlayData = null;
+      }
+    }, 100);
+  }
 });
 
 ipcMain.on("set-ignore-mouse-events", (_event, ignore: boolean, options?: { forward: boolean }) => {
