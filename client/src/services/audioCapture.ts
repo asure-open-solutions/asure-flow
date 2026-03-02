@@ -17,6 +17,14 @@ export interface AudioCaptureOptions {
   micDeviceId?: string;
 }
 
+/** Result from start() indicating what actually started. */
+export interface AudioCaptureResult {
+  mic: boolean;
+  system: boolean;
+  micError?: string;
+  systemError?: string;
+}
+
 // AudioWorklet processor code (inline — registered as a blob URL)
 const WORKLET_CODE = `
 class PCMProcessor extends AudioWorkletProcessor {
@@ -47,7 +55,9 @@ export class AudioCapture {
   private systemWorklet: AudioWorkletNode | null = null;
   onChunk: AudioChunkHandler | null = null;
 
-  async start(options: AudioCaptureOptions = { mic: true, system: true }): Promise<void> {
+  async start(options: AudioCaptureOptions = { mic: true, system: true }): Promise<AudioCaptureResult> {
+    const result: AudioCaptureResult = { mic: false, system: false };
+
     // Create AudioContext at target sample rate
     this.audioContext = new AudioContext({ sampleRate: TARGET_SAMPLE_RATE });
 
@@ -58,14 +68,36 @@ export class AudioCapture {
     URL.revokeObjectURL(workletUrl);
 
     if (options.mic) {
-      await this.enableMic(options.micDeviceId);
+      try {
+        await this.enableMic(options.micDeviceId);
+        result.mic = this.hasMic;
+      } catch (err) {
+        result.micError = err instanceof DOMException && err.name === "NotAllowedError"
+          ? "Microphone permission denied"
+          : `Microphone error: ${(err as Error).message}`;
+        console.warn(result.micError);
+      }
     }
 
     if (options.system) {
-      await this.enableSystem().catch((err) => {
-        console.warn("System audio capture unavailable:", err.message);
-      });
+      try {
+        await this.enableSystem();
+        result.system = this.hasSystem;
+      } catch (err) {
+        result.systemError = err instanceof DOMException && err.name === "NotAllowedError"
+          ? "System audio permission denied"
+          : `System audio error: ${(err as Error).message}`;
+        console.warn(result.systemError);
+      }
     }
+
+    // If nothing is capturing, tear down the AudioContext
+    if (!result.mic && !result.system) {
+      this.audioContext.close();
+      this.audioContext = null;
+    }
+
+    return result;
   }
 
   async enableMic(deviceId?: string): Promise<void> {

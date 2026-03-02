@@ -29,6 +29,7 @@ export function StatusBar() {
   const sessionConnected = useSessionStore((s) => s.sessionConnected);
   const recording = useSessionStore((s) => s.recording);
   const recordingStartedAt = useSessionStore((s) => s.recordingStartedAt);
+  const audioWarning = useSessionStore((s) => s.audioWarning);
   const aiStreaming = useSessionStore((s) => s.aiStreaming);
   const currentToolName = useSessionStore((s) => s.currentToolName);
 
@@ -81,6 +82,12 @@ export function StatusBar() {
         <span className="flex items-center gap-1.5 text-red-400">
           <span className="h-1.5 w-1.5 rounded-full bg-red-400 animate-pulse" />
           Recording {formatElapsed(elapsed)}
+        </span>
+      )}
+
+      {audioWarning && (
+        <span className="text-amber-400 truncate max-w-[300px]" title={audioWarning}>
+          {audioWarning}
         </span>
       )}
 

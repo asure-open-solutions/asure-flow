@@ -67,6 +67,7 @@ interface SessionState {
   sessionConnected: boolean;
   recording: boolean;
   recordingStartedAt: number | null;
+  audioWarning: string | null;
 
   // Session list
   sessions: SessionSummary[];
@@ -102,6 +103,7 @@ interface SessionState {
   setAudioConnected: (connected: boolean) => void;
   setSessionConnected: (connected: boolean) => void;
   setRecording: (recording: boolean) => void;
+  setAudioWarning: (warning: string | null) => void;
   setSessions: (sessions: SessionSummary[]) => void;
   handleAIEvent: (event: AIEvent) => void;
   clearAgentLog: () => void;
@@ -168,6 +170,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   sessionConnected: false,
   recording: false,
   recordingStartedAt: null,
+  audioWarning: null,
   sessions: [],
   insightsDrawerOpen: false,
   insightsDrawerTab: "suggestions" as InsightsTab,
@@ -305,7 +308,8 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   setAudioConnected: (connected) => set({ audioConnected: connected }),
   setSessionConnected: (connected) => set({ sessionConnected: connected }),
   setRecording: (recording) =>
-    set({ recording, recordingStartedAt: recording ? Date.now() : null }),
+    set({ recording, recordingStartedAt: recording ? Date.now() : null, ...(!recording && { audioWarning: null }) }),
+  setAudioWarning: (warning) => set({ audioWarning: warning }),
   setSessions: (sessions) => set({ sessions }),
   clearAgentLog: () => set({ agentLog: [] }),
 
@@ -518,6 +522,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
       agentLog: [],
       recording: false,
       recordingStartedAt: null,
+      audioWarning: null,
       insightsDrawerOpen: false,
       insightsDrawerTab: "suggestions" as InsightsTab,
       unseenInsightCount: 0,

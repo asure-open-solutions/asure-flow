@@ -40,6 +40,7 @@ function MainApp() {
   const serverOnline = useSessionStore((s) => s.serverOnline);
   const setServerOnline = useSessionStore((s) => s.setServerOnline);
   const setRecording = useSessionStore((s) => s.setRecording);
+  const setAudioWarning = useSessionStore((s) => s.setAudioWarning);
   const setAudioConnected = useSessionStore((s) => s.setAudioConnected);
   const setSessionConnected = useSessionStore((s) => s.setSessionConnected);
   const addTranscriptEntry = useSessionStore((s) => s.addTranscriptEntry);
@@ -162,7 +163,12 @@ function MainApp() {
     if (!capture || !recording) return;
 
     if (audioToggles.mic) {
-      capture.enableMic();
+      capture.enableMic().catch((err) => {
+        const msg = err instanceof DOMException && err.name === "NotAllowedError"
+          ? "Microphone permission denied"
+          : `Microphone error: ${(err as Error).message}`;
+        setAudioWarning(msg);
+      });
     } else {
       capture.disableMic();
     }
@@ -170,7 +176,12 @@ function MainApp() {
     // Skip client-side system capture when server handles it via loopback
     if (!serverHandlesSystemRef.current) {
       if (audioToggles.system) {
-        capture.enableSystem().catch(() => {});
+        capture.enableSystem().catch((err) => {
+          const msg = err instanceof DOMException && err.name === "NotAllowedError"
+            ? "System audio permission denied"
+            : `System audio error: ${(err as Error).message}`;
+          setAudioWarning(msg);
+        });
       } else {
         capture.disableSystem();
       }
@@ -251,6 +262,33 @@ function MainApp() {
     }
     serverHandlesSystemRef.current = serverHandlesSystem;
 
+    // Start audio capture first — check permissions before connecting WebSocket
+    const capture = new AudioCapture();
+    const wantMic = audioToggles.mic;
+    const wantSystem = audioToggles.system && !serverHandlesSystem;
+
+    const result = await capture.start({
+      mic: wantMic,
+      system: wantSystem,
+      micDeviceId,
+    });
+
+    // If nothing is capturing (and server isn't handling system), bail out
+    const serverHandlesEverything = serverHandlesSystem && !wantMic;
+    if (!result.mic && !result.system && !serverHandlesEverything) {
+      capture.stop();
+      const errors = [result.micError, result.systemError].filter(Boolean).join(". ");
+      setAudioWarning(errors || "No audio sources available");
+      return;
+    }
+
+    // Build a warning for partial captures
+    const warnings: string[] = [];
+    if (wantMic && !result.mic && result.micError) warnings.push(result.micError);
+    if (wantSystem && !result.system && result.systemError) warnings.push(result.systemError);
+    setAudioWarning(warnings.length > 0 ? warnings.join(". ") : null);
+
+    // Audio is capturing — now connect the WebSocket
     const aws = new AudioWebSocket();
     aws.onConnectionChange = setAudioConnected;
     aws.onTranscription = (data) => {
@@ -272,19 +310,13 @@ function MainApp() {
     aws.connect();
     audioWsRef.current = aws;
 
-    const capture = new AudioCapture();
     capture.onChunk = (streamId, pcmData) => {
       aws.sendAudio(streamId, pcmData);
     };
-    await capture.start({
-      mic: audioToggles.mic,
-      system: audioToggles.system && !serverHandlesSystem,
-      micDeviceId,
-    });
     audioCaptureRef.current = capture;
 
     setRecording(true);
-  }, [recording, audioToggles, addTranscriptEntry, relabelSpeaker, setAudioConnected, setRecording]);
+  }, [recording, audioToggles, addTranscriptEntry, relabelSpeaker, setAudioConnected, setAudioWarning, setRecording]);
 
   const stopRecording = useCallback(() => {
     audioCaptureRef.current?.stop();
