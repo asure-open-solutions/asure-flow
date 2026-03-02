@@ -15,6 +15,7 @@ from asure_flow.agent.loop import run_agent
 from asure_flow.agent.presets import build_system_prompt, DEFAULT_PRESET
 from asure_flow.agent.router import get_router
 from asure_flow.config import settings
+from asure_flow.profile import profile
 from asure_flow.search.embeddings import embedding_engine
 from asure_flow.search.index import get_index
 from asure_flow.sessions.manager import session_manager
@@ -84,10 +85,10 @@ class FeatureToggles:
 
 def _resolve_system_prompt(toggles: FeatureToggles) -> str:
     """Resolve the system prompt — custom prompt verbatim, or dynamic build from preset + toggles."""
-    if settings.custom_system_prompt:
-        return settings.custom_system_prompt
+    if profile.custom_system_prompt:
+        return profile.custom_system_prompt
 
-    preset_id = settings.ai_preset or DEFAULT_PRESET
+    preset_id = profile.ai_preset or DEFAULT_PRESET
     toggles_dict = {
         k: v for k, v in asdict(toggles).items() if k != "deep_think"
     }
@@ -194,7 +195,7 @@ async def ws_session(websocket: WebSocket, session_id: str):
         system_prompt = _resolve_system_prompt(toggles)
         deep_think_enabled = toggles.deep_think != "off"
         session_context = session.context
-        effective_ws = toggles.web_search and not settings.privacy_mode
+        effective_ws = toggles.web_search and not profile.privacy_mode
 
         # Combine all buffered entries
         transcript_text = "\n".join(
@@ -338,7 +339,7 @@ async def ws_session(websocket: WebSocket, session_id: str):
                     continue
 
                 # PII redaction
-                if settings.pii_redaction or settings.privacy_mode:
+                if profile.pii_redaction or profile.privacy_mode:
                     from asure_flow.safety.pii import redact_pii
                     text, pii_matches = redact_pii(text)
                     if pii_matches:

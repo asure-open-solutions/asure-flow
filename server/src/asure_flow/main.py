@@ -12,6 +12,7 @@ from asure_flow.agent.router import init_router
 from asure_flow.api.routes import router as api_router
 from asure_flow.audio.manager import audio_capture_manager
 from asure_flow.config import settings
+from asure_flow.profile import profile
 from asure_flow.transcription.engine import whisper_engine
 from asure_flow.ws.audio import router as audio_ws_router
 from asure_flow.ws.session import router as session_ws_router
@@ -46,7 +47,7 @@ async def lifespan(app: FastAPI):
         logger.info("Embedding engine unavailable — search will use substring matching")
 
     # Load diarization engine if enabled
-    if settings.diarization_enabled:
+    if profile.diarization_enabled:
         try:
             from asure_flow.transcription.diarization import diarization_engine
             await diarization_engine.load()

@@ -13,7 +13,7 @@ import { OverlayHUD } from "@/components/overlay/OverlayHUD";
 import { WindowControls } from "@/components/WindowControls";
 import { AudioCapture } from "@/services/audioCapture";
 import { AudioWebSocket, SessionWebSocket } from "@/services/websocket";
-import { setServerUrl, getServerConfig, checkServerHealth, renameSession, createSession, listSessions } from "@/services/api";
+import { setServerUrl, getServerConfig, getProfile, checkServerHealth, renameSession, createSession, listSessions } from "@/services/api";
 import { cn } from "@/lib/utils";
 import {
   Mic,
@@ -97,12 +97,17 @@ function MainApp() {
     };
   }, [serverOnline, serverUrl, hydrated]);
 
-  // Load server config once on first successful connection to sync server-authoritative settings
+  // Load server config + user profile once on first successful connection
   useEffect(() => {
     if (serverOnline && !serverConfigLoaded.current) {
       serverConfigLoaded.current = true;
+      // Server config: admin/hardware settings (whisper model, providers, etc.)
       getServerConfig()
         .then((cfg) => useSettingsStore.getState().initFromServerConfig(cfg))
+        .catch(() => {});
+      // User profile: portable preferences (toggles, AI preset, privacy prefs)
+      getProfile()
+        .then((p) => useSettingsStore.getState().initFromServerProfile(p))
         .catch(() => {});
     }
   }, [serverOnline]);

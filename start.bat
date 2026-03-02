@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 setlocal
 title AsuréFlow
 cd /d "%~dp0"

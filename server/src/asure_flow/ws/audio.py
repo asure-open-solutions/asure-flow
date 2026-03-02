@@ -7,6 +7,7 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from asure_flow.config import settings
+from asure_flow.profile import profile
 from asure_flow.transcription.engine import AudioBuffer, pcm16_bytes_to_float32, whisper_engine
 
 logger = logging.getLogger(__name__)
@@ -144,7 +145,7 @@ async def _handle_mixed_capture(websocket: WebSocket) -> None:
 
 def _get_speaker_tracker():
     """Create a SpeakerTracker if diarization is enabled and available."""
-    if not settings.diarization_enabled:
+    if not profile.diarization_enabled:
         return None
     try:
         from asure_flow.transcription.diarization import diarization_engine

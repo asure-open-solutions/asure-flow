@@ -7,6 +7,7 @@ import type {
   OverlaySettings,
   ServerConfig,
   SessionSettings,
+  UserProfile,
 } from "@/types";
 
 /**
@@ -31,7 +32,21 @@ function getEnvServerUrl(): string | null {
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
+  // Tier 3: device-local
   serverUrl: "http://localhost:8000",
+  audioToggles: { mic: true, system: true },
+  overlaySettings: {
+    contentProtection: true,
+    showTranscript: true,
+    showFactChecks: true,
+    showSuggestions: true,
+    showNotes: true,
+    overlayMode: "topbar" as const,
+    cardPositions: {},
+  },
+  micDeviceId: null,
+  systemDeviceId: null,
+  // Tier 2: user profile (defaults used before server profile is fetched)
   featureToggles: {
     fact_checking: true,
     suggestions: true,
@@ -43,20 +58,10 @@ const DEFAULT_SETTINGS: AppSettings = {
     deep_think: "off" as const,
   },
   diarization: false,
-  audioToggles: { mic: true, system: true },
-  overlaySettings: {
-    contentProtection: true,
-    showTranscript: true,
-    showFactChecks: true,
-    showSuggestions: true,
-    showNotes: true,
-    overlayMode: "topbar" as const,
-    cardPositions: {},
-  },
   piiRedaction: false,
   privacyMode: false,
-  micDeviceId: null,
-  systemDeviceId: null,
+  aiPreset: "general",
+  customSystemPrompt: null,
 };
 
 interface SettingsState extends AppSettings {
@@ -73,10 +78,14 @@ interface SettingsState extends AppSettings {
   setOverlaySettings: (settings: Partial<OverlaySettings>) => void;
   setPiiRedaction: (enabled: boolean) => void;
   setPrivacyMode: (enabled: boolean) => void;
+  setAiPreset: (preset: string) => void;
+  setCustomSystemPrompt: (prompt: string | null) => void;
   setMicDeviceId: (id: string | null) => void;
   setSystemDeviceId: (id: string | null) => void;
-  /** Sync server-authoritative values (piiRedaction, privacyMode) from a fetched ServerConfig. */
+  /** Sync server-admin values (locked_settings) from a fetched ServerConfig. */
   initFromServerConfig: (config: ServerConfig) => void;
+  /** Sync user profile (feature toggles, AI preset, privacy prefs) from server profile. */
+  initFromServerProfile: (profile: UserProfile) => void;
   resetAll: () => void;
 
   // Session overrides management
@@ -132,19 +141,41 @@ export const useSettingsStore = create<SettingsState>()(
             : {}),
         })),
 
+      setAiPreset: (preset) => set({ aiPreset: preset }),
+
+      setCustomSystemPrompt: (prompt) => set({ customSystemPrompt: prompt }),
+
       setMicDeviceId: (id) => set({ micDeviceId: id }),
 
       setSystemDeviceId: (id) => set({ systemDeviceId: id }),
 
-      initFromServerConfig: (config) =>
-        set((state) => ({
-          piiRedaction: config.pii_redaction,
-          privacyMode: config.privacy_mode,
-          // Apply privacy mode side-effects if it's being activated
-          ...(config.privacy_mode && !state.privacyMode
-            ? { featureToggles: { ...state.featureToggles, web_search: false } }
-            : {}),
-        })),
+      initFromServerConfig: (_config) => {
+        // ServerConfig no longer carries user-preference fields — those come via
+        // initFromServerProfile.  This hook remains for future server-admin fields
+        // that need client-side reflection (e.g. locked_settings UI feedback).
+      },
+
+      initFromServerProfile: (serverProfile) =>
+        set((state) => {
+          const privacyModeActivated = serverProfile.privacy_mode && !state.privacyMode;
+          return {
+            featureToggles: {
+              fact_checking: serverProfile.fact_checking,
+              suggestions: serverProfile.suggestions,
+              notes: serverProfile.notes,
+              search_transcript: serverProfile.search_transcript,
+              search_sessions: serverProfile.search_sessions,
+              web_search: privacyModeActivated ? false : serverProfile.web_search,
+              format_code: serverProfile.format_code,
+              deep_think: serverProfile.deep_think,
+            },
+            diarization: serverProfile.diarization_enabled,
+            piiRedaction: serverProfile.pii_redaction,
+            privacyMode: serverProfile.privacy_mode,
+            aiPreset: serverProfile.ai_preset,
+            customSystemPrompt: serverProfile.custom_system_prompt,
+          };
+        }),
 
       resetAll: () => set({ ...DEFAULT_SETTINGS, sessionOverrides: null }),
 
@@ -203,9 +234,11 @@ export const useSettingsStore = create<SettingsState>()(
     {
       name: "asure-flow-settings",
       // Don't persist sessionOverrides — they come from the loaded session.
-      // Don't persist piiRedaction/privacyMode — server is authoritative; loaded via initFromServerConfig.
+      // Profile fields (featureToggles, diarization, piiRedaction, privacyMode, aiPreset,
+      // customSystemPrompt) are cached in localStorage for fast startup but are always
+      // overridden by initFromServerProfile() once the server responds.
       partialize: (state) => {
-        const { sessionOverrides, piiRedaction, privacyMode, _hydrated, ...rest } = state;
+        const { sessionOverrides, _hydrated, ...rest } = state;
         return rest;
       },
       onRehydrateStorage: () => (state) => {
@@ -221,6 +254,7 @@ export const useSettingsStore = create<SettingsState>()(
           ...(persisted as object),
           // Env var takes precedence over persisted URL when explicitly set
           ...(envUrl ? { serverUrl: envUrl } : {}),
+          // Deep-merge nested objects so new keys from defaults are preserved
           overlaySettings: {
             ...(current as SettingsState).overlaySettings,
             ...((persisted as SettingsState).overlaySettings ?? {}),

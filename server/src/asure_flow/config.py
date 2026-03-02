@@ -17,6 +17,8 @@ _DEFAULT_PROVIDER_ORDER = [
 ]
 
 # Fields that are persisted to ~/.asure-flow/config.json via the UI
+# NOTE: user-preference fields (feature toggles, AI preset, privacy prefs, diarization)
+# live in profile.py / profile.json — not here.
 _PERSISTABLE_FIELDS = frozenset({
     "openrouter_api_key", "openrouter_model",
     "openai_api_key", "openai_model",
@@ -29,17 +31,12 @@ _PERSISTABLE_FIELDS = frozenset({
     "openrouter_enabled", "openai_enabled", "gemini_enabled",
     "hf_enabled", "github_enabled", "custom_enabled",
     "provider_order",
-    # Audio capture
+    # Audio capture (server-mode device IDs — only used when audio_capture_source="server")
     "audio_capture_source", "mic_device_id", "system_device_id",
-    # AI preset + custom prompt
-    "ai_preset", "custom_system_prompt",
     # VAD flush
     "vad_silence_ms", "vad_min_buffer_sec", "vad_max_buffer_sec",
-    # Diarization
-    "diarization_enabled", "hf_diarization_token", "diarization_device",
-    "diarization_buffer_sec",
-    # Safety
-    "pii_redaction", "privacy_mode",
+    # Diarization hardware (secrets + hardware — preferences are in profile.json)
+    "hf_diarization_token", "diarization_device", "diarization_buffer_sec",
     # Admin locks
     "locked_settings",
 })
@@ -113,6 +110,9 @@ class Settings(BaseSettings):
     )
 
     # ── Audio Capture ──
+    # audio_capture_source: deployment decision — "client" streams PCM to server,
+    # "server" captures audio locally on the server machine.
+    # mic_device_id / system_device_id: only relevant when audio_capture_source="server".
     audio_capture_source: str = "client"  # "client" | "server"
     mic_device_id: Optional[str] = None
     system_device_id: Optional[str] = None
@@ -122,19 +122,10 @@ class Settings(BaseSettings):
     vad_min_buffer_sec: float = 1.5  # don't flush until at least this much audio
     vad_max_buffer_sec: float = 30.0  # hard max — force flush even mid-speech
 
-    # ── Diarization ──
-    diarization_enabled: bool = False
+    # ── Diarization hardware (secrets + device — user preference is in profile.py) ──
     hf_diarization_token: Optional[str] = None
     diarization_device: Optional[str] = None  # "cpu" | "cuda" | None (auto)
     diarization_buffer_sec: float = 20.0  # rolling window size for speaker tracking
-
-    # ── AI Preset ──
-    ai_preset: str = "general"
-    custom_system_prompt: Optional[str] = None
-
-    # ── Safety ──
-    pii_redaction: bool = False
-    privacy_mode: bool = False  # Master toggle: disables web_search + enables PII redaction
 
     # ── Admin ──
     locked_settings: list[str] = Field(default_factory=list)
@@ -178,16 +169,13 @@ class Settings(BaseSettings):
             "whisper_compute_type": self.detect_compute_type(),
             "whisper_language": self.whisper_language,
             "provider_order": self.provider_order,
+            # Audio capture mode + server-side device IDs (only relevant when audio_capture_source="server")
             "audio_capture_source": self.audio_capture_source,
             "mic_device_id": self.mic_device_id,
             "system_device_id": self.system_device_id,
-            "ai_preset": self.ai_preset,
-            "custom_system_prompt": self.custom_system_prompt,
-            "diarization_enabled": self.diarization_enabled,
+            # Diarization hardware info (device preference is in profile, not here)
             "diarization_device": self.diarization_device,
             "hf_diarization_token_hint": _mask(self.hf_diarization_token),
-            "pii_redaction": self.pii_redaction,
-            "privacy_mode": self.privacy_mode,
             "locked_settings": self.locked_settings,
             "llm_providers": {
                 "openrouter": {

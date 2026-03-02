@@ -7,6 +7,7 @@ import type {
   SessionSummary,
   SessionSettings,
   ServerConfig,
+  UserProfile,
   AudioDeviceInfo,
   ClientAudioDevice,
   Preset,
@@ -203,6 +204,21 @@ export async function resetServerConfig(): Promise<ServerConfig> {
 
 export async function getPresets(): Promise<Preset[]> {
   return request("/api/config/presets");
+}
+
+// ── User Profile ──
+
+export async function getProfile(): Promise<UserProfile> {
+  return request("/api/profile");
+}
+
+export async function updateProfile(
+  changes: Partial<UserProfile>,
+): Promise<UserProfile> {
+  return request("/api/profile", {
+    method: "PUT",
+    body: JSON.stringify(changes),
+  });
 }
 
 // ── Search ──

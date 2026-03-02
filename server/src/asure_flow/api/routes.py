@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from asure_flow.agent.router import get_router, init_router
 from asure_flow.config import settings, update_settings, reset_settings
+from asure_flow.profile import profile, update_profile, reset_profile
 from asure_flow.sessions.manager import session_manager
 from asure_flow.sessions.models import Session, SessionSettings, SessionSummary
 from asure_flow.transcription.engine import whisper_engine
@@ -237,6 +238,10 @@ async def generate_followup_endpoint(session_id: str, body: GenerateFollowupRequ
 
 
 class UpdateConfigRequest(BaseModel):
+    """Server-admin settings (Tier 1): hardware, secrets, provider configuration.
+
+    User preferences (feature toggles, AI preset, privacy) are in PUT /api/profile.
+    """
     # LLM providers (all optional — only send what changed)
     openrouter_api_key: Optional[str] = None
     openrouter_model: Optional[str] = None
@@ -263,17 +268,35 @@ class UpdateConfigRequest(BaseModel):
     # Transcription
     whisper_model: Optional[str] = None
     whisper_device: Optional[str] = None  # "cuda" | "cpu"
-    # Audio capture
+    # Audio capture (server-mode device IDs — used when audio_capture_source="server")
     audio_capture_source: Optional[str] = None  # "client" | "server"
     mic_device_id: Optional[str] = None
     system_device_id: Optional[str] = None
-    # AI preset
-    ai_preset: Optional[str] = None
-    custom_system_prompt: Optional[str] = None
-    # Diarization
-    diarization_enabled: Optional[bool] = None
+    # Diarization hardware
     hf_diarization_token: Optional[str] = None
     diarization_device: Optional[str] = None
+
+
+class UpdateProfileRequest(BaseModel):
+    """User profile settings (Tier 2): portable preferences synced across client machines.
+
+    These follow the user — changing them on one client machine affects all clients
+    connected to the same server.
+    """
+    # Feature toggles
+    fact_checking: Optional[bool] = None
+    suggestions: Optional[bool] = None
+    notes: Optional[bool] = None
+    search_transcript: Optional[bool] = None
+    search_sessions: Optional[bool] = None
+    web_search: Optional[bool] = None
+    format_code: Optional[bool] = None
+    deep_think: Optional[str] = None  # "off" | "auto" | "always"
+    # AI behaviour
+    ai_preset: Optional[str] = None
+    custom_system_prompt: Optional[str] = None
+    # Diarization preference
+    diarization_enabled: Optional[bool] = None
     # Safety
     pii_redaction: Optional[bool] = None
     privacy_mode: Optional[bool] = None
@@ -344,12 +367,48 @@ async def list_presets():
 
 @router.post("/config/reset")
 async def reset_config():
-    """Reset all server settings to defaults and reload."""
+    """Reset all server-admin settings and user profile to defaults, then reload."""
     reset_settings()
+    reset_profile()
     init_router()
     await whisper_engine.load()
-    logger.info("Config reset to defaults, router and whisper reloaded")
+    logger.info("Config and profile reset to defaults, router and whisper reloaded")
     return settings.to_client_config()
+
+
+# ── User Profile ──
+
+
+@router.get("/profile")
+async def get_profile():
+    """Fetch user profile (portable preferences synced across client machines)."""
+    return profile.to_dict()
+
+
+@router.put("/profile")
+async def update_profile_endpoint(body: UpdateProfileRequest):
+    """Update user profile settings."""
+    changes = body.model_dump(exclude_none=True)
+    if not changes:
+        return profile.to_dict()
+
+    # Reject changes to admin-locked profile fields
+    if settings.locked_settings:
+        blocked = [k for k in changes if k in settings.locked_settings]
+        if blocked:
+            raise HTTPException(
+                403,
+                f"Settings are locked by server admin: {', '.join(sorted(blocked))}",
+            )
+
+    # Apply privacy_mode side-effects
+    if changes.get("privacy_mode"):
+        changes.setdefault("pii_redaction", True)
+        changes.setdefault("web_search", False)
+
+    update_profile(**changes)
+    logger.info("Profile updated: %s", list(changes.keys()))
+    return profile.to_dict()
 
 
 # ── Audio Devices ──

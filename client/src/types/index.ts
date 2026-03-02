@@ -193,19 +193,46 @@ export interface OverlaySettings {
   };
 }
 
+// ── User Profile (from GET /api/profile) ──
+// Tier 2: portable user preferences, synced across all clients via the server.
+
+export interface UserProfile {
+  // Feature toggles
+  fact_checking: boolean;
+  suggestions: boolean;
+  notes: boolean;
+  search_transcript: boolean;
+  search_sessions: boolean;
+  web_search: boolean;
+  format_code: boolean;
+  deep_think: "off" | "auto" | "always";
+  // AI behaviour
+  ai_preset: string;
+  custom_system_prompt: string | null;
+  // Diarization preference
+  diarization_enabled: boolean;
+  // Safety
+  pii_redaction: boolean;
+  privacy_mode: boolean;
+}
+
 // ── Settings ──
 
 export interface AppSettings {
+  // Tier 3: device-local (localStorage only — never synced to server)
   serverUrl: string;
-  featureToggles: FeatureToggles;
-  diarization: boolean;
   audioToggles: AudioToggles;
   overlaySettings: OverlaySettings;
-  piiRedaction: boolean;
-  privacyMode: boolean;
-  // Client-local audio device selection (used when audio_capture_source === "client")
   micDeviceId: string | null;
   systemDeviceId: string | null;
+
+  // Tier 2: user profile (server-synced, cached in localStorage for fast startup)
+  featureToggles: FeatureToggles;
+  diarization: boolean;
+  piiRedaction: boolean;
+  privacyMode: boolean;
+  aiPreset: string;
+  customSystemPrompt: string | null;
 }
 
 // ── Presets ──
@@ -228,23 +255,26 @@ export interface LLMProviderConfig {
 }
 
 export interface ServerConfig {
+  // Server identity
   server_platform: string;
   hostname: string;
+  // Transcription hardware
   whisper_model: string;
   whisper_device: string;
   whisper_compute_type: string;
   whisper_language: string | null;
+  // LLM routing
   provider_order: string[];
+  // Audio capture mode + server-side device IDs (only relevant when audio_capture_source="server")
   audio_capture_source: "client" | "server";
+  /** Server microphone device (used when audio_capture_source="server"). */
   mic_device_id: string | null;
+  /** Set when server captures system audio via loopback — client should not duplicate. */
   system_device_id: string | null;
-  ai_preset: string;
-  custom_system_prompt: string | null;
-  diarization_enabled: boolean;
+  // Diarization hardware
   diarization_device: string | null;
   hf_diarization_token_hint: string;
-  pii_redaction: boolean;
-  privacy_mode: boolean;
+  // Admin
   locked_settings: string[];
   llm_providers: Record<string, LLMProviderConfig>;
 }

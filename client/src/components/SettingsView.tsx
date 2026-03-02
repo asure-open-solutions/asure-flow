@@ -5,12 +5,14 @@ import {
   getServerConfig,
   updateServerConfig,
   resetServerConfig,
+  getProfile,
+  updateProfile,
   getServerAudioDevices,
   getClientAudioInputDevices,
   getPresets,
   updateSessionSettings,
 } from "@/services/api";
-import type { ServerConfig, AudioDeviceInfo, ClientAudioDevice, Preset, SessionSettings } from "@/types";
+import type { ServerConfig, UserProfile, AudioDeviceInfo, ClientAudioDevice, Preset, SessionSettings } from "@/types";
 import { isSameMachine } from "@/lib/sameMachine";
 import { cn } from "@/lib/utils";
 import {
@@ -658,20 +660,20 @@ const WHISPER_MODELS = [
 ];
 
 function AIToolsTab() {
-  const { featureToggles, setFeatureToggles, getEffectiveToggles } = useSettingsStore();
+  const { featureToggles, setFeatureToggles, setAiPreset, setCustomSystemPrompt, getEffectiveToggles } = useSettingsStore();
   const effectiveToggles = useSettingsStore((s) => s.getEffectiveToggles());
   const [presets, setPresets] = useState<Preset[]>([]);
-  const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null);
+  const [serverProfile, setServerProfile] = useState<UserProfile | null>(null);
   const [customPrompt, setCustomPrompt] = useState("");
   const [showCustomPrompt, setShowCustomPrompt] = useState(false);
   const [savingPrompt, setSavingPrompt] = useState(false);
 
   useEffect(() => {
     getPresets().then(setPresets).catch(() => {});
-    getServerConfig().then((config) => {
-      setServerConfig(config);
-      if (config.custom_system_prompt) {
-        setCustomPrompt(config.custom_system_prompt);
+    getProfile().then((p) => {
+      setServerProfile(p);
+      if (p.custom_system_prompt) {
+        setCustomPrompt(p.custom_system_prompt);
         setShowCustomPrompt(true);
       }
     }).catch(() => {});
@@ -679,8 +681,10 @@ function AIToolsTab() {
 
   const handlePresetSelect = async (presetId: string) => {
     try {
-      const config = await updateServerConfig({ ai_preset: presetId, custom_system_prompt: null });
-      setServerConfig(config);
+      const updated = await updateProfile({ ai_preset: presetId, custom_system_prompt: null });
+      setServerProfile(updated);
+      setAiPreset(presetId);
+      setCustomSystemPrompt(null);
       setShowCustomPrompt(false);
       setCustomPrompt("");
       // Apply preset's default tools
@@ -696,8 +700,9 @@ function AIToolsTab() {
   const handleSaveCustomPrompt = async () => {
     setSavingPrompt(true);
     try {
-      const config = await updateServerConfig({ custom_system_prompt: customPrompt });
-      setServerConfig(config);
+      const updated = await updateProfile({ custom_system_prompt: customPrompt });
+      setServerProfile(updated);
+      setCustomSystemPrompt(customPrompt);
     } catch (err) {
       console.error("Failed to save custom prompt:", err);
     } finally {
@@ -707,8 +712,9 @@ function AIToolsTab() {
 
   const handleClearCustomPrompt = async () => {
     try {
-      const config = await updateServerConfig({ custom_system_prompt: null });
-      setServerConfig(config);
+      const updated = await updateProfile({ custom_system_prompt: null });
+      setServerProfile(updated);
+      setCustomSystemPrompt(null);
       setCustomPrompt("");
       setShowCustomPrompt(false);
     } catch (err) {
@@ -747,7 +753,7 @@ function AIToolsTab() {
               onClick={() => handlePresetSelect(preset.id)}
               className={cn(
                 "rounded-lg border px-3 py-2.5 text-left transition-colors",
-                serverConfig?.ai_preset === preset.id && !showCustomPrompt
+                serverProfile?.ai_preset === preset.id && !showCustomPrompt
                   ? "border-blue-500/30 bg-blue-500/10"
                   : "border-white/10 bg-white/[0.02] hover:bg-white/5",
               )}
@@ -814,7 +820,10 @@ function AIToolsTab() {
               description={desc}
               settingsKey={key}
               checked={effectiveToggles[key]}
-              onGlobalChange={(v) => setFeatureToggles({ [key]: v })}
+              onGlobalChange={(v) => {
+                setFeatureToggles({ [key]: v });
+                updateProfile({ [key]: v }).catch(() => {});
+              }}
             />
           ))}
         </div>
@@ -831,7 +840,10 @@ function AIToolsTab() {
               description={desc}
               settingsKey={key}
               checked={effectiveToggles[key]}
-              onGlobalChange={(v) => setFeatureToggles({ [key]: v })}
+              onGlobalChange={(v) => {
+                setFeatureToggles({ [key]: v });
+                updateProfile({ [key]: v }).catch(() => {});
+              }}
             />
           ))}
         </div>
@@ -865,6 +877,7 @@ function DeepThinkSelector() {
       updateSessionSettings(currentSession.id, { deep_think: value }).catch(() => {});
     } else {
       setFeatureToggles({ deep_think: value });
+      updateProfile({ deep_think: value }).catch(() => {});
     }
   };
 
@@ -1014,8 +1027,7 @@ function AudioTab() {
           onGlobalChange={async (v) => {
             setDiarization(v);
             try {
-              const config = await updateServerConfig({ diarization_enabled: v });
-              setServerConfig(config);
+              await updateProfile({ diarization_enabled: v });
             } catch (err) {
               console.error("Failed to update diarization:", err);
             }
@@ -1327,9 +1339,9 @@ function PrivacyTab() {
           onGlobalChange={async (v) => {
             setPrivacyMode(v);
             try {
-              // Sync to server — privacy_mode is server-authoritative.
-              // When enabling, also sync pii_redaction since setPrivacyMode forces it on.
-              await updateServerConfig({ privacy_mode: v, ...(v ? { pii_redaction: true } : {}) });
+              // Server profile is authoritative for privacy_mode.
+              // Server applies privacy_mode side-effects (pii_redaction=true, web_search=false).
+              await updateProfile({ privacy_mode: v });
             } catch (err) {
               console.error("Failed to sync privacy mode to server:", err);
             }
@@ -1348,7 +1360,7 @@ function PrivacyTab() {
           onGlobalChange={async (v) => {
             setPiiRedaction(v);
             try {
-              await updateServerConfig({ pii_redaction: v });
+              await updateProfile({ pii_redaction: v });
             } catch (err) {
               console.error("Failed to sync PII redaction to server:", err);
             }

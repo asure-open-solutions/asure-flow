@@ -81,7 +81,7 @@ function rasterize(size: number): Buffer {
   const minX = 57, maxX = 181, minY = 61, maxY = 176;
   const cx = (minX + maxX) / 2;
   const cy = (minY + maxY) / 2;
-  const span = Math.max(maxX - minX, maxY - minY) * 1.12; // 12% padding
+  const span = Math.max(maxX - minX, maxY - minY) * 1.4; // ~28% padding — ~72% fill (macOS HIG)
 
   // 2x2 super-sampling offsets for anti-aliasing
   const aa = [0.25, 0.75];
@@ -113,9 +113,16 @@ function rasterize(size: number): Buffer {
 let _outline: Pt[] | null = null;
 
 export function createTrayIcon(): NativeImage {
-  return nativeImage.createFromBitmap(rasterize(32), { width: 32, height: 32 });
+  // macOS menu bar icons: 22px logical (system scales for Retina)
+  const size = process.platform === "darwin" ? 22 : 32;
+  const img = nativeImage.createFromBitmap(rasterize(size), { width: size, height: size });
+  // Template image lets macOS invert for dark/light menu bar automatically
+  if (process.platform === "darwin") img.setTemplateImage(true);
+  return img;
 }
 
 export function createAppIcon(): NativeImage {
-  return nativeImage.createFromBitmap(rasterize(256), { width: 256, height: 256 });
+  // 512px for sharp Retina rendering on macOS; 256px is sufficient on other platforms
+  const size = process.platform === "darwin" ? 512 : 256;
+  return nativeImage.createFromBitmap(rasterize(size), { width: size, height: size });
 }
