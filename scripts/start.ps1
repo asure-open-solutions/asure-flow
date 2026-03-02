@@ -1,5 +1,5 @@
-## Asuré Flow — Start server + client
-## Right-click → "Run with PowerShell", or run: powershell -File scripts\start.ps1
+## Asure Flow -- Start server + client
+## Right-click -> "Run with PowerShell", or run: powershell -File scripts\start.ps1
 
 $ErrorActionPreference = "Stop"
 $Root = Resolve-Path "$PSScriptRoot\.."
@@ -36,7 +36,7 @@ function Get-LanIP {
 }
 $LanIP = Get-LanIP
 
-# ── Start server ──
+# -- Start server --
 
 Write-Host "-> Starting server on ${Host_}:${Port}..." -ForegroundColor Green
 $serverJob = Start-Job -ScriptBlock {
@@ -47,7 +47,7 @@ $serverJob = Start-Job -ScriptBlock {
         --host $host_ --port $port --reload --ws-max-size 1048576
 } -ArgumentList $Root, $Host_, $Port
 
-# ── Start client ──
+# -- Start client --
 
 Write-Host "-> Starting client..." -ForegroundColor Green
 $clientJob = Start-Job -ScriptBlock {

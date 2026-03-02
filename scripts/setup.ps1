@@ -1,5 +1,5 @@
-## Asuré Flow — One-click setup for Windows
-## Right-click this file → "Run with PowerShell", or run: powershell -File scripts\setup.ps1
+## Asure Flow -- One-click setup for Windows
+## Right-click this file -> "Run with PowerShell", or run: powershell -File scripts\setup.ps1
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -11,7 +11,7 @@ Write-Host ""
 Write-Host "=== Asure Flow Setup ===" -ForegroundColor Cyan
 Write-Host ""
 
-# ── Check prerequisites ──
+# -- Check prerequisites --
 
 function Test-Command($cmd, $installUrl) {
     if (-not (Get-Command $cmd -ErrorAction SilentlyContinue)) {
@@ -26,7 +26,7 @@ function Test-Command($cmd, $installUrl) {
 Test-Command "python" "https://www.python.org/downloads/"
 Test-Command "node"   "https://nodejs.org/"
 
-# ── Python server ──
+# -- Python server --
 
 Write-Host "-> Setting up Python server..." -ForegroundColor Green
 Set-Location "$Root\server"
@@ -49,14 +49,14 @@ if (Get-Command "uv" -ErrorAction SilentlyContinue) {
 
 Write-Host "   Server dependencies installed." -ForegroundColor Green
 
-# ── Client ──
+# -- Client --
 
 Write-Host "-> Setting up Electron client..." -ForegroundColor Green
 Set-Location "$Root\client"
 npm install
 Write-Host "   Client dependencies installed." -ForegroundColor Green
 
-# ── .env ──
+# -- .env --
 
 Set-Location $Root
 if (-not (Test-Path ".env")) {

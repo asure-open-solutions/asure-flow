@@ -1,16 +1,16 @@
-## Asuré Flow — Start server only (Windows)
+## Asure Flow -- Start server only (Windows)
 ## Usage: powershell -File scripts\start-server.ps1
 
 $ErrorActionPreference = "Stop"
 $Root = Resolve-Path "$PSScriptRoot\.."
 
 Write-Host ""
-Write-Host "=== Asure Flow — Server ===" -ForegroundColor Cyan
+Write-Host "=== Asure Flow -- Server ===" -ForegroundColor Cyan
 Write-Host ""
 
 # Auto-setup on first run
 if (-not (Test-Path "$Root\server\.venv")) {
-    Write-Host "First run detected — running setup..." -ForegroundColor Yellow
+    Write-Host "First run detected -- running setup..." -ForegroundColor Yellow
     & powershell -ExecutionPolicy Bypass -File "$Root\scripts\setup.ps1"
 }
 

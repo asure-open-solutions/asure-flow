@@ -1,4 +1,4 @@
-## Asuré Flow — Start client only (Windows)
+## Asure Flow -- Start client only (Windows)
 ## Usage: powershell -File scripts\start-client.ps1 -Server http://192.168.1.50:8000
 ##    or: $env:ASUREFLOW_SERVER="http://192.168.1.50:8000"; .\scripts\start-client.ps1
 
@@ -10,7 +10,7 @@ $ErrorActionPreference = "Stop"
 $Root = Resolve-Path "$PSScriptRoot\.."
 
 Write-Host ""
-Write-Host "=== Asuré Flow — Client ===" -ForegroundColor Cyan
+Write-Host "=== Asure Flow -- Client ===" -ForegroundColor Cyan
 Write-Host ""
 
 # Accept server URL from: -Server param > env var > default
@@ -24,7 +24,7 @@ $ServerUrl = $env:ASUREFLOW_SERVER
 
 # Auto-install on first run
 if (-not (Test-Path "$Root\client\node_modules")) {
-    Write-Host "First run — installing client dependencies..." -ForegroundColor Yellow
+    Write-Host "First run -- installing client dependencies..." -ForegroundColor Yellow
     Set-Location "$Root\client"
     npm install
     Write-Host ""
@@ -33,7 +33,7 @@ if (-not (Test-Path "$Root\client\node_modules")) {
 Write-Host "  Connecting to server: $ServerUrl" -ForegroundColor White
 Write-Host ""
 
-# Verify server is reachable (non-blocking — just a warning)
+# Verify server is reachable (non-blocking -- just a warning)
 try {
     $response = Invoke-WebRequest -Uri "$ServerUrl/api/health" -TimeoutSec 3 -ErrorAction SilentlyContinue
     if ($response.StatusCode -eq 200) {
