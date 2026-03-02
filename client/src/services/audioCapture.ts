@@ -26,19 +26,62 @@ export interface AudioCaptureResult {
 }
 
 // AudioWorklet processor code (inline — registered as a blob URL)
+// Resamples from the AudioContext's native sample rate down to 16 kHz
+// before converting float32 → int16 PCM and posting to the main thread.
 const WORKLET_CODE = `
 class PCMProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this._resampleRatio = sampleRate / 16000;
+    this._resampleBuffer = new Float32Array(0);
+  }
+
   process(inputs) {
     const input = inputs[0];
-    if (input && input[0] && input[0].length > 0) {
-      // Convert float32 to int16
-      const float32 = input[0];
+    if (!input || !input[0] || input[0].length === 0) return true;
+
+    const float32 = input[0];
+
+    // Fast path: no resampling needed
+    if (sampleRate === 16000) {
       const int16 = new Int16Array(float32.length);
       for (let i = 0; i < float32.length; i++) {
         int16[i] = Math.max(-32768, Math.min(32767, Math.round(float32[i] * 32767)));
       }
       this.port.postMessage({ pcmData: int16 }, [int16.buffer]);
+      return true;
     }
+
+    // Accumulate input and downsample to 16 kHz
+    const prev = this._resampleBuffer;
+    const combined = new Float32Array(prev.length + float32.length);
+    combined.set(prev);
+    combined.set(float32, prev.length);
+
+    const ratio = this._resampleRatio;
+    const outLen = Math.floor(combined.length / ratio);
+    if (outLen === 0) {
+      this._resampleBuffer = combined;
+      return true;
+    }
+
+    const int16 = new Int16Array(outLen);
+    for (let i = 0; i < outLen; i++) {
+      const srcIdx = i * ratio;
+      const idx = Math.floor(srcIdx);
+      const frac = srcIdx - idx;
+      // Linear interpolation
+      const s0 = combined[idx];
+      const s1 = idx + 1 < combined.length ? combined[idx + 1] : s0;
+      const sample = s0 + frac * (s1 - s0);
+      int16[i] = Math.max(-32768, Math.min(32767, Math.round(sample * 32767)));
+    }
+
+    // Keep unconsumed tail for next call
+    const consumed = Math.floor(outLen * ratio);
+    this._resampleBuffer = combined.slice(consumed);
+
+    this.port.postMessage({ pcmData: int16 }, [int16.buffer]);
     return true;
   }
 }
@@ -58,8 +101,11 @@ export class AudioCapture {
   async start(options: AudioCaptureOptions = { mic: true, system: true }): Promise<AudioCaptureResult> {
     const result: AudioCaptureResult = { mic: false, system: false };
 
-    // Create AudioContext at target sample rate
-    this.audioContext = new AudioContext({ sampleRate: TARGET_SAMPLE_RATE });
+    // Create AudioContext at the device's native sample rate.
+    // Resampling to 16 kHz is handled inside the AudioWorklet to avoid
+    // silence on platforms where forcing a non-native rate causes
+    // MediaStreamAudioSourceNode to output zeros (e.g. macOS).
+    this.audioContext = new AudioContext();
 
     // Register the worklet processor
     const blob = new Blob([WORKLET_CODE], { type: "application/javascript" });
@@ -105,7 +151,6 @@ export class AudioCapture {
 
     this.micStream = await navigator.mediaDevices.getUserMedia({
       audio: {
-        sampleRate: TARGET_SAMPLE_RATE,
         channelCount: 1,
         echoCancellation: true,
         noiseSuppression: true,
