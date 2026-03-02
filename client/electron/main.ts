@@ -33,11 +33,17 @@ function createMainWindow() {
     icon: createAppIcon(),
     frame: false,
     autoHideMenuBar: true,
+    show: false,
+    backgroundColor: "#09090b",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
     },
+  });
+
+  mainWindow.once("ready-to-show", () => {
+    mainWindow?.show();
   });
 
   if (VITE_DEV_SERVER_URL) {
