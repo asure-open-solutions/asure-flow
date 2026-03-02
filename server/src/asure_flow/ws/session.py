@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass, asdict
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -29,6 +30,41 @@ OTHER_SPEAKER_DEBOUNCE = 0.8   # Fire quickly after the other speaker stops
 USER_DEBOUNCE = 2.0            # Fire after the user stops (less urgent)
 MONOLOGUE_INTERVAL = 20.0      # Periodic fire during long unbroken speech
 RERUN_CONTEXT_ENTRIES = 5      # How many recent entries to use for rerun triggers
+
+# ── Suggestion echo / dedup detection ──
+ECHO_THRESHOLD = 0.6           # Word containment ratio to detect user reading a suggestion
+DEDUP_THRESHOLD = 0.6          # Similarity ratio to suppress near-duplicate suggestions
+ECHO_SUGGESTION_LOOKBACK = 5   # How many recent suggestions to check against
+
+
+def _normalize_words(text: str) -> set[str]:
+    """Extract lowercase word tokens from text."""
+    return set(re.findall(r'\w+', text.lower()))
+
+
+def _suggestion_echo_score(user_text: str, suggestion_text: str) -> float:
+    """Fraction of user's words that appear in the suggestion (containment).
+
+    High score means the user is likely reading/speaking a prior suggestion.
+    """
+    user_words = _normalize_words(user_text)
+    sug_words = _normalize_words(suggestion_text)
+    if len(user_words) < 3:
+        return 0.0
+    return len(user_words & sug_words) / len(user_words)
+
+
+def _suggestion_similarity(a: str, b: str) -> float:
+    """Symmetric similarity — max of containment in both directions.
+
+    Used for dedup: catches both near-subsets and near-supersets.
+    """
+    words_a = _normalize_words(a)
+    words_b = _normalize_words(b)
+    if not words_a or not words_b:
+        return 0.0
+    overlap = len(words_a & words_b)
+    return max(overlap / len(words_a), overlap / len(words_b))
 
 
 @dataclass
@@ -112,7 +148,7 @@ async def ws_session(websocket: WebSocket, session_id: str):
     agent_task: asyncio.Task | None = None
     trigger_task: asyncio.Task | None = None
     monologue_task: asyncio.Task | None = None
-    pending_entries: list[tuple[str, str, str]] = []  # (speaker, text, entry_id)
+    pending_entries: list[tuple[str, str, str, bool]] = []  # (speaker, text, entry_id, is_user)
     rolling_summary: str | None = None
     last_summarized_index = 0
     last_speaker: str | None = None  # raw speaker label of most recent transcription
@@ -162,9 +198,24 @@ async def ws_session(websocket: WebSocket, session_id: str):
 
         # Combine all buffered entries
         transcript_text = "\n".join(
-            f"[{s}]: {t}" for s, t, _ in entries
+            f"[{s}]: {t}" for s, t, _, _ in entries
         )
         last_entry_id = entries[-1][2]
+
+        # ── Echo detection: is the user reading a prior suggestion? ──
+        if session.suggestions:
+            recent_sugs = [s.text for s in session.suggestions[-ECHO_SUGGESTION_LOOKBACK:]]
+            user_texts = [t for _, t, _, is_user in entries if is_user]
+            if user_texts:
+                combined_user = " ".join(user_texts)
+                for sug_text in recent_sugs:
+                    if _suggestion_echo_score(combined_user, sug_text) >= ECHO_THRESHOLD:
+                        transcript_text = (
+                            "[The user's speech echoes a prior suggestion.]\n\n"
+                            + transcript_text
+                        )
+                        logger.debug("Echo detected: user speech matches a recent suggestion")
+                        break
 
         async def process_agent():
             try:
@@ -309,11 +360,11 @@ async def ws_session(websocket: WebSocket, session_id: str):
                 if embedding_engine.available:
                     asyncio.create_task(_embed_entry(session.id, entry.id, text))
 
-                # Buffer entry for agent run
-                pending_entries.append((speaker, text, entry.id))
-
                 # ── Speaker-aware trigger logic ──
                 is_user = raw_speaker == "User"
+
+                # Buffer entry for agent run
+                pending_entries.append((speaker, text, entry.id, is_user))
                 prev_was_user = last_speaker == "User" if last_speaker is not None else None
                 last_speaker = raw_speaker
 
@@ -337,7 +388,7 @@ async def ws_session(websocket: WebSocket, session_id: str):
                     recent = session.transcript[-RERUN_CONTEXT_ENTRIES:]
                     pending_entries.clear()
                     for te in recent:
-                        pending_entries.append((te.speaker, te.text, te.id))
+                        pending_entries.append((te.speaker, te.text, te.id, False))
                     _start_trigger(0.0)
 
             elif msg_type == "relabel":
@@ -409,6 +460,13 @@ def _persist_tool_result(session, transcript_id: str, event: dict) -> None:
         suggestion_text = result.get("suggestion", "")
         responding_to = result.get("responding_to", "")
         if suggestion_text:
+            # Dedup: suppress if too similar to a recent suggestion
+            for recent in session.suggestions[-ECHO_SUGGESTION_LOOKBACK:]:
+                if _suggestion_similarity(suggestion_text, recent.text) >= DEDUP_THRESHOLD:
+                    logger.info("Suppressing duplicate suggestion (too similar to recent)")
+                    # Clear the suggestion so the client skips it too
+                    event["result"] = {"suggestion": "", "suppressed": True}
+                    return
             session.add_suggestion(suggestion_text, responding_to=responding_to)
 
     elif name == "fact_check":
