@@ -20,6 +20,24 @@ CAPABILITY_DESCRIPTIONS: dict[str, str] = {
 }
 
 
+# Universal guidelines appended to every preset — tool-use judgment rules.
+UNIVERSAL_GUIDELINES = """\
+- CRITICAL: Check the "YOUR PRIOR OUTPUTS" section before using any tool. \
+Do NOT repeat, rephrase, or closely paraphrase suggestions, fact-checks, or notes you already made. \
+If the new segment covers the same topic as a prior output, only act if there is genuinely new information.
+- Use suggest_response ONLY when the other speaker has asked a question, made a request, \
+or raised a topic that warrants the user's response. Do NOT suggest responses when the user \
+is the one who just spoke, when nothing new has been said, or when the conversation is idle/trivial.
+- Use fact_check ONLY when a speaker makes a concrete, verifiable factual claim \
+that has NOT already been checked (see prior outputs). Skip opinions, hypotheticals, \
+rhetorical questions, vague statements, and already-checked claims.
+- Use extract_notes ONLY when the segment contains genuinely new actionable information \
+(action items, decisions, key facts, risks) not already present in the prior outputs.
+- If nothing in the new transcript segment warrants any tool call, respond with a brief \
+text acknowledgement and NO tool calls. It is perfectly fine — and preferred — to use zero tools \
+when there is nothing meaningful to process."""
+
+
 @dataclass
 class Preset:
     id: str
@@ -80,6 +98,7 @@ def build_system_prompt(
         )
 
     parts.append(f"Guidelines:\n{guidelines}")
+    parts.append(f"Tool-use rules:\n{UNIVERSAL_GUIDELINES}")
 
     return "\n\n".join(parts) + "\n"
 

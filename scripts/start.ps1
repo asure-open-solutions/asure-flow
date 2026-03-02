@@ -23,12 +23,26 @@ if (Test-Path $envFile) {
 $Host_ = if ($env:HOST) { $env:HOST } else { "0.0.0.0" }
 $Port  = if ($env:PORT) { $env:PORT } else { "8000" }
 
+# Detect LAN IP for remote client access
+function Get-LanIP {
+    try {
+        $ip = (Get-NetIPAddress -AddressFamily IPv4 |
+            Where-Object { $_.PrefixOrigin -eq "Dhcp" -or $_.PrefixOrigin -eq "Manual" } |
+            Where-Object { $_.IPAddress -notmatch '^(127\.|169\.254\.)' } |
+            Select-Object -First 1).IPAddress
+        if ($ip) { return $ip }
+    } catch {}
+    return "YOUR_IP"
+}
+$LanIP = Get-LanIP
+
 # ── Start server ──
 
 Write-Host "-> Starting server on ${Host_}:${Port}..." -ForegroundColor Green
 $serverJob = Start-Job -ScriptBlock {
     param($root, $host_, $port)
     Set-Location "$root\server"
+    $env:PYTHONPATH = "$root\server\src"
     & ".venv\Scripts\python.exe" -m uvicorn asure_flow.main:app `
         --host $host_ --port $port --reload --ws-max-size 1048576
 } -ArgumentList $Root, $Host_, $Port
@@ -43,8 +57,12 @@ $clientJob = Start-Job -ScriptBlock {
 } -ArgumentList $Root
 
 Write-Host ""
-Write-Host "Server:  http://${Host_}:${Port}" -ForegroundColor White
-Write-Host "API docs: http://${Host_}:${Port}/docs" -ForegroundColor White
+Write-Host "Server:   http://localhost:${Port}" -ForegroundColor White
+Write-Host "Network:  http://${LanIP}:${Port}" -ForegroundColor Green
+Write-Host "API docs: http://localhost:${Port}/docs" -ForegroundColor White
+Write-Host ""
+Write-Host "To run the client on another machine:" -ForegroundColor Yellow
+Write-Host "  ASUREFLOW_SERVER=http://${LanIP}:${Port} ./scripts/start-client.sh" -ForegroundColor White
 Write-Host ""
 Write-Host "Press Ctrl+C to stop." -ForegroundColor Yellow
 Write-Host ""

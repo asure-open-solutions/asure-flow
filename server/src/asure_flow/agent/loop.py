@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, AsyncGenerator
 
 from litellm import Router
 
+from asure_flow.agent.context import cap_text, SESSION_BRIEFING_TOKEN_BUDGET, TRANSCRIPT_SEGMENT_TOKEN_BUDGET
 from asure_flow.agent.tools import execute_tool, get_all_schemas
 
 if TYPE_CHECKING:
@@ -23,6 +24,7 @@ async def run_agent(
     transcript_text: str,
     conversation_context: str = "",
     session_context: str = "",
+    prior_outputs: str = "",
     fact_checking: bool = True,
     suggestions: bool = True,
     notes: bool = True,
@@ -72,12 +74,17 @@ async def run_agent(
     user_parts: list[str] = []
 
     if session_context:
-        user_parts.append(f"Session briefing:\n{session_context}")
+        user_parts.append(f"Session briefing:\n{cap_text(session_context, SESSION_BRIEFING_TOKEN_BUDGET)}")
 
     if conversation_context:
         user_parts.append(f"Conversation so far:\n\n{conversation_context}")
 
-    user_parts.append(f"New transcript segment to process:\n\n{transcript_text}")
+    if prior_outputs:
+        user_parts.append(prior_outputs)
+
+    user_parts.append(
+        f"New transcript segment to process:\n\n{cap_text(transcript_text, TRANSCRIPT_SEGMENT_TOKEN_BUDGET)}"
+    )
 
     messages.append({
         "role": "user",

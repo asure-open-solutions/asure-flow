@@ -168,6 +168,11 @@ export class SessionWebSocket {
     this.send({ type: "config", session_context: context });
   }
 
+  /** Re-trigger agent on recent context (after edit, delete, toggle change, reconnect). */
+  sendRerun() {
+    this.send({ type: "rerun" });
+  }
+
   /** End the session. */
   endSession() {
     this.send({ type: "end_session" });

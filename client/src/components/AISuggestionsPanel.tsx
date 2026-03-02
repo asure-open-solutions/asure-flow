@@ -1,7 +1,7 @@
 import { useSessionStore } from "@/stores/sessionStore";
 import type { SuggestionEntry } from "@/stores/sessionStore";
 import { cn } from "@/lib/utils";
-import { MessageSquare, Copy, Check, Loader2, ArrowDown } from "lucide-react";
+import { MessageSquare, Copy, Check, Loader2, ArrowDown, CornerDownLeft } from "lucide-react";
 import { useState, useRef, useEffect, useCallback } from "react";
 
 export function AISuggestionsPanel() {
@@ -66,34 +66,53 @@ export function AISuggestionsPanel() {
               Response suggestions will appear here during the conversation.
             </p>
           ) : (
-            suggestions.map((entry) => (
-              <div
-                key={entry.id}
-                className="group relative rounded-lg bg-white/[0.03] border border-white/[0.06] px-3 py-2.5"
-              >
-                <p className="text-sm text-white/90 leading-relaxed whitespace-pre-wrap pr-8">
-                  {entry.text}
-                </p>
-                <button
-                  onClick={() => handleCopy(entry)}
+            suggestions.map((entry, idx) => {
+              const isLatest = idx === suggestions.length - 1;
+              return (
+                <div
+                  key={entry.id}
                   className={cn(
-                    "absolute top-2 right-2 rounded-md p-1.5 text-white/30",
-                    "opacity-0 group-hover:opacity-100 hover:text-white/80",
-                    "hover:bg-white/10 transition-all",
+                    "group relative rounded-lg px-3 py-2.5 transition-colors",
+                    isLatest
+                      ? "bg-white/[0.05] border border-blue-400/30 border-l-2 border-l-blue-400"
+                      : "bg-white/[0.02] border border-white/[0.04] opacity-60",
                   )}
-                  title="Copy to clipboard"
                 >
-                  {copiedId === entry.id ? (
-                    <Check className="h-3.5 w-3.5 text-emerald-400" />
-                  ) : (
-                    <Copy className="h-3.5 w-3.5" />
+                  {entry.responding_to && (
+                    <p className="flex items-start gap-1.5 text-xs text-white/35 mb-1.5 leading-snug">
+                      <CornerDownLeft className="h-3 w-3 mt-0.5 shrink-0" />
+                      <span className="italic">{entry.responding_to}</span>
+                    </p>
                   )}
-                </button>
-                <span className="text-[10px] text-white/20 mt-1 block">
-                  {new Date(entry.timestamp).toLocaleTimeString()}
-                </span>
-              </div>
-            ))
+                  <p className="text-sm text-white/90 leading-relaxed whitespace-pre-wrap pr-8">
+                    {entry.text}
+                  </p>
+                  <button
+                    onClick={() => handleCopy(entry)}
+                    className={cn(
+                      "absolute top-2 right-2 rounded-md p-1.5 text-white/30",
+                      "opacity-0 group-hover:opacity-100 hover:text-white/80",
+                      "hover:bg-white/10 transition-all",
+                    )}
+                    title="Copy to clipboard"
+                  >
+                    {copiedId === entry.id ? (
+                      <Check className="h-3.5 w-3.5 text-emerald-400" />
+                    ) : (
+                      <Copy className="h-3.5 w-3.5" />
+                    )}
+                  </button>
+                  <div className="flex items-center justify-between mt-1">
+                    <span className="text-[10px] text-white/20">
+                      {new Date(entry.timestamp).toLocaleTimeString()}
+                    </span>
+                    {isLatest && (
+                      <span className="text-[10px] font-medium text-blue-400/70">Latest</span>
+                    )}
+                  </div>
+                </div>
+              );
+            })
           )}
         </div>
 

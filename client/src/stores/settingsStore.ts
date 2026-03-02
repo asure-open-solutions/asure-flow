@@ -8,6 +8,27 @@ import type {
   SessionSettings,
 } from "@/types";
 
+/**
+ * Detect server URL from environment.
+ *
+ * Priority:
+ *   1. Electron env via preload: process.env.ASUREFLOW_SERVER
+ *   2. Vite build-time env: import.meta.env.VITE_ASUREFLOW_SERVER
+ *   3. null → fall through to persisted / default value
+ */
+function getEnvServerUrl(): string | null {
+  try {
+    // Electron preload exposes this
+    const fromElectron = (window as any).electronAPI?.getEnvServerUrl?.();
+    if (fromElectron) return fromElectron.replace(/\/+$/, "");
+  } catch { /* not in Electron */ }
+  try {
+    const fromVite = (import.meta as any).env?.VITE_ASUREFLOW_SERVER;
+    if (fromVite) return String(fromVite).replace(/\/+$/, "");
+  } catch { /* not available */ }
+  return null;
+}
+
 const DEFAULT_SETTINGS: AppSettings = {
   serverUrl: "http://localhost:8000",
   featureToggles: {
@@ -163,22 +184,28 @@ export const useSettingsStore = create<SettingsState>()(
       },
       // Deep-merge stored state so new nested keys (e.g. overlaySettings.overlayMode)
       // are preserved from the default when an old persisted schema lacks them.
-      merge: (persisted, current) => ({
-        ...current,
-        ...(persisted as object),
-        overlaySettings: {
-          ...(current as SettingsState).overlaySettings,
-          ...((persisted as SettingsState).overlaySettings ?? {}),
-        },
-        featureToggles: {
-          ...(current as SettingsState).featureToggles,
-          ...((persisted as SettingsState).featureToggles ?? {}),
-        },
-        audioToggles: {
-          ...(current as SettingsState).audioToggles,
-          ...((persisted as SettingsState).audioToggles ?? {}),
-        },
-      }),
+      // Also: ASUREFLOW_SERVER env var always wins when set (for remote-client use).
+      merge: (persisted, current) => {
+        const envUrl = getEnvServerUrl();
+        return {
+          ...current,
+          ...(persisted as object),
+          // Env var takes precedence over persisted URL when explicitly set
+          ...(envUrl ? { serverUrl: envUrl } : {}),
+          overlaySettings: {
+            ...(current as SettingsState).overlaySettings,
+            ...((persisted as SettingsState).overlaySettings ?? {}),
+          },
+          featureToggles: {
+            ...(current as SettingsState).featureToggles,
+            ...((persisted as SettingsState).featureToggles ?? {}),
+          },
+          audioToggles: {
+            ...(current as SettingsState).audioToggles,
+            ...((persisted as SettingsState).audioToggles ?? {}),
+          },
+        };
+      },
     },
   ),
 );

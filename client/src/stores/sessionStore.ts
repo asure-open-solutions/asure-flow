@@ -38,6 +38,7 @@ export interface CodeAnalysis {
 export interface SuggestionEntry {
   id: string;
   text: string;
+  responding_to: string;
   timestamp: string;
 }
 
@@ -80,6 +81,9 @@ interface SessionState {
   userSearchResults: SearchResult[];
   userSearchLoading: boolean;
 
+  // Agent rerun flag (set by components, consumed by App.tsx to send WS message)
+  rerunRequested: boolean;
+
   // Actions
   setCurrentSession: (session: Session | null) => void;
   setSessionContext: (context: string) => void;
@@ -92,7 +96,7 @@ interface SessionState {
   renameCurrentSession: (name: string) => void;
   deleteTranscriptEntry: (entryId: string) => void;
   editTranscriptEntry: (entryId: string, newText: string) => void;
-  addSuggestion: (text: string) => void;
+  addSuggestion: (text: string, respondingTo?: string) => void;
   setAIStreaming: (streaming: boolean) => void;
   setServerOnline: (online: boolean) => void;
   setAudioConnected: (connected: boolean) => void;
@@ -109,6 +113,8 @@ interface SessionState {
   clearUnseenInsights: () => void;
   syncFromMain: (data: { transcript: TranscriptEntry[]; latestSuggestion: string | null; notes: NoteEntry[] }) => void;
   clearSuggestions: () => void;
+  requestRerun: () => void;
+  clearRerunRequest: () => void;
   reset: () => void;
 }
 
@@ -169,6 +175,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   userSearchQuery: "",
   userSearchResults: [],
   userSearchLoading: false,
+  rerunRequested: false,
 
   setCurrentSession: (session) => {
     // Push session settings overrides into the settings store
@@ -183,6 +190,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
       suggestions: (session?.suggestions ?? []).map((s) => ({
         id: s.id,
         text: s.text,
+        responding_to: s.responding_to ?? "",
         timestamp: s.timestamp,
       })),
       agentLog: [],
@@ -282,14 +290,16 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
       ),
     })),
 
-  addSuggestion: (text) =>
+  addSuggestion: (text, respondingTo = "") =>
     set((state) => ({
       suggestions: [
         ...state.suggestions,
-        { id: genId(), text, timestamp: new Date().toISOString() },
+        { id: genId(), text, responding_to: respondingTo, timestamp: new Date().toISOString() },
       ],
     })),
   clearSuggestions: () => set({ suggestions: [] }),
+  requestRerun: () => set({ rerunRequested: true }),
+  clearRerunRequest: () => set({ rerunRequested: false }),
   setAIStreaming: (streaming) => set({ aiStreaming: streaming }),
   setServerOnline: (online) => set({ serverOnline: online }),
   setAudioConnected: (connected) => set({ audioConnected: connected }),
@@ -373,14 +383,17 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
         // Existing tool result handling
         if (event.name === "fact_check") {
           const result = event.result as { claims?: FactCheck[] };
-          if (result.claims && state.transcript.length > 0) {
-            const idx = state.transcript.length - 1;
-            state.addFactChecks(idx, result.claims);
+          if (result.claims && result.claims.length > 0) {
+            // Use get() for a fresh snapshot so the index is not stale
+            const freshTranscript = get().transcript;
+            if (freshTranscript.length > 0) {
+              get().addFactChecks(freshTranscript.length - 1, result.claims);
+            }
           }
         } else if (event.name === "suggest_response") {
-          const result = event.result as { suggestion?: string };
+          const result = event.result as { suggestion?: string; responding_to?: string };
           if (result.suggestion) {
-            get().addSuggestion(result.suggestion);
+            get().addSuggestion(result.suggestion, result.responding_to);
             get().incrementUnseenInsights();
           }
         } else if (event.name === "extract_notes") {
@@ -428,7 +441,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
             }
           }
           if (noteEntries.length > 0) {
-            state.addNotes(noteEntries);
+            get().addNotes(noteEntries);
             get().incrementUnseenInsights();
           }
         } else if (event.name === "search_transcript" || event.name === "search_sessions") {
@@ -484,7 +497,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
     set({
       transcript: data.transcript,
       suggestions: data.latestSuggestion
-        ? [{ id: "overlay", text: data.latestSuggestion, timestamp: new Date().toISOString() }]
+        ? [{ id: "overlay", text: data.latestSuggestion, responding_to: "", timestamp: new Date().toISOString() }]
         : [],
       notes: data.notes,
     }),
@@ -511,5 +524,6 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
       userSearchQuery: "",
       userSearchResults: [],
       userSearchLoading: false,
+      rerunRequested: false,
     }),
 }));

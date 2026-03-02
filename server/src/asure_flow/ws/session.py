@@ -9,7 +9,7 @@ from dataclasses import dataclass, asdict
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from asure_flow.agent.context import build_context, generate_summary, needs_summary_refresh
+from asure_flow.agent.context import build_context, build_prior_outputs, generate_summary, needs_summary_refresh
 from asure_flow.agent.loop import run_agent
 from asure_flow.agent.presets import build_system_prompt, DEFAULT_PRESET
 from asure_flow.agent.router import get_router
@@ -23,6 +23,12 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 AUTOSAVE_INTERVAL = 30  # seconds
+
+# ── Agent trigger timing ──
+OTHER_SPEAKER_DEBOUNCE = 0.8   # Fire quickly after the other speaker stops
+USER_DEBOUNCE = 2.0            # Fire after the user stops (less urgent)
+MONOLOGUE_INTERVAL = 20.0      # Periodic fire during long unbroken speech
+RERUN_CONTEXT_ENTRIES = 5      # How many recent entries to use for rerun triggers
 
 
 @dataclass
@@ -77,6 +83,7 @@ async def ws_session(websocket: WebSocket, session_id: str):
     Client → Server messages:
       {"type": "transcription", "speaker": str, "text": str}
       {"type": "config", ...toggle fields...}
+      {"type": "rerun"}                — re-trigger agent on recent context
       {"type": "rename_speaker", "speaker_label": str, "display_name": str, "role"?: str}
       {"type": "end_session"}
 
@@ -103,11 +110,121 @@ async def ws_session(websocket: WebSocket, session_id: str):
             if hasattr(toggles, k):
                 setattr(toggles, k, v)
     agent_task: asyncio.Task | None = None
-    debounce_task: asyncio.Task | None = None
+    trigger_task: asyncio.Task | None = None
+    monologue_task: asyncio.Task | None = None
     pending_entries: list[tuple[str, str, str]] = []  # (speaker, text, entry_id)
     rolling_summary: str | None = None
     last_summarized_index = 0
-    DEBOUNCE_SECONDS = 3.0
+    last_speaker: str | None = None  # raw speaker label of most recent transcription
+
+    # ── Agent fire logic (extracted from old _fire_agent) ──
+
+    async def _do_fire_agent() -> None:
+        nonlocal agent_task, rolling_summary, last_summarized_index
+
+        # Snapshot and clear the buffer
+        entries = pending_entries[:]
+        pending_entries.clear()
+        if not entries:
+            return
+
+        llm_router = get_router()
+        if not llm_router or not _any_enabled(toggles):
+            return
+
+        # Cancel previous agent task if still running
+        if agent_task and not agent_task.done():
+            agent_task.cancel()
+            try:
+                await agent_task
+            except asyncio.CancelledError:
+                pass
+
+        # Refresh rolling summary if needed
+        if needs_summary_refresh(session, last_summarized_index):
+            new_end = len(session.transcript) - 5
+            if new_end > last_summarized_index:
+                rolling_summary = await generate_summary(
+                    router=llm_router,
+                    session=session,
+                    existing_summary=rolling_summary,
+                    start_index=last_summarized_index,
+                    end_index=new_end,
+                )
+                last_summarized_index = new_end
+
+        context = build_context(session, rolling_summary)
+        prior_outputs = build_prior_outputs(session)
+        system_prompt = _resolve_system_prompt(toggles)
+        deep_think_enabled = toggles.deep_think != "off"
+        session_context = session.context
+        effective_ws = toggles.web_search and not settings.privacy_mode
+
+        # Combine all buffered entries
+        transcript_text = "\n".join(
+            f"[{s}]: {t}" for s, t, _ in entries
+        )
+        last_entry_id = entries[-1][2]
+
+        async def process_agent():
+            try:
+                async for event in run_agent(
+                    router=llm_router,
+                    transcript_text=transcript_text,
+                    conversation_context=context,
+                    session_context=session_context,
+                    prior_outputs=prior_outputs,
+                    fact_checking=toggles.fact_checking,
+                    suggestions=toggles.suggestions,
+                    notes=toggles.notes,
+                    search_transcript=toggles.search_transcript,
+                    search_sessions=toggles.search_sessions,
+                    web_search=effective_ws,
+                    format_code=toggles.format_code,
+                    deep_think=deep_think_enabled,
+                    system_prompt=system_prompt,
+                    session=session,
+                ):
+                    if event["type"] == "tool_result":
+                        _persist_tool_result(session, last_entry_id, event)
+                    await websocket.send_json({"type": "ai_event", "event": event})
+            except Exception:
+                logger.exception("Agent processing error")
+                try:
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": "AI processing failed",
+                    })
+                except Exception:
+                    pass
+
+        agent_task = asyncio.create_task(process_agent())
+
+    async def _schedule_fire(delay: float) -> None:
+        """Wait for `delay` seconds, then fire the agent."""
+        if delay > 0:
+            await asyncio.sleep(delay)
+        await _do_fire_agent()
+
+    async def _monologue_check() -> None:
+        """Periodic check: fire agent if too long since last run and entries pending."""
+        nonlocal trigger_task
+        while True:
+            await asyncio.sleep(MONOLOGUE_INTERVAL)
+            if pending_entries:
+                if trigger_task and not trigger_task.done():
+                    trigger_task.cancel()
+                await _do_fire_agent()
+
+    def _cancel_trigger() -> None:
+        nonlocal trigger_task
+        if trigger_task and not trigger_task.done():
+            trigger_task.cancel()
+
+    def _start_trigger(delay: float) -> None:
+        nonlocal trigger_task
+        _cancel_trigger()
+        trigger_task = asyncio.create_task(_schedule_fire(delay))
 
     # Auto-save task
     async def autosave_loop():
@@ -120,6 +237,7 @@ async def ws_session(websocket: WebSocket, session_id: str):
                 break
 
     save_task = asyncio.create_task(autosave_loop())
+    monologue_task = asyncio.create_task(_monologue_check())
 
     try:
         while True:
@@ -158,7 +276,7 @@ async def ws_session(websocket: WebSocket, session_id: str):
                 logger.info("Feature toggles updated: %s", toggles)
 
             elif msg_type == "transcription":
-                speaker = msg.get("speaker", "Unknown")
+                raw_speaker = msg.get("speaker", "Unknown")
                 text = msg.get("text", "")
                 if not text.strip():
                     continue
@@ -171,7 +289,7 @@ async def ws_session(websocket: WebSocket, session_id: str):
                         logger.debug("Redacted %d PII items", len(pii_matches))
 
                 # Resolve display name for speaker
-                speaker = session.get_display_name(speaker)
+                speaker = session.get_display_name(raw_speaker)
 
                 # Add to session transcript (include audio timing for diarization)
                 audio_start = msg.get("audio_start")
@@ -186,95 +304,36 @@ async def ws_session(websocket: WebSocket, session_id: str):
                 if embedding_engine.available:
                     asyncio.create_task(_embed_entry(session.id, entry.id, text))
 
-                # Buffer entry for debounced agent run
+                # Buffer entry for agent run
                 pending_entries.append((speaker, text, entry.id))
 
-                # Cancel previous debounce timer and start a new one
-                if debounce_task and not debounce_task.done():
-                    debounce_task.cancel()
+                # ── Speaker-aware trigger logic ──
+                is_user = raw_speaker == "User"
+                prev_was_user = last_speaker == "User" if last_speaker is not None else None
+                last_speaker = raw_speaker
 
-                async def _fire_agent() -> None:
-                    nonlocal agent_task, rolling_summary, last_summarized_index
+                if is_user and prev_was_user is False:
+                    # Other → User: fire IMMEDIATELY (user needs suggestions NOW)
+                    _start_trigger(0.0)
+                elif is_user:
+                    # User continues or first speaker is user: normal debounce
+                    _start_trigger(USER_DEBOUNCE)
+                elif not is_user and prev_was_user is True:
+                    # User → Other: fire user's words with user debounce
+                    _start_trigger(USER_DEBOUNCE)
+                else:
+                    # Other continues or first speaker is other: fast debounce
+                    _start_trigger(OTHER_SPEAKER_DEBOUNCE)
 
-                    await asyncio.sleep(DEBOUNCE_SECONDS)
-
-                    # Snapshot and clear the buffer
-                    entries = pending_entries[:]
+            elif msg_type == "rerun":
+                # Re-trigger agent on recent transcript (used after edit, delete,
+                # toggle change, reconnect, or context update)
+                if session.transcript:
+                    recent = session.transcript[-RERUN_CONTEXT_ENTRIES:]
                     pending_entries.clear()
-                    if not entries:
-                        return
-
-                    llm_router = get_router()
-                    if not llm_router or not _any_enabled(toggles):
-                        return
-
-                    # Cancel previous agent task if still running
-                    if agent_task and not agent_task.done():
-                        agent_task.cancel()
-                        try:
-                            await agent_task
-                        except asyncio.CancelledError:
-                            pass
-
-                    # Refresh rolling summary if needed
-                    if needs_summary_refresh(session, last_summarized_index):
-                        new_end = len(session.transcript) - 5
-                        if new_end > last_summarized_index:
-                            rolling_summary = await generate_summary(
-                                router=llm_router,
-                                session=session,
-                                existing_summary=rolling_summary,
-                                start_index=last_summarized_index,
-                                end_index=new_end,
-                            )
-                            last_summarized_index = new_end
-
-                    context = build_context(session, rolling_summary)
-                    system_prompt = _resolve_system_prompt(toggles)
-                    deep_think_enabled = toggles.deep_think != "off"
-                    session_context = session.context
-                    effective_ws = toggles.web_search and not settings.privacy_mode
-
-                    # Combine all buffered entries
-                    transcript_text = "\n".join(
-                        f"[{s}]: {t}" for s, t, _ in entries
-                    )
-                    last_entry_id = entries[-1][2]
-
-                    async def process_agent():
-                        try:
-                            async for event in run_agent(
-                                router=llm_router,
-                                transcript_text=transcript_text,
-                                conversation_context=context,
-                                session_context=session_context,
-                                fact_checking=toggles.fact_checking,
-                                suggestions=toggles.suggestions,
-                                notes=toggles.notes,
-                                search_transcript=toggles.search_transcript,
-                                search_sessions=toggles.search_sessions,
-                                web_search=effective_ws,
-                                format_code=toggles.format_code,
-                                deep_think=deep_think_enabled,
-                                system_prompt=system_prompt,
-                                session=session,
-                            ):
-                                if event["type"] == "tool_result":
-                                    _persist_tool_result(session, last_entry_id, event)
-                                await websocket.send_json({"type": "ai_event", "event": event})
-                        except Exception:
-                            logger.exception("Agent processing error")
-                            try:
-                                await websocket.send_json({
-                                    "type": "error",
-                                    "message": "AI processing failed",
-                                })
-                            except Exception:
-                                pass
-
-                    agent_task = asyncio.create_task(process_agent())
-
-                debounce_task = asyncio.create_task(_fire_agent())
+                    for te in recent:
+                        pending_entries.append((te.speaker, te.text, te.id))
+                    _start_trigger(0.0)
 
             elif msg_type == "relabel":
                 # Speaker diarization relabel: update transcript entry speaker
@@ -326,8 +385,10 @@ async def ws_session(websocket: WebSocket, session_id: str):
         logger.exception("Session WebSocket error")
     finally:
         save_task.cancel()
-        if debounce_task and not debounce_task.done():
-            debounce_task.cancel()
+        if trigger_task and not trigger_task.done():
+            trigger_task.cancel()
+        if monologue_task and not monologue_task.done():
+            monologue_task.cancel()
         if agent_task and not agent_task.done():
             agent_task.cancel()
         # Final save
@@ -341,8 +402,9 @@ def _persist_tool_result(session, transcript_id: str, event: dict) -> None:
 
     if name == "suggest_response":
         suggestion_text = result.get("suggestion", "")
+        responding_to = result.get("responding_to", "")
         if suggestion_text:
-            session.add_suggestion(suggestion_text)
+            session.add_suggestion(suggestion_text, responding_to=responding_to)
 
     elif name == "fact_check":
         claims = result.get("claims", [])

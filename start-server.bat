@@ -1,8 +1,8 @@
 @echo off
-title Asure Flow
+title Asure Flow — Server
 cd /d "%~dp0"
 echo.
-echo === Asure Flow ===
+echo === Asure Flow — Server ===
 echo.
 
 :: Check if setup has been done
@@ -12,6 +12,5 @@ if not exist "%~dp0server\.venv" (
     powershell -ExecutionPolicy Bypass -File "%~dp0scripts\setup.ps1"
 )
 
-:: Start
-powershell -ExecutionPolicy Bypass -File "%~dp0scripts\start.ps1"
+powershell -ExecutionPolicy Bypass -File "%~dp0scripts\start-server.ps1"
 pause

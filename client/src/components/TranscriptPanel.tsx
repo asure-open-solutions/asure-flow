@@ -16,17 +16,17 @@ const SPEAKER_COLOR_PALETTE = [
   "text-orange-400",
 ];
 
-const speakerColorCache = new Map<string, string>();
-
-function speakerColor(speaker: string): string {
-  if (speaker === "User") return "text-blue-400";
-  if (speaker === "Third Party") return "text-violet-400";
-
-  if (!speakerColorCache.has(speaker)) {
-    const idx = speakerColorCache.size % SPEAKER_COLOR_PALETTE.length;
-    speakerColorCache.set(speaker, SPEAKER_COLOR_PALETTE[idx]);
-  }
-  return speakerColorCache.get(speaker)!;
+function makeSpeakerColorFn() {
+  const cache = new Map<string, string>();
+  return function (speaker: string): string {
+    if (speaker === "User") return "text-blue-400";
+    if (speaker === "Third Party") return "text-violet-400";
+    if (!cache.has(speaker)) {
+      const idx = cache.size % SPEAKER_COLOR_PALETTE.length;
+      cache.set(speaker, SPEAKER_COLOR_PALETTE[idx]);
+    }
+    return cache.get(speaker)!;
+  };
 }
 
 function SpeakerIcon({ speaker }: { speaker: string }) {
@@ -47,11 +47,23 @@ function SpeakerRenamePopover({
 }) {
   const [value, setValue] = useState(speaker);
   const inputRef = useRef<HTMLInputElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     inputRef.current?.focus();
     inputRef.current?.select();
   }, []);
+
+  // Close on click outside
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        onClose();
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [onClose]);
 
   const handleSubmit = () => {
     const trimmed = value.trim();
@@ -62,7 +74,7 @@ function SpeakerRenamePopover({
   };
 
   return (
-    <div className="absolute left-0 top-full z-20 mt-1 flex items-center gap-1 rounded-md border border-white/20 bg-zinc-800 px-2 py-1 shadow-lg">
+    <div ref={containerRef} className="absolute left-0 top-full z-20 mt-1 flex items-center gap-1 rounded-md border border-white/20 bg-zinc-800 px-2 py-1 shadow-lg">
       <input
         ref={inputRef}
         type="text"
@@ -96,6 +108,11 @@ export function TranscriptPanel() {
   const renameSpeaker = useSessionStore((s) => s.renameSpeaker);
   const storeDeleteEntry = useSessionStore((s) => s.deleteTranscriptEntry);
   const storeEditEntry = useSessionStore((s) => s.editTranscriptEntry);
+  const requestRerun = useSessionStore((s) => s.requestRerun);
+
+  // Per-session speaker color function — reset when session changes so colors
+  // are assigned from scratch for each session rather than accumulating globally.
+  const speakerColor = useMemo(() => makeSpeakerColorFn(), [currentSession?.id]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const [showSearch, setShowSearch] = useState(false);
@@ -103,6 +120,13 @@ export function TranscriptPanel() {
   const [speakerFilter, setSpeakerFilter] = useState<string>("");
   const [renamingSpkr, setRenamingSpkr] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+
+  // Cleanup pending debounce on unmount
+  useEffect(() => {
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, []);
 
   // Transcript entry editing state
   const [editingEntryId, setEditingEntryId] = useState<string | null>(null);
@@ -226,12 +250,13 @@ export function TranscriptPanel() {
       try {
         await editTranscriptEntry(currentSession.id, entryId, trimmed);
         storeEditEntry(entryId, trimmed);
+        requestRerun();
       } catch (err) {
         console.error("Failed to edit entry:", err);
       }
       setEditingEntryId(null);
     },
-    [editValue, currentSession, storeEditEntry],
+    [editValue, currentSession, storeEditEntry, requestRerun],
   );
 
   const handleDeleteEntry = useCallback(
@@ -240,11 +265,12 @@ export function TranscriptPanel() {
       try {
         await deleteTranscriptEntry(currentSession.id, entryId);
         storeDeleteEntry(entryId);
+        requestRerun();
       } catch (err) {
         console.error("Failed to delete entry:", err);
       }
     },
-    [currentSession, storeDeleteEntry],
+    [currentSession, storeDeleteEntry, requestRerun],
   );
 
   return (

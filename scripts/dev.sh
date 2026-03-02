@@ -50,9 +50,26 @@ cleanup() {
 }
 trap cleanup INT TERM
 
+# Detect LAN IP
+get_lan_ip() {
+    case "$(uname -s)" in
+        Darwin)
+            ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || echo "YOUR_IP"
+            ;;
+        *)
+            hostname -I 2>/dev/null | awk '{print $1}' || echo "YOUR_IP"
+            ;;
+    esac
+}
+LAN_IP=$(get_lan_ip)
+
 echo ""
-echo "  Server:   http://${HOST:-0.0.0.0}:${PORT:-8000}"
-echo "  API docs: http://${HOST:-0.0.0.0}:${PORT:-8000}/docs"
+echo "  Local:    http://localhost:${PORT:-8000}"
+echo "  Network:  http://${LAN_IP}:${PORT:-8000}"
+echo "  API docs: http://localhost:${PORT:-8000}/docs"
+echo ""
+echo "  Remote client:"
+echo "    ASUREFLOW_SERVER=http://${LAN_IP}:${PORT:-8000} ./scripts/start-client.sh"
 echo ""
 echo "Press Ctrl+C to stop both."
 echo ""

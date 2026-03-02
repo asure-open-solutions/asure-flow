@@ -50,6 +50,8 @@ function MainApp() {
   const setInsightsDrawerOpen = useSessionStore((s) => s.setInsightsDrawerOpen);
   const setCurrentSession = useSessionStore((s) => s.setCurrentSession);
   const setSessions = useSessionStore((s) => s.setSessions);
+  const rerunRequested = useSessionStore((s) => s.rerunRequested);
+  const clearRerunRequest = useSessionStore((s) => s.clearRerunRequest);
 
   const serverUrl = useSettingsStore((s) => s.serverUrl);
   const effectiveToggles = useSettingsStore((s) => s.getEffectiveToggles());
@@ -107,21 +109,52 @@ function MainApp() {
       store.renameSpeaker(data.speaker_label, data.display_name);
       store.updateParticipant(data.participant);
     };
-    sws.onConnectionChange = setSessionConnected;
+    sws.onConnectionChange = (connected) => {
+      setSessionConnected(connected);
+      // On (re)connect, send config and rerun agent if transcript exists
+      if (connected) {
+        sws.sendConfig(useSettingsStore.getState().getEffectiveToggles());
+        const { transcript } = useSessionStore.getState();
+        if (transcript.length > 0) {
+          sws.sendRerun();
+        }
+      }
+    };
     sws.connect();
     sessionWsRef.current = sws;
-
-    sws.sendConfig(useSettingsStore.getState().getEffectiveToggles());
 
     return () => {
       sws.disconnect();
     };
   }, [currentSession?.id]);
 
-  // Sync effective feature toggles
+  // Sync effective feature toggles — rerun agent if a feature was enabled
+  const prevTogglesRef = useRef(effectiveToggles);
   useEffect(() => {
     sessionWsRef.current?.sendConfig(effectiveToggles);
+
+    // Detect if any boolean toggle went from false→true (feature enabled)
+    const prev = prevTogglesRef.current;
+    const boolKeys = Object.keys(prev).filter((k) => k !== "deep_think") as (keyof Omit<typeof prev, "deep_think">)[];
+    const featureEnabled = boolKeys.some((k) => !prev[k] && effectiveToggles[k])
+      || (prev.deep_think === "off" && effectiveToggles.deep_think !== "off");
+    prevTogglesRef.current = effectiveToggles;
+
+    if (featureEnabled) {
+      const { transcript } = useSessionStore.getState();
+      if (transcript.length > 0) {
+        sessionWsRef.current?.sendRerun();
+      }
+    }
   }, [effectiveToggles]);
+
+  // Watch rerun flag from store (set by TranscriptPanel after edit/delete)
+  useEffect(() => {
+    if (rerunRequested) {
+      sessionWsRef.current?.sendRerun();
+      clearRerunRequest();
+    }
+  }, [rerunRequested, clearRerunRequest]);
 
   // Sync audio toggles while recording
   useEffect(() => {
@@ -192,6 +225,11 @@ function MainApp() {
   const handleSessionContextChange = useCallback(
     (context: string) => {
       sessionWsRef.current?.sendSessionContext(context);
+      // Rerun agent with new context if transcript exists
+      const { transcript } = useSessionStore.getState();
+      if (transcript.length > 0) {
+        sessionWsRef.current?.sendRerun();
+      }
     },
     [],
   );

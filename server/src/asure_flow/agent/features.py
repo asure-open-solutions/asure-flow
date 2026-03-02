@@ -82,8 +82,15 @@ FEATURE_SUGGEST_RESPONSE = {
                     "items": {"type": "string"},
                     "description": "Key points addressed in the suggestion",
                 },
+                "responding_to": {
+                    "type": "string",
+                    "description": (
+                        "Brief quote or summary of what this suggestion responds to "
+                        "(e.g., 'When they asked about your experience with Python')"
+                    ),
+                },
             },
-            "required": ["suggestion", "tone", "key_points"],
+            "required": ["suggestion", "tone", "key_points", "responding_to"],
             "additionalProperties": False,
         },
     },

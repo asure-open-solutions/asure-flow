@@ -213,13 +213,84 @@ OPENROUTER_API_KEY=sk-or-...
 
 ### Run
 
-```bash
-./scripts/dev.sh
-```
+**All-in-one** (server + client on the same machine):
+
+| Platform | Command |
+|:---|:---|
+| **Windows** | Double-click `start.bat` |
+| **macOS / Linux** | `./scripts/dev.sh` |
+| **PowerShell** | `.\scripts\start.ps1` |
+
+**Server only** (for running the client on a different machine):
+
+| Platform | Command |
+|:---|:---|
+| **Windows** | Double-click `start-server.bat` |
+| **macOS / Linux** | `./scripts/start-server.sh` |
+| **PowerShell** | `.\scripts\start-server.ps1` |
+
+**Client only** (connects to a remote server):
+
+| Platform | Command |
+|:---|:---|
+| **macOS / Linux** | `ASUREFLOW_SERVER=http://SERVER_IP:8000 ./scripts/start-client.sh` |
+| **Windows** | `start-client.bat http://SERVER_IP:8000` |
+| **PowerShell** | `.\scripts\start-client.ps1 -Server http://SERVER_IP:8000` |
+
+> All scripts auto-detect first run and install dependencies automatically.
+> Server scripts display your LAN IP on startup so you can copy-paste it on the client machine.
 
 The server starts at `http://localhost:8000` and the Electron app opens automatically.
 
 <!-- [image of first-launch — the app on first launch showing an empty session with a "Start Recording" button and the settings panel open for initial LLM configuration] -->
+
+---
+
+## Split Setup (Server + Remote Client)
+
+Run the heavy server (transcription, AI) on one machine and the lightweight client (UI only) on another — perfect for using a GPU desktop as the server and a laptop as the client.
+
+### 1. Server Machine (e.g. Windows desktop with GPU)
+
+```bash
+# Clone and set up
+git clone https://github.com/asure-solutions/asure-flow.git
+cd asure-flow
+
+# Configure your LLM API key
+echo "OPENROUTER_API_KEY=sk-or-..." > .env
+
+# Start the server
+# Windows:     double-click start-server.bat
+# macOS/Linux: ./scripts/start-server.sh
+# PowerShell:  .\scripts\start-server.ps1
+```
+
+The script prints your LAN IP on startup, e.g. `Network: http://192.168.1.50:8000`.
+
+> **Windows firewall:** If the client can't connect, allow port 8000:
+> ```powershell
+> New-NetFirewallRule -DisplayName "AsuréFlow" -Direction Inbound -LocalPort 8000 -Protocol TCP -Action Allow
+> ```
+
+### 2. Client Machine (e.g. MacBook)
+
+Only needs **Node.js 18+** — no Python, no GPU.
+
+```bash
+# Clone (or just copy the client/ folder + scripts/)
+git clone https://github.com/asure-solutions/asure-flow.git
+cd asure-flow
+
+# Start the client, pointing at your server
+ASUREFLOW_SERVER=http://192.168.1.50:8000 ./scripts/start-client.sh
+```
+
+On Windows: `start-client.bat http://192.168.1.50:8000`
+
+You can also set the server URL in **Settings → Server URL** inside the app — it persists across restarts.
+
+> Both machines must be on the same local network.
 
 ---
 
@@ -274,9 +345,10 @@ Providers are tried in priority order with automatic failover. Configure order a
 asure-flow/
 ├── server/                Python 3.13 · FastAPI · faster-whisper · LiteLLM
 │   └── src/asure_flow/
-│       ├── agent/         Agentic AI loop, tools, presets, context management
-│       ├── api/           REST endpoints (sessions, config, export)
+│       ├── agent/         Agentic AI loop, tools, features, presets, context
+│       ├── api/           REST endpoints (sessions, config, export, search)
 │       ├── audio/         Server-side audio capture (sounddevice)
+│       ├── integrations/  Webhook + extensible integration hooks
 │       ├── memory/        Entity + topic extraction
 │       ├── safety/        PII detection and redaction
 │       ├── search/        Semantic search (sentence-transformers + Faiss)
@@ -291,7 +363,8 @@ asure-flow/
 │       ├── services/      Audio capture, WebSocket clients, REST client
 │       └── stores/        Zustand state management
 │
-└── scripts/               Setup and dev scripts
+├── scripts/               Setup and dev scripts
+└── start.bat              Windows one-click launcher
 ```
 
 **Communication:**
@@ -317,6 +390,9 @@ cd asure-flow
 
 **Where to start:**
 - Add new AI tools → `server/src/asure_flow/agent/tools.py`
+- Add new AI features (passthrough) → `server/src/asure_flow/agent/features.py`
+- Add or modify presets → `server/src/asure_flow/agent/presets.py`
+- Add integrations → `server/src/asure_flow/integrations/`
 - UI components → `client/src/components/`
 - Overlay behavior → `client/electron/overlay.ts`
 

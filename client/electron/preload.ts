@@ -3,6 +3,7 @@ import { contextBridge, ipcRenderer } from "electron";
 contextBridge.exposeInMainWorld("electronAPI", {
   toggleOverlay: () => ipcRenderer.invoke("toggle-overlay"),
   getAudioSources: () => ipcRenderer.invoke("get-audio-sources"),
+  getEnvServerUrl: () => process.env.ASUREFLOW_SERVER || null,
   setIgnoreMouseEvents: (ignore: boolean, forward: boolean) =>
     ipcRenderer.send("set-ignore-mouse-events", ignore, { forward }),
   setContentProtection: (enabled: boolean) =>
