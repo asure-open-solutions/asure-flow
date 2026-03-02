@@ -4,12 +4,8 @@
     {
       "label": "Setup: Install All Dependencies",
       "type": "shell",
-      "command": "bash",
-      "args": ["${workspaceFolder}/scripts/setup.sh"],
-      "windows": {
-        "command": "powershell",
-        "args": ["-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}/scripts/setup.ps1"]
-      },
+      "command": "powershell",
+      "args": ["-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}/scripts/setup.ps1"],
       "group": "build",
       "problemMatcher": [],
       "presentation": {
@@ -20,7 +16,7 @@
     {
       "label": "Server: Start",
       "type": "shell",
-      "command": "${workspaceFolder}/server/.venv/bin/python",
+      "command": "${workspaceFolder}/server/.venv/Scripts/python.exe",
       "args": [
         "-m", "uvicorn", "asure_flow.main:app",
         "--host", "0.0.0.0",
@@ -28,9 +24,6 @@
         "--reload",
         "--ws-max-size", "1048576"
       ],
-      "windows": {
-        "command": "${workspaceFolder}/server/.venv/Scripts/python.exe"
-      },
       "options": {
         "cwd": "${workspaceFolder}/server",
         "env": {
@@ -55,11 +48,8 @@
     {
       "label": "Server: Run Tests",
       "type": "shell",
-      "command": "${workspaceFolder}/server/.venv/bin/python",
+      "command": "${workspaceFolder}/server/.venv/Scripts/python.exe",
       "args": ["-m", "pytest", "tests/", "-v"],
-      "windows": {
-        "command": "${workspaceFolder}/server/.venv/Scripts/python.exe"
-      },
       "options": {
         "cwd": "${workspaceFolder}/server",
         "env": {
