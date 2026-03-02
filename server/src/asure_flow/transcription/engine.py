@@ -76,11 +76,26 @@ class WhisperEngine:
     def _load_model(self):
         from faster_whisper import WhisperModel
 
-        return WhisperModel(
-            settings.whisper_model,
-            device=settings.detect_device(),
-            compute_type=settings.detect_compute_type(),
-        )
+        device = settings.detect_device()
+        compute_type = settings.detect_compute_type()
+        try:
+            return WhisperModel(
+                settings.whisper_model,
+                device=device,
+                compute_type=compute_type,
+            )
+        except RuntimeError as exc:
+            if device == "cuda" and "out of memory" in str(exc).lower():
+                logger.warning(
+                    "CUDA out of memory loading %s — falling back to CPU (int8)",
+                    settings.whisper_model,
+                )
+                return WhisperModel(
+                    settings.whisper_model,
+                    device="cpu",
+                    compute_type="int8",
+                )
+            raise
 
     async def transcribe(
         self, audio: np.ndarray, initial_prompt: str | None = None,
