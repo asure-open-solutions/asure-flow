@@ -64,6 +64,7 @@ function MainApp() {
   const audioCaptureRef = useRef<AudioCapture | null>(null);
   const serverHandlesSystemRef = useRef(false);
   const serverConfigLoaded = useRef(false);
+  const startingRecordingRef = useRef(false);
 
   // Keep server URL in sync
   useEffect(() => {
@@ -257,7 +258,8 @@ function MainApp() {
   );
 
   const startRecording = useCallback(async () => {
-    if (recording) return;
+    if (recording || startingRecordingRef.current) return;
+    startingRecordingRef.current = true;
 
     let micDeviceId: string | undefined;
     let serverHandlesSystem = false;
@@ -290,6 +292,7 @@ function MainApp() {
     const serverHandlesEverything = serverHandlesSystem && !wantMic;
     if (!result.mic && !result.system && !serverHandlesEverything) {
       capture.stop();
+      startingRecordingRef.current = false;
       const errors = [result.micError, result.systemError].filter(Boolean).join(". ");
       setAudioWarning(errors || "No audio sources available");
       return;
@@ -328,6 +331,7 @@ function MainApp() {
     };
     audioCaptureRef.current = capture;
 
+    startingRecordingRef.current = false;
     setRecording(true);
   }, [recording, audioToggles, addTranscriptEntry, relabelSpeaker, setAudioConnected, setAudioWarning, setRecording]);
 

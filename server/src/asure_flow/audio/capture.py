@@ -159,7 +159,11 @@ class ServerAudioCapture:
     def stop(self) -> None:
         self._running = False
         if self._stream:
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
+            try:
+                self._stream.stop()
+                self._stream.close()
+            except Exception:
+                logger.warning("Error stopping audio stream", exc_info=True)
+            finally:
+                self._stream = None
             logger.info("Server audio capture stopped")

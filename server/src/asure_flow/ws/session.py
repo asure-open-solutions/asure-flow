@@ -214,6 +214,10 @@ async def ws_session(websocket: WebSocket, session_id: str):
             if pending_entries:
                 if trigger_task and not trigger_task.done():
                     trigger_task.cancel()
+                    try:
+                        await trigger_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
                 await _do_fire_agent()
 
     def _cancel_trigger() -> None:
@@ -234,7 +238,8 @@ async def ws_session(websocket: WebSocket, session_id: str):
             try:
                 await websocket.send_json({"type": "session_saved"})
             except Exception:
-                break
+                # WebSocket may be closing — keep saving but stop notifying
+                logger.debug("Autosave WS notification failed, continuing saves")
 
     save_task = asyncio.create_task(autosave_loop())
     monologue_task = asyncio.create_task(_monologue_check())
@@ -384,13 +389,13 @@ async def ws_session(websocket: WebSocket, session_id: str):
     except Exception:
         logger.exception("Session WebSocket error")
     finally:
-        save_task.cancel()
-        if trigger_task and not trigger_task.done():
-            trigger_task.cancel()
-        if monologue_task and not monologue_task.done():
-            monologue_task.cancel()
-        if agent_task and not agent_task.done():
-            agent_task.cancel()
+        for task in [save_task, trigger_task, monologue_task, agent_task]:
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
         # Final save
         session_manager.save(session)
 
