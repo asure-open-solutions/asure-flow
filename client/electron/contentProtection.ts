@@ -53,7 +53,7 @@ export function applyContentProtection(
 
   exec(
     `powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`,
-    { windowsHide: true },
+    { windowsHide: true, timeout: 5000 },
     (err) => {
       if (err) console.error("SetWindowDisplayAffinity failed:", err);
     },

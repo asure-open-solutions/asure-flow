@@ -41,9 +41,13 @@ export function AISuggestionsPanel() {
   };
 
   const handleCopy = async (entry: SuggestionEntry) => {
-    await navigator.clipboard.writeText(entry.text);
-    setCopiedId(entry.id);
-    setTimeout(() => setCopiedId(null), 2000);
+    try {
+      await navigator.clipboard.writeText(entry.text);
+      setCopiedId(entry.id);
+      setTimeout(() => setCopiedId(null), 2000);
+    } catch {
+      // Clipboard access can fail if window is not focused
+    }
   };
 
   return (

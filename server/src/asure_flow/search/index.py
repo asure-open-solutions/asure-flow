@@ -45,7 +45,10 @@ class SessionEmbeddingIndex:
             logger.warning("Failed to load embedding index for session %s", self.session_id)
 
     def save(self) -> None:
-        """Persist embeddings to disk."""
+        """Persist embeddings to disk.
+
+        Raises on I/O failure so callers know data wasn't persisted.
+        """
         if self._embeddings is None or len(self._entry_ids) == 0:
             return
         try:
@@ -55,7 +58,8 @@ class SessionEmbeddingIndex:
                 entry_ids=np.array(self._entry_ids),
             )
         except Exception:
-            logger.warning("Failed to save embedding index for session %s", self.session_id)
+            logger.exception("Failed to save embedding index for session %s", self.session_id)
+            raise
 
     def add(self, entry_id: str, embedding: np.ndarray) -> None:
         """Add an embedding for a transcript entry."""

@@ -195,7 +195,11 @@ async def run_agent(
 
                     yield {"type": "tool_call", "name": func_name, "arguments": func_args}
 
-                    result_str = await execute_tool(func_name, func_args, session=session)
+                    try:
+                        result_str = await execute_tool(func_name, func_args, session=session)
+                    except Exception as tool_err:
+                        logger.warning("Tool %s raised: %s", func_name, tool_err)
+                        result_str = json.dumps({"error": str(tool_err)})
                     try:
                         result_data = json.loads(result_str)
                     except json.JSONDecodeError:

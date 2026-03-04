@@ -187,36 +187,40 @@ function MainApp() {
     }
   }, [rerunRequested, clearRerunRequest]);
 
-  // Sync audio toggles while recording
+  // Sync audio toggles while recording (serialised to avoid overlapping enable/disable)
+  const audioToggleBusy = useRef(false);
   useEffect(() => {
     const capture = audioCaptureRef.current;
     if (!capture || !recording) return;
+    if (audioToggleBusy.current) return;
 
-    if (audioToggles.mic) {
-      const deviceId = useSettingsStore.getState().micDeviceId ?? undefined;
-      capture.enableMic(deviceId).catch((err) => {
+    audioToggleBusy.current = true;
+    (async () => {
+      try {
+        if (audioToggles.mic) {
+          const deviceId = useSettingsStore.getState().micDeviceId ?? undefined;
+          await capture.enableMic(deviceId);
+        } else {
+          capture.disableMic();
+        }
+
+        // Skip client-side system capture when server handles it via loopback
+        if (!serverHandlesSystemRef.current) {
+          if (audioToggles.system) {
+            await capture.enableSystem();
+          } else {
+            capture.disableSystem();
+          }
+        }
+      } catch (err) {
         const msg = err instanceof DOMException && err.name === "NotAllowedError"
-          ? "Microphone permission denied"
-          : `Microphone error: ${(err as Error).message}`;
+          ? "Audio permission denied"
+          : `Audio error: ${(err as Error).message}`;
         setAudioWarning(msg);
-      });
-    } else {
-      capture.disableMic();
-    }
-
-    // Skip client-side system capture when server handles it via loopback
-    if (!serverHandlesSystemRef.current) {
-      if (audioToggles.system) {
-        capture.enableSystem().catch((err) => {
-          const msg = err instanceof DOMException && err.name === "NotAllowedError"
-            ? "System audio permission denied"
-            : `System audio error: ${(err as Error).message}`;
-          setAudioWarning(msg);
-        });
-      } else {
-        capture.disableSystem();
+      } finally {
+        audioToggleBusy.current = false;
       }
-    }
+    })();
   }, [audioToggles.mic, audioToggles.system, recording]);
 
   // Sync content protection

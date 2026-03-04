@@ -267,7 +267,7 @@ class AudioBuffer:
             self.speaker_label, duration, rms, peak, had_speech,
         )
 
-        # Clean cut — no overlap needed when flushing at silence boundaries
+        # Clear buffer state before transcription — keep audio in local var
         self._chunks.clear()
         self._total_samples = 0
         self._last_vad_len = 0
@@ -281,7 +281,14 @@ class AudioBuffer:
 
         # Pass previous text as prompt so Whisper keeps sentence context
         prompt = self._prev_text[-200:] if self._prev_text else None
-        segments = await self.engine.transcribe(audio, initial_prompt=prompt)
+        try:
+            segments = await self.engine.transcribe(audio, initial_prompt=prompt)
+        except Exception:
+            # Re-inject audio so the next flush retries it
+            self._chunks.append(audio)
+            self._total_samples = len(audio)
+            self._has_speech = True
+            raise
 
         for seg in segments:
             seg.speaker = self.speaker_label

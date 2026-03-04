@@ -109,9 +109,13 @@ export function HeaderMoreMenu() {
     const text = followupModal.subject
       ? `Subject: ${followupModal.subject}\n\n${followupModal.body}`
       : followupModal.body;
-    await navigator.clipboard.writeText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard access can fail if window is not focused
+    }
   };
 
   const toggleOverlay = () => {
