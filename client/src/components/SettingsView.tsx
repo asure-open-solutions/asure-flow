@@ -11,8 +11,12 @@ import {
   getClientAudioInputDevices,
   getPresets,
   updateSessionSettings,
+  updateProvider as apiUpdateProvider,
+  addProvider as apiAddProvider,
+  removeProvider as apiRemoveProvider,
+  reorderProviders as apiReorderProviders,
 } from "@/services/api";
-import type { ServerConfig, UserProfile, AudioDeviceInfo, ClientAudioDevice, Preset, SessionSettings } from "@/types";
+import type { ServerConfig, LLMProviderConfig, UserProfile, AudioDeviceInfo, ClientAudioDevice, Preset, SessionSettings, FeatureToggles } from "@/types";
 import { isSameMachine } from "@/lib/sameMachine";
 import { cn } from "@/lib/utils";
 import {
@@ -34,6 +38,8 @@ import {
   RotateCcw,
   Globe,
   Pin,
+  Plus,
+  Trash2,
 } from "lucide-react";
 
 // ── Toggle switch component ──
@@ -135,7 +141,7 @@ function ScopedToggleCard({
       }
     } else {
       // Pin to session — copy current value as override
-      updateSessionOverride(settingsKey, checked as never);
+      updateSessionOverride(settingsKey, checked as SessionSettings[typeof settingsKey]);
       if (currentSession) {
         updateSessionSettings(currentSession.id, { [settingsKey]: checked }).catch(() => {});
       }
@@ -145,7 +151,7 @@ function ScopedToggleCard({
   const handleValueChange = (v: boolean) => {
     if (isSessionScoped && currentSession) {
       // Update session override only
-      updateSessionOverride(settingsKey, v as never);
+      updateSessionOverride(settingsKey, v as SessionSettings[typeof settingsKey]);
       updateSessionSettings(currentSession.id, { [settingsKey]: v }).catch(() => {});
     } else {
       // Update global
@@ -249,55 +255,12 @@ const TABS: { id: SettingsTab; label: string; icon: typeof Settings }[] = [
     : []),
 ];
 
-// ── Provider metadata ──
-
-const PROVIDERS = [
-  {
-    key: "openrouter",
-    label: "OpenRouter",
-    apiKeyField: "openrouter_api_key",
-    modelField: "openrouter_model",
-    enabledField: "openrouter_enabled",
-  },
-  {
-    key: "openai",
-    label: "OpenAI",
-    apiKeyField: "openai_api_key",
-    modelField: "openai_model",
-    enabledField: "openai_enabled",
-  },
-  {
-    key: "gemini",
-    label: "Gemini",
-    apiKeyField: "gemini_api_key",
-    modelField: "gemini_model",
-    enabledField: "gemini_enabled",
-  },
-  {
-    key: "huggingface",
-    label: "HuggingFace",
-    apiKeyField: "hf_api_key",
-    modelField: "hf_model",
-    enabledField: "hf_enabled",
-  },
-  {
-    key: "github",
-    label: "GitHub Models",
-    apiKeyField: "github_token",
-    modelField: "github_model",
-    enabledField: "github_enabled",
-  },
-  {
-    key: "custom",
-    label: "Custom (Ollama, etc.)",
-    apiKeyField: "custom_api_key",
-    modelField: "custom_model",
-    enabledField: "custom_enabled",
-    hasBase: true,
-  },
-] as const;
-
-type ProviderMeta = (typeof PROVIDERS)[number];
+// Common LiteLLM prefixes for the "Add Provider" UI
+const LITELLM_PREFIXES = [
+  "openrouter", "openai", "anthropic", "gemini", "groq",
+  "huggingface", "azure", "bedrock", "cohere", "mistral",
+  "deepseek", "together_ai", "fireworks_ai", "ollama",
+];
 
 // ── Main component ──
 
@@ -395,6 +358,8 @@ function LLMTab() {
   const [expandedProvider, setExpandedProvider] = useState<string | null>(null);
   const [formState, setFormState] = useState<Record<string, string>>({});
   const [savedFields, setSavedFields] = useState<Record<string, boolean>>({});
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [newProvider, setNewProvider] = useState({ id: "", name: "", litellm_prefix: "openai", model: "" });
 
   useEffect(() => {
     getServerConfig()
@@ -402,58 +367,93 @@ function LLMTab() {
       .catch(() => {});
   }, []);
 
-  const handleFieldChange = (field: string, value: string) => {
-    setFormState((prev) => ({ ...prev, [field]: value }));
+  // Field-level form helpers (keyed by "providerId:fieldName")
+  const fieldKey = (pid: string, field: string) => `${pid}:${field}`;
+
+  const handleFieldChange = (pid: string, field: string, value: string) => {
+    setFormState((prev) => ({ ...prev, [fieldKey(pid, field)]: value }));
   };
 
-  const handleFieldBlur = async (field: string) => {
-    const value = formState[field];
+  const markSaved = (key: string) => {
+    setSavedFields((prev) => ({ ...prev, [key]: true }));
+    setTimeout(() => setSavedFields((prev) => { const next = { ...prev }; delete next[key]; return next; }), 2000);
+  };
+
+  const handleFieldBlur = async (pid: string, field: string) => {
+    const key = fieldKey(pid, field);
+    const value = formState[key];
     if (value === undefined) return;
     try {
-      const config = await updateServerConfig({ [field]: value });
+      // Map form field names to API field names
+      const apiField = field === "apiKey" ? "api_key" : field === "apiBase" ? "api_base" : field;
+      const config = await apiUpdateProvider(pid, { [apiField]: value });
       setServerConfig(config);
-      setFormState((prev) => { const next = { ...prev }; delete next[field]; return next; });
-      setSavedFields((prev) => ({ ...prev, [field]: true }));
-      setTimeout(() => setSavedFields((prev) => { const next = { ...prev }; delete next[field]; return next; }), 2000);
+      setFormState((prev) => { const next = { ...prev }; delete next[key]; return next; });
+      markSaved(key);
     } catch (err) {
-      console.error("Failed to save config:", err);
+      console.error("Failed to save provider field:", err);
     }
   };
 
-  const handleToggleProvider = async (provider: ProviderMeta, enabled: boolean) => {
+  const handleToggleProvider = async (pid: string, enabled: boolean) => {
     try {
-      const config = await updateServerConfig({ [provider.enabledField]: enabled });
+      const config = await apiUpdateProvider(pid, { enabled });
       setServerConfig(config);
     } catch (err) {
       console.error("Failed to toggle provider:", err);
     }
   };
 
-  const handleMoveProvider = async (key: string, direction: "up" | "down") => {
-    if (!serverConfig?.provider_order) return;
-    const order = [...serverConfig.provider_order];
-    const idx = order.indexOf(key);
+  const handleMoveProvider = async (pid: string, direction: "up" | "down") => {
+    const providers = serverConfig?.llm_providers;
+    if (!providers) return;
+    const order = providers.map((p) => p.id);
+    const idx = order.indexOf(pid);
     if (idx < 0) return;
     const swapIdx = direction === "up" ? idx - 1 : idx + 1;
     if (swapIdx < 0 || swapIdx >= order.length) return;
     [order[idx], order[swapIdx]] = [order[swapIdx], order[idx]];
     try {
-      const config = await updateServerConfig({ provider_order: order });
+      const config = await apiReorderProviders(order);
       setServerConfig(config);
     } catch (err) {
       console.error("Failed to reorder providers:", err);
     }
   };
 
+  const handleDeleteProvider = async (pid: string) => {
+    if (!confirm(`Remove provider "${pid}"?`)) return;
+    try {
+      const config = await apiRemoveProvider(pid);
+      setServerConfig(config);
+      if (expandedProvider === pid) setExpandedProvider(null);
+    } catch (err) {
+      console.error("Failed to delete provider:", err);
+    }
+  };
+
+  const handleAddProvider = async () => {
+    if (!newProvider.id || !newProvider.name) return;
+    try {
+      const config = await apiAddProvider({
+        id: newProvider.id,
+        name: newProvider.name,
+        litellm_prefix: newProvider.litellm_prefix,
+        model: newProvider.model,
+      });
+      setServerConfig(config);
+      setNewProvider({ id: "", name: "", litellm_prefix: "openai", model: "" });
+      setShowAddForm(false);
+      setExpandedProvider(newProvider.id);
+    } catch (err) {
+      console.error("Failed to add provider:", err);
+    }
+  };
+
   const lockedSettings = serverConfig?.locked_settings ?? [];
   const isLocked = (field: string) => lockedSettings.includes(field);
 
-  // Render providers in server-defined priority order
-  const orderedProviders: ProviderMeta[] = serverConfig?.provider_order
-    ? (serverConfig.provider_order
-        .map((key) => PROVIDERS.find((p) => p.key === key))
-        .filter(Boolean) as ProviderMeta[])
-    : [...PROVIDERS];
+  const providers: LLMProviderConfig[] = serverConfig?.llm_providers ?? [];
 
   return (
     <div className="space-y-5">
@@ -475,13 +475,87 @@ function LLMTab() {
 
       {/* Providers */}
       <div>
-        <h3 className="text-sm font-medium text-white/80 mb-3">LLM Providers</h3>
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-medium text-white/80">LLM Providers</h3>
+          <button
+            onClick={() => setShowAddForm(!showAddForm)}
+            className="flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 transition-colors"
+          >
+            <Plus className="h-3 w-3" />
+            Add
+          </button>
+        </div>
+
+        {/* Add provider form */}
+        {showAddForm && (
+          <div className="mb-3 rounded-lg border border-blue-500/30 bg-blue-500/5 p-4 space-y-3">
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-xs text-white/50 mb-1 block">ID (unique)</label>
+                <input
+                  type="text"
+                  value={newProvider.id}
+                  onChange={(e) => setNewProvider((p) => ({ ...p, id: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, "-") }))}
+                  placeholder="my-provider"
+                  className="w-full rounded-md bg-white/5 border border-white/10 px-3 py-1.5 text-sm text-white placeholder-white/20 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-white/50 mb-1 block">Display Name</label>
+                <input
+                  type="text"
+                  value={newProvider.name}
+                  onChange={(e) => setNewProvider((p) => ({ ...p, name: e.target.value }))}
+                  placeholder="My Provider"
+                  className="w-full rounded-md bg-white/5 border border-white/10 px-3 py-1.5 text-sm text-white placeholder-white/20 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-xs text-white/50 mb-1 block">LiteLLM Prefix</label>
+                <select
+                  value={newProvider.litellm_prefix}
+                  onChange={(e) => setNewProvider((p) => ({ ...p, litellm_prefix: e.target.value }))}
+                  className="w-full rounded-md bg-white/5 border border-white/10 px-3 py-1.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+                >
+                  {LITELLM_PREFIXES.map((p) => (
+                    <option key={p} value={p} className="bg-zinc-800">{p}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="text-xs text-white/50 mb-1 block">Model</label>
+                <input
+                  type="text"
+                  value={newProvider.model}
+                  onChange={(e) => setNewProvider((p) => ({ ...p, model: e.target.value }))}
+                  placeholder="model-name"
+                  className="w-full rounded-md bg-white/5 border border-white/10 px-3 py-1.5 text-sm text-white placeholder-white/20 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+                />
+              </div>
+            </div>
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setShowAddForm(false)} className="px-3 py-1.5 text-xs text-white/50 hover:text-white/80">Cancel</button>
+              <button
+                onClick={handleAddProvider}
+                disabled={!newProvider.id || !newProvider.name}
+                className={cn(
+                  "px-3 py-1.5 text-xs rounded-md bg-blue-500/20 text-blue-400 hover:bg-blue-500/30",
+                  (!newProvider.id || !newProvider.name) && "opacity-40 cursor-not-allowed",
+                )}
+              >
+                Add Provider
+              </button>
+            </div>
+          </div>
+        )}
+
         <div className="space-y-2">
-          {orderedProviders.map((provider, idx) => {
-            const providerConfig = serverConfig?.llm_providers[provider.key];
-            const isExpanded = expandedProvider === provider.key;
-            const isConfigured = providerConfig?.configured ?? false;
-            const isEnabled = providerConfig?.enabled ?? true;
+          {providers.map((provider, idx) => {
+            const isExpanded = expandedProvider === provider.id;
+            const isConfigured = provider.configured;
+            const isEnabled = provider.enabled;
 
             const statusColor =
               isConfigured && isEnabled
@@ -492,7 +566,7 @@ function LLMTab() {
 
             return (
               <div
-                key={provider.key}
+                key={provider.id}
                 className="rounded-lg border border-white/10 overflow-hidden"
               >
                 {/* Provider header */}
@@ -500,24 +574,21 @@ function LLMTab() {
                   {/* Reorder arrows */}
                   <div className="flex flex-col items-center mr-2 -my-1">
                     <button
-                      onClick={() => handleMoveProvider(provider.key, "up")}
-                      disabled={idx === 0 || isLocked("provider_order")}
-                      title={isLocked("provider_order") ? "Managed by server admin" : undefined}
+                      onClick={() => handleMoveProvider(provider.id, "up")}
+                      disabled={idx === 0 || isLocked("providers")}
                       className={cn(
                         "p-0.5 rounded hover:bg-white/10",
-                        (idx === 0 || isLocked("provider_order")) && "opacity-20 pointer-events-none",
+                        (idx === 0 || isLocked("providers")) && "opacity-20 pointer-events-none",
                       )}
                     >
                       <ChevronUp className="h-3 w-3 text-white/50" />
                     </button>
                     <button
-                      onClick={() => handleMoveProvider(provider.key, "down")}
-                      disabled={idx === orderedProviders.length - 1 || isLocked("provider_order")}
-                      title={isLocked("provider_order") ? "Managed by server admin" : undefined}
+                      onClick={() => handleMoveProvider(provider.id, "down")}
+                      disabled={idx === providers.length - 1 || isLocked("providers")}
                       className={cn(
                         "p-0.5 rounded hover:bg-white/10",
-                        (idx === orderedProviders.length - 1 || isLocked("provider_order")) &&
-                          "opacity-20 pointer-events-none",
+                        (idx === providers.length - 1 || isLocked("providers")) && "opacity-20 pointer-events-none",
                       )}
                     >
                       <ChevronDown className="h-3 w-3 text-white/50" />
@@ -527,31 +598,34 @@ function LLMTab() {
                   {/* Expand button */}
                   <button
                     onClick={() =>
-                      setExpandedProvider(isExpanded ? null : provider.key)
+                      setExpandedProvider(isExpanded ? null : provider.id)
                     }
                     className="flex flex-1 items-center gap-2 min-w-0"
                   >
                     <span className={cn("h-2 w-2 rounded-full shrink-0", statusColor)} />
                     <span className="text-sm font-medium text-white/90 truncate">
-                      {provider.label}
+                      {provider.name}
+                    </span>
+                    <span className="text-[10px] text-white/30 truncate">
+                      {provider.litellm_prefix}
                     </span>
                   </button>
 
-                  {/* Enable/disable toggle (only when configured) */}
+                  {/* Enable/disable toggle + expand */}
                   <div className="flex items-center gap-2 ml-2">
                     {isConfigured && (
-                      isLocked(provider.enabledField) ? (
+                      isLocked("providers") ? (
                         <Lock className="h-3.5 w-3.5 text-white/25" title="Managed by server admin" />
                       ) : (
                         <Toggle
                           checked={isEnabled}
-                          onChange={(v) => handleToggleProvider(provider, v)}
+                          onChange={(v) => handleToggleProvider(provider.id, v)}
                         />
                       )
                     )}
                     <button
                       onClick={() =>
-                        setExpandedProvider(isExpanded ? null : provider.key)
+                        setExpandedProvider(isExpanded ? null : provider.id)
                       }
                     >
                       {isExpanded ? (
@@ -563,78 +637,66 @@ function LLMTab() {
                   </div>
                 </div>
 
-                {/* Provider fields */}
+                {/* Provider fields (expanded) */}
                 {isExpanded && (
                   <div className="px-4 pb-4 space-y-3 border-t border-white/5">
+                    {/* API Key */}
                     <div className="pt-3">
                       <label className="text-xs text-white/50 mb-1 flex items-center gap-1.5">
                         API Key
-                        {isLocked(provider.apiKeyField) && <Lock className="h-3 w-3 text-white/25" title="Managed by server admin" />}
-                        {!isLocked(provider.apiKeyField) && savedFields[provider.apiKeyField] && <Check className="h-3 w-3 text-emerald-400" />}
+                        {savedFields[fieldKey(provider.id, "apiKey")] && <Check className="h-3 w-3 text-emerald-400" />}
                       </label>
                       <input
                         type="password"
-                        value={formState[provider.apiKeyField] ?? ""}
-                        onChange={(e) =>
-                          !isLocked(provider.apiKeyField) && handleFieldChange(provider.apiKeyField, e.target.value)
-                        }
-                        onBlur={() => !isLocked(provider.apiKeyField) && handleFieldBlur(provider.apiKeyField)}
-                        placeholder={providerConfig?.api_key_hint || "Enter API key"}
-                        disabled={isLocked(provider.apiKeyField)}
-                        title={isLocked(provider.apiKeyField) ? "Managed by server admin" : undefined}
-                        className={cn(
-                          "w-full rounded-md bg-white/5 border border-white/10 px-3 py-1.5 text-sm text-white placeholder-white/20 focus:outline-none focus:ring-2 focus:ring-blue-500/50",
-                          isLocked(provider.apiKeyField) && "opacity-40 cursor-not-allowed",
-                        )}
+                        value={formState[fieldKey(provider.id, "apiKey")] ?? ""}
+                        onChange={(e) => handleFieldChange(provider.id, "apiKey", e.target.value)}
+                        onBlur={() => handleFieldBlur(provider.id, "apiKey")}
+                        placeholder={provider.api_key_hint || "Enter API key"}
+                        className="w-full rounded-md bg-white/5 border border-white/10 px-3 py-1.5 text-sm text-white placeholder-white/20 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
                       />
                     </div>
+
+                    {/* Model */}
                     <div>
                       <label className="text-xs text-white/50 mb-1 flex items-center gap-1.5">
                         Model
-                        {isLocked(provider.modelField) && <Lock className="h-3 w-3 text-white/25" title="Managed by server admin" />}
-                        {!isLocked(provider.modelField) && savedFields[provider.modelField] && <Check className="h-3 w-3 text-emerald-400" />}
+                        {savedFields[fieldKey(provider.id, "model")] && <Check className="h-3 w-3 text-emerald-400" />}
                       </label>
                       <input
                         type="text"
-                        value={
-                          formState[provider.modelField] ??
-                          providerConfig?.model ??
-                          ""
-                        }
-                        onChange={(e) =>
-                          !isLocked(provider.modelField) && handleFieldChange(provider.modelField, e.target.value)
-                        }
-                        onBlur={() => !isLocked(provider.modelField) && handleFieldBlur(provider.modelField)}
+                        value={formState[fieldKey(provider.id, "model")] ?? provider.model}
+                        onChange={(e) => handleFieldChange(provider.id, "model", e.target.value)}
+                        onBlur={() => handleFieldBlur(provider.id, "model")}
                         placeholder="Model name"
-                        disabled={isLocked(provider.modelField)}
-                        title={isLocked(provider.modelField) ? "Managed by server admin" : undefined}
-                        className={cn(
-                          "w-full rounded-md bg-white/5 border border-white/10 px-3 py-1.5 text-sm text-white placeholder-white/20 focus:outline-none focus:ring-2 focus:ring-blue-500/50",
-                          isLocked(provider.modelField) && "opacity-40 cursor-not-allowed",
-                        )}
+                        className="w-full rounded-md bg-white/5 border border-white/10 px-3 py-1.5 text-sm text-white placeholder-white/20 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
                       />
                     </div>
-                    {"hasBase" in provider && provider.hasBase && (
-                      <div>
-                        <label className="text-xs text-white/50 mb-1 flex items-center gap-1.5">
-                          API Base URL
-                          {savedFields["custom_api_base"] && <Check className="h-3 w-3 text-emerald-400" />}
-                        </label>
-                        <input
-                          type="url"
-                          value={
-                            formState["custom_api_base"] ??
-                            providerConfig?.api_base ??
-                            ""
-                          }
-                          onChange={(e) =>
-                            handleFieldChange("custom_api_base", e.target.value)
-                          }
-                          onBlur={() => handleFieldBlur("custom_api_base")}
-                          placeholder="http://localhost:11434/v1"
-                          className="w-full rounded-md bg-white/5 border border-white/10 px-3 py-1.5 text-sm text-white placeholder-white/20 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
-                        />
-                      </div>
+
+                    {/* API Base URL */}
+                    <div>
+                      <label className="text-xs text-white/50 mb-1 flex items-center gap-1.5">
+                        API Base URL
+                        {savedFields[fieldKey(provider.id, "apiBase")] && <Check className="h-3 w-3 text-emerald-400" />}
+                      </label>
+                      <input
+                        type="url"
+                        value={formState[fieldKey(provider.id, "apiBase")] ?? provider.api_base}
+                        onChange={(e) => handleFieldChange(provider.id, "apiBase", e.target.value)}
+                        onBlur={() => handleFieldBlur(provider.id, "apiBase")}
+                        placeholder="Default (leave empty for standard API)"
+                        className="w-full rounded-md bg-white/5 border border-white/10 px-3 py-1.5 text-sm text-white placeholder-white/20 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+                      />
+                    </div>
+
+                    {/* Delete button */}
+                    {!isLocked("providers") && (
+                      <button
+                        onClick={() => handleDeleteProvider(provider.id)}
+                        className="flex items-center gap-1.5 text-xs text-red-400/60 hover:text-red-400 transition-colors mt-2"
+                      >
+                        <Trash2 className="h-3 w-3" />
+                        Remove provider
+                      </button>
                     )}
                   </div>
                 )}
@@ -687,10 +749,11 @@ function AIToolsTab() {
       setCustomSystemPrompt(null);
       setShowCustomPrompt(false);
       setCustomPrompt("");
-      // Apply preset's default tools
+      // Apply preset's default tools (only boolean toggles — exclude string fields)
       const preset = presets.find((p) => p.id === presetId);
       if (preset) {
-        setFeatureToggles(preset.default_tools as Partial<typeof featureToggles>);
+        const { deep_think, agent_mode, ...boolToggles } = preset.default_tools as Record<string, unknown>;
+        setFeatureToggles(boolToggles as Partial<FeatureToggles>);
       }
     } catch (err) {
       console.error("Failed to select preset:", err);
@@ -857,6 +920,15 @@ function AIToolsTab() {
         </p>
         <DeepThinkSelector />
       </div>
+
+      {/* Agent Mode */}
+      <div>
+        <h3 className="text-sm font-medium text-white/80 mb-2">Agent Mode</h3>
+        <p className="text-xs text-white/40 mb-3">
+          Controls how the AI processes conversation. Unified uses a single agent; Specialists runs focused micro-agents in parallel.
+        </p>
+        <AgentModeSelector />
+      </div>
     </div>
   );
 }
@@ -885,7 +957,7 @@ function DeepThinkSelector() {
     if (!currentSession) return;
     if (isSessionScoped) {
       removeSessionOverride("deep_think");
-      updateSessionSettings(currentSession.id, { deep_think: null as unknown as undefined }).catch(() => {});
+      updateSessionSettings(currentSession.id, { deep_think: null }).catch(() => {});
     } else {
       updateSessionOverride("deep_think", effectiveToggles.deep_think);
       updateSessionSettings(currentSession.id, { deep_think: effectiveToggles.deep_think }).catch(() => {});
@@ -941,12 +1013,112 @@ function DeepThinkSelector() {
   );
 }
 
+function AgentModeSelector() {
+  const { featureToggles, setFeatureToggles } = useSettingsStore();
+  const effectiveToggles = useSettingsStore((s) => s.getEffectiveToggles());
+  const currentSession = useSessionStore((s) => s.currentSession);
+  const sessionOverrides = useSettingsStore((s) => s.sessionOverrides);
+  const updateSessionOverride = useSettingsStore((s) => s.updateSessionOverride);
+  const removeSessionOverride = useSettingsStore((s) => s.removeSessionOverride);
+
+  const isModeSessionScoped = currentSession != null && sessionOverrides?.agent_mode !== undefined && sessionOverrides?.agent_mode !== null;
+  const isParallelSessionScoped = currentSession != null && sessionOverrides?.parallel_tools !== undefined && sessionOverrides?.parallel_tools !== null;
+
+  const handleModeChange = (value: "unified" | "specialists") => {
+    if (isModeSessionScoped && currentSession) {
+      updateSessionOverride("agent_mode", value);
+      updateSessionSettings(currentSession.id, { agent_mode: value }).catch(() => {});
+    } else {
+      setFeatureToggles({ agent_mode: value });
+      updateProfile({ agent_mode: value }).catch(() => {});
+    }
+  };
+
+  const handleParallelToggle = (value: boolean) => {
+    if (isParallelSessionScoped && currentSession) {
+      updateSessionOverride("parallel_tools", value);
+      updateSessionSettings(currentSession.id, { parallel_tools: value }).catch(() => {});
+    } else {
+      setFeatureToggles({ parallel_tools: value });
+      updateProfile({ parallel_tools: value }).catch(() => {});
+    }
+  };
+
+  const handleToggleModeScope = () => {
+    if (!currentSession) return;
+    if (isModeSessionScoped) {
+      removeSessionOverride("agent_mode");
+      updateSessionSettings(currentSession.id, { agent_mode: null }).catch(() => {});
+    } else {
+      updateSessionOverride("agent_mode", effectiveToggles.agent_mode);
+      updateSessionSettings(currentSession.id, { agent_mode: effectiveToggles.agent_mode }).catch(() => {});
+    }
+  };
+
+  const modes = [
+    { value: "unified" as const, label: "Unified" },
+    { value: "specialists" as const, label: "Specialists" },
+  ];
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <div className="flex items-center gap-2 mb-2">
+          <div className="flex gap-2 flex-1">
+            {modes.map(({ value, label }) => (
+              <button
+                key={value}
+                onClick={() => handleModeChange(value)}
+                className={cn(
+                  "flex-1 rounded-lg border px-3 py-2 text-sm font-medium transition-colors",
+                  effectiveToggles.agent_mode === value
+                    ? isModeSessionScoped
+                      ? "border-amber-500/30 bg-amber-500/10 text-amber-400"
+                      : "border-blue-500/30 bg-blue-500/10 text-blue-400"
+                    : "border-white/10 bg-white/[0.02] text-white/50 hover:bg-white/5",
+                )}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          {currentSession && (
+            <button
+              onClick={handleToggleModeScope}
+              className={cn(
+                "rounded p-1 transition-colors",
+                isModeSessionScoped
+                  ? "text-amber-400 hover:bg-amber-400/10"
+                  : "text-white/20 hover:text-white/50 hover:bg-white/5",
+              )}
+              title={isModeSessionScoped ? "Using session setting (click for global)" : "Using global setting (click to override for this session)"}
+            >
+              {isModeSessionScoped ? <Pin className="h-3.5 w-3.5" /> : <Globe className="h-3.5 w-3.5" />}
+            </button>
+          )}
+        </div>
+        {isModeSessionScoped && (
+          <p className="text-[10px] text-amber-400/70">Overridden for this session</p>
+        )}
+      </div>
+
+      <ToggleCard
+        label="Parallel Tool Execution"
+        description="Execute independent tool calls concurrently for lower latency"
+        checked={effectiveToggles.parallel_tools}
+        onChange={handleParallelToggle}
+      />
+    </div>
+  );
+}
+
 // ── Audio Tab ──
 
 function AudioTab() {
   const { audioToggles, setAudioToggles, diarization, setDiarization, serverUrl,
           micDeviceId, setMicDeviceId, systemDeviceId, setSystemDeviceId } =
     useSettingsStore();
+  const effectiveDiarization = useSettingsStore((s) => s.sessionOverrides?.diarization ?? s.diarization);
   const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null);
   const [clientDevices, setClientDevices] = useState<ClientAudioDevice[]>([]);
   const [serverDevices, setServerDevices] = useState<AudioDeviceInfo[]>([]);
@@ -1023,7 +1195,7 @@ function AudioTab() {
           label="Speaker Diarization"
           description="Distinguish multiple speakers on the system audio stream (requires pyannote + HuggingFace token)"
           settingsKey="diarization"
-          checked={useSettingsStore.getState().getEffectiveDiarization()}
+          checked={effectiveDiarization}
           onGlobalChange={async (v) => {
             setDiarization(v);
             try {

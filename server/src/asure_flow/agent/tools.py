@@ -422,7 +422,7 @@ async def execute_tool(name: str, arguments: dict, session: Session | None = Non
     Dispatches to the appropriate handler based on the tool name.
     """
     if is_passthrough(name):
-        return await execute_feature(name, arguments)
+        return execute_feature(name, arguments)
     elif name == "search_transcript":
         return await _execute_search_transcript(arguments, session)
     elif name == "search_sessions":

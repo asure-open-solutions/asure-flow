@@ -7,6 +7,7 @@ import type {
   SessionSummary,
   SessionSettings,
   ServerConfig,
+  LLMProviderConfig,
   UserProfile,
   AudioDeviceInfo,
   ClientAudioDevice,
@@ -204,6 +205,46 @@ export async function resetServerConfig(): Promise<ServerConfig> {
 
 export async function getPresets(): Promise<Preset[]> {
   return request("/api/config/presets");
+}
+
+// ── Provider CRUD ──
+
+export async function updateProvider(
+  providerId: string,
+  changes: Partial<Omit<LLMProviderConfig, "id" | "configured" | "api_key_hint">>,
+): Promise<ServerConfig> {
+  return request(`/api/config/providers/${encodeURIComponent(providerId)}`, {
+    method: "PUT",
+    body: JSON.stringify(changes),
+  });
+}
+
+export async function addProvider(provider: {
+  id: string;
+  name: string;
+  litellm_prefix?: string;
+  model?: string;
+  api_key?: string;
+  api_base?: string;
+  enabled?: boolean;
+}): Promise<ServerConfig> {
+  return request("/api/config/providers", {
+    method: "POST",
+    body: JSON.stringify(provider),
+  });
+}
+
+export async function removeProvider(providerId: string): Promise<ServerConfig> {
+  return request(`/api/config/providers/${encodeURIComponent(providerId)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function reorderProviders(order: string[]): Promise<ServerConfig> {
+  return request("/api/config/providers/order", {
+    method: "PUT",
+    body: JSON.stringify({ order }),
+  });
 }
 
 // ── User Profile ──

@@ -56,6 +56,8 @@ const DEFAULT_SETTINGS: AppSettings = {
     web_search: true,
     format_code: false,
     deep_think: "off" as const,
+    agent_mode: "unified" as const,
+    parallel_tools: false,
   },
   diarization: false,
   piiRedaction: false,
@@ -168,6 +170,8 @@ export const useSettingsStore = create<SettingsState>()(
               web_search: privacyModeActivated ? false : serverProfile.web_search,
               format_code: serverProfile.format_code,
               deep_think: serverProfile.deep_think,
+              agent_mode: serverProfile.agent_mode ?? "unified",
+              parallel_tools: serverProfile.parallel_tools ?? false,
             },
             diarization: serverProfile.diarization_enabled,
             piiRedaction: serverProfile.pii_redaction,
@@ -213,6 +217,8 @@ export const useSettingsStore = create<SettingsState>()(
           web_search: o.web_search ?? state.featureToggles.web_search,
           format_code: o.format_code ?? state.featureToggles.format_code,
           deep_think: o.deep_think ?? state.featureToggles.deep_think,
+          agent_mode: o.agent_mode ?? state.featureToggles.agent_mode,
+          parallel_tools: o.parallel_tools ?? state.featureToggles.parallel_tools,
         };
       },
 

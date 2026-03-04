@@ -9,7 +9,11 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from asure_flow.agent.router import get_router, init_router
-from asure_flow.config import settings, update_settings, reset_settings
+from asure_flow.config import (
+    ProviderEntry, settings, update_settings, reset_settings,
+    update_provider as _update_provider, add_provider as _add_provider,
+    remove_provider as _remove_provider, reorder_providers as _reorder_providers,
+)
 from asure_flow.profile import profile, update_profile, reset_profile
 from asure_flow.sessions.manager import session_manager
 from asure_flow.sessions.models import Session, SessionSettings, SessionSummary
@@ -238,33 +242,11 @@ async def generate_followup_endpoint(session_id: str, body: GenerateFollowupRequ
 
 
 class UpdateConfigRequest(BaseModel):
-    """Server-admin settings (Tier 1): hardware, secrets, provider configuration.
+    """Server-admin settings (Tier 1): hardware, secrets, non-provider configuration.
 
+    Provider configuration uses dedicated CRUD endpoints under /api/config/providers.
     User preferences (feature toggles, AI preset, privacy) are in PUT /api/profile.
     """
-    # LLM providers (all optional — only send what changed)
-    openrouter_api_key: Optional[str] = None
-    openrouter_model: Optional[str] = None
-    openai_api_key: Optional[str] = None
-    openai_model: Optional[str] = None
-    gemini_api_key: Optional[str] = None
-    gemini_model: Optional[str] = None
-    hf_api_key: Optional[str] = None
-    hf_model: Optional[str] = None
-    github_token: Optional[str] = None
-    github_model: Optional[str] = None
-    custom_api_key: Optional[str] = None
-    custom_api_base: Optional[str] = None
-    custom_model: Optional[str] = None
-    # LLM provider toggles
-    openrouter_enabled: Optional[bool] = None
-    openai_enabled: Optional[bool] = None
-    gemini_enabled: Optional[bool] = None
-    hf_enabled: Optional[bool] = None
-    github_enabled: Optional[bool] = None
-    custom_enabled: Optional[bool] = None
-    # LLM provider order
-    provider_order: Optional[list[str]] = None
     # Transcription
     whisper_model: Optional[str] = None
     whisper_device: Optional[str] = None  # "cuda" | "cpu"
@@ -275,6 +257,8 @@ class UpdateConfigRequest(BaseModel):
     # Diarization hardware
     hf_diarization_token: Optional[str] = None
     diarization_device: Optional[str] = None
+    # LLM routing strategy
+    routing_strategy: Optional[str] = None
 
 
 class UpdateProfileRequest(BaseModel):
@@ -324,12 +308,18 @@ async def update_config(body: UpdateConfigRequest):
 
     device_change = changes.pop("whisper_device", None)
     model_change = changes.pop("whisper_model", None)
+    routing_change = changes.pop("routing_strategy", None)
 
-    # Apply config changes and rebuild router
+    # Apply config changes
     if changes:
         update_settings(**changes)
+        logger.info("Config updated: %s", list(changes.keys()))
+
+    # Apply routing strategy change (requires router rebuild)
+    if routing_change and routing_change != settings.routing_strategy:
+        update_settings(routing_strategy=routing_change)
         init_router()
-        logger.info("Config updated, router rebuilt")
+        logger.info("Routing strategy changed to: %s, router rebuilt", routing_change)
 
     # Apply whisper model change (requires model reload)
     needs_reload = False
@@ -373,6 +363,80 @@ async def reset_config():
     init_router()
     await whisper_engine.load()
     logger.info("Config and profile reset to defaults, router and whisper reloaded")
+    return settings.to_client_config()
+
+
+# ── Provider CRUD ──
+
+
+class ProviderUpdateRequest(BaseModel):
+    """Merge-update a single provider."""
+    name: Optional[str] = None
+    litellm_prefix: Optional[str] = None
+    model: Optional[str] = None
+    api_key: Optional[str] = None
+    api_base: Optional[str] = None
+    enabled: Optional[bool] = None
+
+
+class ProviderCreateRequest(BaseModel):
+    """Create a new provider."""
+    id: str
+    name: str
+    litellm_prefix: str = "openai"
+    model: str = ""
+    api_key: Optional[str] = None
+    api_base: Optional[str] = None
+    enabled: bool = True
+
+
+class ProviderOrderRequest(BaseModel):
+    order: list[str]
+
+
+@router.put("/config/providers/{provider_id}")
+async def update_single_provider(provider_id: str, body: ProviderUpdateRequest):
+    """Update a single provider entry (merge-style)."""
+    changes = body.model_dump(exclude_none=True)
+    if not changes:
+        return settings.to_client_config()
+    result = _update_provider(provider_id, **changes)
+    if result is None:
+        raise HTTPException(404, f"Provider '{provider_id}' not found")
+    init_router()
+    logger.info("Provider '%s' updated, router rebuilt", provider_id)
+    return settings.to_client_config()
+
+
+@router.post("/config/providers")
+async def create_provider(body: ProviderCreateRequest):
+    """Add a new provider entry."""
+    entry = ProviderEntry(**body.model_dump())
+    try:
+        _add_provider(entry)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    init_router()
+    logger.info("Provider '%s' added, router rebuilt", entry.id)
+    return settings.to_client_config()
+
+
+@router.delete("/config/providers/{provider_id}")
+async def delete_provider(provider_id: str):
+    """Remove a provider entry."""
+    if not _remove_provider(provider_id):
+        raise HTTPException(404, f"Provider '{provider_id}' not found")
+    init_router()
+    logger.info("Provider '%s' removed, router rebuilt", provider_id)
+    return settings.to_client_config()
+
+
+@router.put("/config/providers/order")
+async def reorder_providers_endpoint(body: ProviderOrderRequest):
+    """Reorder providers by ID list (position = fallback priority)."""
+    _reorder_providers(body.order)
+    init_router()
+    logger.info("Provider order updated, router rebuilt")
     return settings.to_client_config()
 
 

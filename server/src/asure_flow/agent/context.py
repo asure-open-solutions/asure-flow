@@ -17,8 +17,27 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Approximate tokens per character (conservative estimate for English text)
+# Approximate tokens per character (fallback for when litellm is unavailable)
 _CHARS_PER_TOKEN = 4
+
+# Lazy-init flag for LiteLLM token counting
+_litellm_token_counter = None
+_litellm_checked = False
+
+
+def _get_token_counter():
+    """Lazily import litellm.token_counter; returns callable or None."""
+    global _litellm_token_counter, _litellm_checked
+    if _litellm_checked:
+        return _litellm_token_counter
+    _litellm_checked = True
+    try:
+        from litellm import token_counter
+        _litellm_token_counter = token_counter
+        logger.debug("Using LiteLLM token_counter for accurate token estimation")
+    except Exception:
+        logger.debug("LiteLLM token_counter unavailable, using char-based estimation")
+    return _litellm_token_counter
 
 # Default token budgets
 CONTEXT_TOKEN_BUDGET = 6000  # tokens for the conversation context window
@@ -33,7 +52,13 @@ SUMMARY_REFRESH_INTERVAL = 15
 
 
 def _estimate_tokens(text: str) -> int:
-    """Rough token estimate from character count."""
+    """Estimate token count — uses LiteLLM's tiktoken-based counter when available, falls back to char-based."""
+    counter = _get_token_counter()
+    if counter is not None:
+        try:
+            return max(1, counter(model="gpt-4o", text=text))
+        except Exception:
+            logger.debug("token_counter failed, using char estimate", exc_info=True)
     return max(1, len(text) // _CHARS_PER_TOKEN)
 
 

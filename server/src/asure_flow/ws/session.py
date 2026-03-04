@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, asdict
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -14,8 +15,9 @@ from asure_flow.agent.context import build_context, build_prior_outputs, generat
 from asure_flow.agent.loop import run_agent
 from asure_flow.agent.presets import build_system_prompt, DEFAULT_PRESET
 from asure_flow.agent.router import get_router
+from asure_flow.agent.specialists import get_enabled_specialists, run_specialists
 from asure_flow.config import settings
-from asure_flow.profile import profile
+from asure_flow.profile import profile, update_profile
 from asure_flow.search.embeddings import embedding_engine
 from asure_flow.search.index import get_index
 from asure_flow.sessions.manager import session_manager
@@ -26,28 +28,131 @@ router = APIRouter()
 
 AUTOSAVE_INTERVAL = 30  # seconds
 
-# ── Agent trigger timing ──
-OTHER_SPEAKER_DEBOUNCE = 0.6   # Fire quickly after the other speaker stops
-USER_DEBOUNCE = 1.2            # Fire after the user stops
-MONOLOGUE_INTERVAL = 20.0      # Periodic fire during long unbroken speech
-RERUN_CONTEXT_ENTRIES = 5      # How many recent entries to use for rerun triggers
+# ── Smart trigger constants ──
+MIN_FIRE_INTERVAL = 3.0            # Minimum seconds between agent fires (cost throttle)
+MONOLOGUE_INTERVAL = 15.0          # Periodic fire during long unbroken speech
+SUMMARY_CHECK_INTERVAL = 5.0       # How often to check if rolling summary needs refresh
+RERUN_CONTEXT_ENTRIES = 5          # How many recent entries to use for rerun triggers
+
+# Debounce delays (lowered since trivial gate saves us from wasted calls)
+DELAY_IMMEDIATE = 0.0              # Other asked a question
+DELAY_FAST = 0.3                   # Other → User transition (suggestions needed)
+DELAY_QUICK = 0.5                  # Speaker changed
+DELAY_NORMAL = 1.0                 # Same speaker continues
 
 # ── Suggestion echo / dedup detection ──
-ECHO_THRESHOLD = 0.6           # Word containment ratio to detect user reading a suggestion
-DEDUP_THRESHOLD = 0.6          # Similarity ratio to suppress near-duplicate suggestions
-ECHO_SUGGESTION_LOOKBACK = 5   # How many recent suggestions to check against
+ECHO_THRESHOLD = 0.6
+DEDUP_THRESHOLD = 0.6
+ECHO_SUGGESTION_LOOKBACK = 5
+
+# ── Trivial content patterns ──
+_TRIVIAL_PATTERN = re.compile(
+    r'^(um+|uh+|hmm+|ah+|oh+|ok(ay)?|yeah|yep|yea|nah|no|yes|sure|right'
+    r'|hi|hey|hello|bye|goodbye|thanks|thank you|sorry|excuse me'
+    r'|mhm|hm|uh-huh|mm|so|well|like|you know|i mean)[\.\?\!,]*$',
+    re.IGNORECASE,
+)
+
+_INTERROGATIVE_WORDS = frozenset({
+    "what", "who", "where", "when", "why", "how",
+    "can", "could", "would", "should", "is", "are",
+    "do", "does", "did", "will", "have", "has",
+})
+
+_MIN_SUBSTANTIVE_WORDS = 3
+
+
+# ── Trigger signal analysis ──
+
+
+@dataclass
+class TriggerSignals:
+    """Cheap-to-compute signals about pending entries."""
+    word_count: int
+    is_trivial: bool
+    has_question: bool
+    speaker_changed: bool
+    other_to_user: bool
+    user_just_spoke: bool
+    seconds_since_last_fire: float
+
+
+def _is_trivial_entry(text: str) -> bool:
+    """Check if a single entry is trivial filler."""
+    return bool(_TRIVIAL_PATTERN.match(text.strip()))
+
+
+def _has_question(text: str) -> bool:
+    """Detect if text contains a question."""
+    if "?" in text:
+        return True
+    first_word = text.strip().split()[0].lower() if text.strip() else ""
+    return first_word in _INTERROGATIVE_WORDS
+
+
+def _compute_signals(
+    entries: list[tuple[str, str, str, bool]],
+    last_speaker: str | None,
+    last_fire_time: float,
+) -> TriggerSignals:
+    """Compute trigger signals from pending entries."""
+    combined_text = " ".join(t for _, t, _, _ in entries)
+    words = combined_text.split()
+    word_count = len(words)
+
+    is_trivial = all(_is_trivial_entry(t) for _, t, _, _ in entries if t.strip())
+    has_q = any(_has_question(t) for _, t, _, is_u in entries if not is_u)
+
+    last_entry_is_user = entries[-1][3] if entries else False
+    prev_was_other = last_speaker is not None and last_speaker != "User"
+
+    return TriggerSignals(
+        word_count=word_count,
+        is_trivial=is_trivial,
+        has_question=has_q,
+        speaker_changed=(last_speaker is not None and entries[-1][0] != last_speaker) if entries else False,
+        other_to_user=last_entry_is_user and prev_was_other,
+        user_just_spoke=last_entry_is_user,
+        seconds_since_last_fire=time.monotonic() - last_fire_time,
+    )
+
+
+def _compute_trigger_delay(signals: TriggerSignals) -> float | None:
+    """Determine trigger delay from signals. Returns None to skip entirely."""
+    # Gate: skip trivial content
+    if signals.is_trivial:
+        return None
+
+    # Gate: skip very short non-questions
+    if signals.word_count < _MIN_SUBSTANTIVE_WORDS and not signals.has_question:
+        return None
+
+    # Priority-based delay
+    if signals.has_question:
+        delay = DELAY_IMMEDIATE
+    elif signals.other_to_user:
+        delay = DELAY_FAST
+    elif signals.speaker_changed:
+        delay = DELAY_QUICK
+    else:
+        delay = DELAY_NORMAL
+
+    # Enforce minimum fire interval (cost throttle)
+    if signals.seconds_since_last_fire < MIN_FIRE_INTERVAL:
+        remaining = MIN_FIRE_INTERVAL - signals.seconds_since_last_fire
+        delay = max(delay, remaining)
+
+    return delay
+
+
+# ── Text helpers ──
 
 
 def _normalize_words(text: str) -> set[str]:
-    """Extract lowercase word tokens from text."""
     return set(re.findall(r'\w+', text.lower()))
 
 
 def _suggestion_echo_score(user_text: str, suggestion_text: str) -> float:
-    """Fraction of user's words that appear in the suggestion (containment).
-
-    High score means the user is likely reading/speaking a prior suggestion.
-    """
     user_words = _normalize_words(user_text)
     sug_words = _normalize_words(suggestion_text)
     if len(user_words) < 3:
@@ -56,60 +161,48 @@ def _suggestion_echo_score(user_text: str, suggestion_text: str) -> float:
 
 
 def _suggestion_similarity(a: str, b: str) -> float:
-    """Symmetric similarity — max of containment in both directions.
-
-    Used for dedup: catches both near-subsets and near-supersets.
-    """
     words_a = _normalize_words(a)
     words_b = _normalize_words(b)
     if not words_a or not words_b:
         return 0.0
     overlap = len(words_a & words_b)
-    return max(overlap / len(words_a), overlap / len(words_b))
+    return overlap / len(words_a | words_b)
+
+
+# ── Feature toggles ──
 
 
 @dataclass
 class FeatureToggles:
-    # AI features
     fact_checking: bool = True
     suggestions: bool = True
     notes: bool = True
-    # AI tools
     search_transcript: bool = True
     search_sessions: bool = True
     web_search: bool = True
     format_code: bool = True
-    # Deep think mode: "off", "auto", "always"
     deep_think: str = "off"
+    agent_mode: str = "unified"   # "unified" | "specialists"
+    parallel_tools: bool = False  # parallel tool execution in unified mode
 
 
 def _resolve_system_prompt(toggles: FeatureToggles) -> str:
-    """Resolve the system prompt — custom prompt verbatim, or dynamic build from preset + toggles."""
     if profile.custom_system_prompt:
         return profile.custom_system_prompt
-
     preset_id = profile.ai_preset or DEFAULT_PRESET
-    toggles_dict = {
-        k: v for k, v in asdict(toggles).items() if k != "deep_think"
-    }
-    return build_system_prompt(
-        preset_id,
-        toggles_dict,
-        deep_think_mode=toggles.deep_think,
-    )
+    toggles_dict = {k: v for k, v in asdict(toggles).items() if k != "deep_think"}
+    return build_system_prompt(preset_id, toggles_dict, deep_think_mode=toggles.deep_think)
 
 
 def _any_enabled(toggles: FeatureToggles) -> bool:
-    """Check if any feature or tool is enabled."""
     return (
-        toggles.fact_checking
-        or toggles.suggestions
-        or toggles.notes
-        or toggles.search_transcript
-        or toggles.search_sessions
-        or toggles.web_search
-        or toggles.format_code
+        toggles.fact_checking or toggles.suggestions or toggles.notes
+        or toggles.search_transcript or toggles.search_sessions
+        or toggles.web_search or toggles.format_code
     )
+
+
+# ── WebSocket endpoint ──
 
 
 @router.websocket("/ws/session/{session_id}")
@@ -146,20 +239,22 @@ async def ws_session(websocket: WebSocket, session_id: str):
         for k, v in overrides.items():
             if hasattr(toggles, k):
                 setattr(toggles, k, v)
+
     agent_task: asyncio.Task | None = None
     trigger_task: asyncio.Task | None = None
     monologue_task: asyncio.Task | None = None
+    summary_bg_task: asyncio.Task | None = None
     pending_entries: list[tuple[str, str, str, bool]] = []  # (speaker, text, entry_id, is_user)
     rolling_summary: str | None = None
     last_summarized_index = 0
-    last_speaker: str | None = None  # raw speaker label of most recent transcription
+    last_speaker: str | None = None
+    last_fire_time: float = 0.0  # monotonic timestamp of last agent fire
 
-    # ── Agent fire logic (extracted from old _fire_agent) ──
+    # ── Agent fire logic ──
 
-    async def _do_fire_agent() -> None:
-        nonlocal agent_task, rolling_summary, last_summarized_index
+    async def _do_fire_agent(max_iterations: int = 5) -> None:
+        nonlocal agent_task, last_fire_time
 
-        # Snapshot and clear the buffer
         entries = pending_entries[:]
         pending_entries.clear()
         if not entries:
@@ -169,27 +264,25 @@ async def ws_session(websocket: WebSocket, session_id: str):
         if not llm_router or not _any_enabled(toggles):
             return
 
-        # Cancel previous agent task if still running
+        # Cancel previous agent task if still running (preemption)
         if agent_task and not agent_task.done():
             agent_task.cancel()
             try:
                 await agent_task
             except asyncio.CancelledError:
                 pass
+            # Notify client of preemption
+            try:
+                await websocket.send_json({
+                    "type": "ai_event",
+                    "event": {"type": "preempted"},
+                })
+            except Exception:
+                pass
 
-        # Refresh rolling summary if needed
-        if needs_summary_refresh(session, last_summarized_index):
-            new_end = len(session.transcript) - 5
-            if new_end > last_summarized_index:
-                rolling_summary = await generate_summary(
-                    router=llm_router,
-                    session=session,
-                    existing_summary=rolling_summary,
-                    start_index=last_summarized_index,
-                    end_index=new_end,
-                )
-                last_summarized_index = new_end
+        last_fire_time = time.monotonic()
 
+        # Use whatever rolling summary is available (updated by background task)
         context = build_context(session, rolling_summary)
         prior_outputs = build_prior_outputs(session)
         system_prompt = _resolve_system_prompt(toggles)
@@ -197,13 +290,10 @@ async def ws_session(websocket: WebSocket, session_id: str):
         session_context = session.context
         effective_ws = toggles.web_search and not profile.privacy_mode
 
-        # Combine all buffered entries
-        transcript_text = "\n".join(
-            f"[{s}]: {t}" for s, t, _, _ in entries
-        )
+        transcript_text = "\n".join(f"[{s}]: {t}" for s, t, _, _ in entries)
         last_entry_id = entries[-1][2]
 
-        # ── Echo detection: is the user reading a prior suggestion? ──
+        # Echo detection
         if session.suggestions:
             recent_sugs = [s.text for s in session.suggestions[-ECHO_SUGGESTION_LOOKBACK:]]
             user_texts = [t for _, t, _, is_user in entries if is_user]
@@ -220,25 +310,61 @@ async def ws_session(websocket: WebSocket, session_id: str):
 
         async def process_agent():
             try:
-                async for event in run_agent(
-                    router=llm_router,
-                    transcript_text=transcript_text,
-                    conversation_context=context,
-                    session_context=session_context,
-                    prior_outputs=prior_outputs,
-                    fact_checking=toggles.fact_checking,
-                    suggestions=toggles.suggestions,
-                    notes=toggles.notes,
-                    search_transcript=toggles.search_transcript,
-                    search_sessions=toggles.search_sessions,
-                    web_search=effective_ws,
-                    format_code=toggles.format_code,
-                    deep_think=deep_think_enabled,
-                    system_prompt=system_prompt,
-                    session=session,
-                ):
-                    if event["type"] == "tool_result":
+                if toggles.agent_mode == "specialists":
+                    # Parallel specialist agents mode
+                    specialists = get_enabled_specialists(
+                        fact_checking=toggles.fact_checking,
+                        suggestions=toggles.suggestions,
+                        notes=toggles.notes,
+                        search_transcript=toggles.search_transcript,
+                        search_sessions=toggles.search_sessions,
+                        web_search=effective_ws,
+                        format_code=toggles.format_code,
+                        deep_think_mode=toggles.deep_think,
+                    )
+                    preset_id = profile.ai_preset or "general"
+                    event_stream = run_specialists(
+                        router=llm_router,
+                        specialists=specialists,
+                        transcript_text=transcript_text,
+                        conversation_context=context,
+                        session_context=session_context,
+                        prior_outputs=prior_outputs,
+                        preset_id=preset_id,
+                        deep_think_mode=toggles.deep_think,
+                        session=session,
+                        parallel_tools=toggles.parallel_tools,
+                    )
+                else:
+                    # Unified agent mode (default)
+                    event_stream = run_agent(
+                        router=llm_router,
+                        transcript_text=transcript_text,
+                        conversation_context=context,
+                        session_context=session_context,
+                        prior_outputs=prior_outputs,
+                        fact_checking=toggles.fact_checking,
+                        suggestions=toggles.suggestions,
+                        notes=toggles.notes,
+                        search_transcript=toggles.search_transcript,
+                        search_sessions=toggles.search_sessions,
+                        web_search=effective_ws,
+                        format_code=toggles.format_code,
+                        deep_think=deep_think_enabled,
+                        system_prompt=system_prompt,
+                        session=session,
+                        max_iterations=max_iterations,
+                        parallel_tools=toggles.parallel_tools,
+                    )
+
+                async for event in event_stream:
+                    if event.get("type") == "tool_result":
                         _persist_tool_result(session, last_entry_id, event)
+                    # Accumulate token usage on done events
+                    if event.get("type") == "done":
+                        usage = event.get("usage", {})
+                        session.token_usage.prompt_tokens += usage.get("prompt_tokens", 0)
+                        session.token_usage.completion_tokens += usage.get("completion_tokens", 0)
                     await websocket.send_json({"type": "ai_event", "event": event})
             except Exception:
                 logger.exception("Agent processing error")
@@ -252,14 +378,48 @@ async def ws_session(websocket: WebSocket, session_id: str):
 
         agent_task = asyncio.create_task(process_agent())
 
-    async def _schedule_fire(delay: float) -> None:
-        """Wait for `delay` seconds, then fire the agent."""
+    async def _schedule_fire(delay: float, max_iterations: int = 5) -> None:
         if delay > 0:
             await asyncio.sleep(delay)
-        await _do_fire_agent()
+        await _do_fire_agent(max_iterations)
+
+    # ── Background summary refresh (off critical path) ──
+
+    async def _summary_refresh_loop() -> None:
+        nonlocal rolling_summary, last_summarized_index
+        consecutive_failures = 0
+        while True:
+            await asyncio.sleep(SUMMARY_CHECK_INTERVAL)
+            if not needs_summary_refresh(session, last_summarized_index):
+                continue
+            llm_router = get_router()
+            if not llm_router:
+                continue
+            new_end = len(session.transcript) - 5
+            if new_end <= last_summarized_index:
+                continue
+            try:
+                rolling_summary = await generate_summary(
+                    router=llm_router,
+                    session=session,
+                    existing_summary=rolling_summary,
+                    start_index=last_summarized_index,
+                    end_index=new_end,
+                )
+                last_summarized_index = new_end
+                consecutive_failures = 0
+            except Exception:
+                consecutive_failures += 1
+                logger.exception("Background summary refresh failed (attempt %d)", consecutive_failures)
+                if consecutive_failures == 3:
+                    try:
+                        await websocket.send_json({"type": "warning", "message": "Rolling summary generation is failing repeatedly"})
+                    except Exception:
+                        pass
+
+    # ── Monologue check ──
 
     async def _monologue_check() -> None:
-        """Periodic check: fire agent if too long since last run and entries pending."""
         nonlocal trigger_task
         while True:
             await asyncio.sleep(MONOLOGUE_INTERVAL)
@@ -277,10 +437,10 @@ async def ws_session(websocket: WebSocket, session_id: str):
         if trigger_task and not trigger_task.done():
             trigger_task.cancel()
 
-    def _start_trigger(delay: float) -> None:
+    def _start_trigger(delay: float, max_iterations: int = 5) -> None:
         nonlocal trigger_task
         _cancel_trigger()
-        trigger_task = asyncio.create_task(_schedule_fire(delay))
+        trigger_task = asyncio.create_task(_schedule_fire(delay, max_iterations))
 
     # Auto-save task
     async def autosave_loop():
@@ -290,11 +450,11 @@ async def ws_session(websocket: WebSocket, session_id: str):
             try:
                 await websocket.send_json({"type": "session_saved"})
             except Exception:
-                # WebSocket may be closing — keep saving but stop notifying
                 logger.debug("Autosave WS notification failed, continuing saves")
 
     save_task = asyncio.create_task(autosave_loop())
     monologue_task = asyncio.create_task(_monologue_check())
+    summary_bg_task = asyncio.create_task(_summary_refresh_loop())
 
     try:
         while True:
@@ -311,23 +471,21 @@ async def ws_session(websocket: WebSocket, session_id: str):
                 toggles.web_search = msg.get("web_search", toggles.web_search)
                 toggles.format_code = msg.get("format_code", toggles.format_code)
                 toggles.deep_think = msg.get("deep_think", toggles.deep_think)
-                # Session context update
+                toggles.agent_mode = msg.get("agent_mode", toggles.agent_mode)
+                toggles.parallel_tools = msg.get("parallel_tools", toggles.parallel_tools)
                 if "session_context" in msg:
                     session.context = msg["session_context"]
-                # Privacy mode update
                 if "privacy_mode" in msg:
                     try:
-                        from asure_flow.config import update_settings
-                        update_settings(privacy_mode=msg["privacy_mode"])
+                        update_profile(privacy_mode=msg["privacy_mode"])
                         if msg["privacy_mode"]:
-                            update_settings(pii_redaction=True)
+                            update_profile(pii_redaction=True, web_search=False)
                             toggles.web_search = False
                     except Exception:
                         logger.warning("Failed to persist privacy_mode setting", exc_info=True)
                 if "pii_redaction" in msg:
                     try:
-                        from asure_flow.config import update_settings
-                        update_settings(pii_redaction=msg["pii_redaction"])
+                        update_profile(pii_redaction=msg["pii_redaction"])
                     except Exception:
                         logger.warning("Failed to persist pii_redaction setting", exc_info=True)
                 logger.info("Feature toggles updated: %s", toggles)
@@ -345,10 +503,8 @@ async def ws_session(websocket: WebSocket, session_id: str):
                     if pii_matches:
                         logger.debug("Redacted %d PII items", len(pii_matches))
 
-                # Resolve display name for speaker
                 speaker = session.get_display_name(raw_speaker)
 
-                # Add to session transcript (include audio timing for diarization)
                 audio_start = msg.get("audio_start")
                 audio_end = msg.get("audio_end")
                 entry_id = msg.get("entry_id")
@@ -357,34 +513,26 @@ async def ws_session(websocket: WebSocket, session_id: str):
                     entry_id=entry_id,
                 )
 
-                # Generate embedding for semantic search (fire-and-forget)
                 if embedding_engine.available:
                     asyncio.create_task(_embed_entry(session.id, entry.id, text))
 
-                # ── Speaker-aware trigger logic ──
+                # ── Smart trigger: compute signals and decide ──
                 is_user = raw_speaker == "User"
-
-                # Buffer entry for agent run
                 pending_entries.append((speaker, text, entry.id, is_user))
-                prev_was_user = last_speaker == "User" if last_speaker is not None else None
+
+                signals = _compute_signals(pending_entries, last_speaker, last_fire_time)
                 last_speaker = raw_speaker
 
-                if is_user and prev_was_user is False:
-                    # Other → User: fire IMMEDIATELY (user needs suggestions NOW)
-                    _start_trigger(0.0)
-                elif is_user:
-                    # User continues or first speaker is user: normal debounce
-                    _start_trigger(USER_DEBOUNCE)
-                elif not is_user and prev_was_user is True:
-                    # User → Other: fire user's words with user debounce
-                    _start_trigger(USER_DEBOUNCE)
+                delay = _compute_trigger_delay(signals)
+                if delay is not None:
+                    # Use fast path (fewer iterations) for urgent scenarios
+                    # Base on has_question directly — delay may be > 0 after throttle even for questions
+                    iters = 2 if signals.has_question else 5
+                    _start_trigger(delay, max_iterations=iters)
                 else:
-                    # Other continues or first speaker is other: fast debounce
-                    _start_trigger(OTHER_SPEAKER_DEBOUNCE)
+                    logger.debug("Skipping trivial segment: %r", text[:50])
 
             elif msg_type == "rerun":
-                # Re-trigger agent on recent transcript (used after edit, delete,
-                # toggle change, reconnect, or context update)
                 if session.transcript:
                     recent = session.transcript[-RERUN_CONTEXT_ENTRIES:]
                     pending_entries.clear()
@@ -393,11 +541,9 @@ async def ws_session(websocket: WebSocket, session_id: str):
                     _start_trigger(0.0)
 
             elif msg_type == "relabel":
-                # Speaker diarization relabel: update transcript entry speaker
                 entry_id = msg.get("entry_id", "")
                 new_speaker = msg.get("speaker", "")
                 if entry_id and new_speaker:
-                    # Match by server-side ID or by audio timing key
                     for te in session.transcript:
                         audio_key = (
                             f"{te.audio_start:.3f}-{te.audio_end:.3f}"
@@ -414,14 +560,13 @@ async def ws_session(websocket: WebSocket, session_id: str):
                 role = msg.get("role")
                 if speaker_label and display_name:
                     participant = session.rename_speaker(speaker_label, display_name, role)
-                    session_manager.save(session)
+                    await session_manager.save_async(session)
                     await websocket.send_json({
                         "type": "speaker_renamed",
                         "participant": participant.model_dump(mode="json"),
                     })
 
             elif msg_type == "end_session":
-                # Extract topics and entities before ending
                 llm_router = get_router()
                 if llm_router and session.transcript:
                     try:
@@ -441,14 +586,13 @@ async def ws_session(websocket: WebSocket, session_id: str):
     except Exception:
         logger.exception("Session WebSocket error")
     finally:
-        for task in [save_task, trigger_task, monologue_task, agent_task]:
+        for task in [save_task, trigger_task, monologue_task, agent_task, summary_bg_task]:
             if task and not task.done():
                 task.cancel()
                 try:
                     await task
                 except (asyncio.CancelledError, Exception):
                     pass
-        # Final save
         session_manager.save(session)
 
 
@@ -461,11 +605,9 @@ def _persist_tool_result(session, transcript_id: str, event: dict) -> None:
         suggestion_text = result.get("suggestion", "")
         responding_to = result.get("responding_to", "")
         if suggestion_text:
-            # Dedup: suppress if too similar to a recent suggestion
             for recent in session.suggestions[-ECHO_SUGGESTION_LOOKBACK:]:
                 if _suggestion_similarity(suggestion_text, recent.text) >= DEDUP_THRESHOLD:
                     logger.info("Suppressing duplicate suggestion (too similar to recent)")
-                    # Clear the suggestion so the client skips it too
                     event["result"] = {"suggestion": "", "suppressed": True}
                     return
             session.add_suggestion(suggestion_text, responding_to=responding_to)
@@ -486,7 +628,6 @@ def _persist_tool_result(session, transcript_id: str, event: dict) -> None:
 
     elif name == "extract_notes":
         note_entries: list[NoteEntry] = []
-        # Handle action_items: may be strings or structured objects with owner/due_date
         for item in result.get("action_items", []):
             if isinstance(item, dict):
                 content = item.get("content", "")
@@ -499,7 +640,6 @@ def _persist_tool_result(session, transcript_id: str, event: dict) -> None:
                     ))
             elif isinstance(item, str) and item:
                 note_entries.append(NoteEntry(type=NoteType.ACTION_ITEM, content=item))
-        # decisions, key_facts, risks remain as string arrays
         for note_type, key in [
             (NoteType.DECISION, "decisions"),
             (NoteType.KEY_FACT, "key_facts"),
@@ -511,7 +651,6 @@ def _persist_tool_result(session, transcript_id: str, event: dict) -> None:
         session.add_notes(note_entries)
 
     elif name == "web_search":
-        # Persist web search results as key facts for reference
         web_results = result.get("results", [])
         if web_results:
             note_entries = []
@@ -527,11 +666,8 @@ def _persist_tool_result(session, transcript_id: str, event: dict) -> None:
             if note_entries:
                 session.add_notes(note_entries)
 
-    # search_transcript, search_sessions, format_code, deep_think — ephemeral, not persisted
-
 
 async def _embed_entry(session_id: str, entry_id: str, text: str) -> None:
-    """Background task: embed a transcript entry for semantic search."""
     try:
         embedding = await embedding_engine.embed_single(text)
         idx = get_index(session_id)

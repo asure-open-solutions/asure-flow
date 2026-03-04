@@ -3,6 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
+from typing import Optional
+
+from pydantic import BaseModel, Field, ValidationError
+
+logger = logging.getLogger(__name__)
 
 # ── Feature schemas (OpenAI function-calling format) ──
 # These are "passthrough" — the LLM fills in the structured output via function
@@ -252,6 +258,81 @@ def is_passthrough(name: str) -> bool:
     return name in _PASSTHROUGH_NAMES
 
 
-async def execute_feature(name: str, arguments: dict) -> str:
+def execute_feature(name: str, arguments: dict) -> str:
     """Execute a passthrough feature — just echo the LLM's structured output."""
     return json.dumps(arguments)
+
+
+# ── Structured output validation (Pydantic models) ──
+
+
+class _ClaimArgs(BaseModel):
+    claim: str
+    verdict: str
+    reasoning: str
+    fallacy: Optional[str] = None
+
+
+class FactCheckArgs(BaseModel):
+    claims: list[_ClaimArgs]
+
+
+class _ActionItemArgs(BaseModel):
+    content: str
+    owner: Optional[str] = None
+    due_date: Optional[str] = None
+
+
+class SuggestResponseArgs(BaseModel):
+    suggestion: str
+    tone: str
+    key_points: list[str]
+    responding_to: str
+
+
+class ExtractNotesArgs(BaseModel):
+    action_items: list[_ActionItemArgs] = Field(default_factory=list)
+    decisions: list[str] = Field(default_factory=list)
+    key_facts: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+
+
+class FormatCodeArgs(BaseModel):
+    code: str
+    analysis: str
+    language: Optional[str] = None
+
+
+class DeepThinkArgs(BaseModel):
+    reasoning: str
+    conclusion: str
+
+
+_VALIDATION_MODELS: dict[str, type[BaseModel]] = {
+    "fact_check": FactCheckArgs,
+    "suggest_response": SuggestResponseArgs,
+    "extract_notes": ExtractNotesArgs,
+    "format_code": FormatCodeArgs,
+    "deep_think": DeepThinkArgs,
+}
+
+
+def validate_tool_args(name: str, arguments: dict) -> str | None:
+    """Validate tool arguments against Pydantic models.
+
+    Returns None on success, or a descriptive error string on failure.
+    Only validates passthrough features — active tools are skipped.
+    """
+    model = _VALIDATION_MODELS.get(name)
+    if model is None:
+        return None
+    try:
+        model.model_validate(arguments)
+        return None
+    except ValidationError as e:
+        errors = "; ".join(
+            f"{'.'.join(str(x) for x in err['loc'])}: {err['msg']}"
+            for err in e.errors()
+        )
+        logger.warning("Validation failed for %s: %s", name, errors)
+        return f"Invalid arguments for {name}: {errors}. Please retry with valid arguments."

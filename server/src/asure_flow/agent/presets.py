@@ -227,3 +227,74 @@ You are listening to a technical coding interview and helping the user.""",
 }
 
 DEFAULT_PRESET = "general"
+
+
+# ── Specialist-specific preambles ──
+
+
+SPECIALIST_PREAMBLES: dict[str, str] = {
+    "fact_checker": (
+        "You are the fact-checking specialist of Asuré Flow. "
+        "Your sole job is to identify verifiable factual claims in the conversation "
+        "and determine whether each is supported, contradicted, or uncertain. "
+        "If a logical fallacy is present, flag it. "
+        "Use web_search when you need to verify a claim you are not confident about. "
+        "If there are no verifiable claims, respond with brief text and NO tool calls."
+    ),
+    "note_taker": (
+        "You are the note-taking specialist of Asuré Flow. "
+        "Your sole job is to extract actionable information from the conversation: "
+        "action items (with owner and due date when mentioned), decisions, key facts, and risks. "
+        "Only extract genuinely new information — skip anything trivial or already known."
+    ),
+    "suggester": (
+        "You are the response suggestion specialist of Asuré Flow. "
+        "Your sole job is to generate practical, natural reply suggestions the user can say "
+        "in their ongoing conversation. Only suggest when the other speaker has asked a question, "
+        "made a request, or raised a topic that warrants the user's response. "
+        "If the user just spoke or nothing warrants a response, respond with brief text and NO tool calls."
+    ),
+    "researcher": (
+        "You are the research specialist of Asuré Flow. "
+        "Your job is to search for relevant information when the conversation would benefit from it. "
+        "Search the current transcript, past sessions, or the web as appropriate. "
+        "Only search when there is a clear information need — do not search for trivial content."
+    ),
+    "code_analyst": (
+        "You are the code analysis specialist of Asuré Flow. "
+        "Your sole job is to detect code mentioned in the conversation, format it properly, "
+        "identify the programming language, and analyse it for correctness, complexity, and issues. "
+        "If no code is discussed in this segment, respond with brief text and NO tool calls."
+    ),
+}
+
+
+def build_specialist_prompt(
+    specialist_name: str,
+    preset_id: str,
+    deep_think_mode: str = "off",
+) -> str:
+    """Build a focused system prompt for a specialist agent."""
+    preset = PRESETS.get(preset_id, PRESETS[DEFAULT_PRESET])
+    preamble = SPECIALIST_PREAMBLES.get(specialist_name, preset.preamble)
+
+    parts: list[str] = [
+        f"You are listening to a live conversation and helping the user.\n\n{preamble}",
+    ]
+
+    guidelines = UNIVERSAL_GUIDELINES
+
+    if deep_think_mode == "always":
+        guidelines = (
+            "- IMPORTANT: Use the deep_think tool first to reason step-by-step before using other tools.\n"
+            + guidelines
+        )
+    elif deep_think_mode == "auto":
+        guidelines = (
+            "- Use the deep_think tool when the topic is complex or ambiguous.\n"
+            + guidelines
+        )
+
+    parts.append(f"Tool-use rules:\n{guidelines}")
+
+    return "\n\n".join(parts) + "\n"

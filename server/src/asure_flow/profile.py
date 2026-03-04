@@ -24,6 +24,8 @@ _PROFILE_FIELDS = frozenset({
     "web_search",
     "format_code",
     "deep_think",
+    "agent_mode",
+    "parallel_tools",
     "ai_preset",
     "custom_system_prompt",
     "diarization_enabled",
@@ -49,6 +51,10 @@ class UserProfile:
         self.web_search: bool = True
         self.format_code: bool = False
         self.deep_think: str = "off"  # "off" | "auto" | "always"
+
+        # Agent execution mode
+        self.agent_mode: str = "unified"  # "unified" | "specialists"
+        self.parallel_tools: bool = False  # parallel tool execution in unified mode
 
         # AI behaviour
         self.ai_preset: str = "general"

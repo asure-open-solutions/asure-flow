@@ -374,6 +374,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
               type: "tool_call",
               name: event.name,
               summary: `Calling ${event.name}`,
+              specialist: event.specialist,
             },
           ],
         });
@@ -395,8 +396,11 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
               timestamp: now,
               type: "tool_result",
               name: event.name,
-              summary: `${event.name}: ${summary}`,
+              summary: event.specialist
+                ? `[${event.specialist}] ${event.name}: ${summary}`
+                : `${event.name}: ${summary}`,
               detail,
+              specialist: event.specialist,
             },
           ],
         });
@@ -490,7 +494,24 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
           currentToolName: null,
           agentLog: [
             ...state.agentLog,
-            { id: genId(), timestamp: now, type: "done", summary: "Done" },
+            {
+              id: genId(),
+              timestamp: now,
+              type: "done",
+              summary: event.reason === "preempted" ? "Preempted — new input" : "Done",
+            },
+          ],
+        });
+        break;
+
+      case "preempted":
+        // Agent was cancelled because new speech arrived — clear in-progress state
+        set({
+          aiStreaming: false,
+          currentToolName: null,
+          agentLog: [
+            ...state.agentLog,
+            { id: genId(), timestamp: now, type: "done", summary: "Preempted — new input" },
           ],
         });
         break;

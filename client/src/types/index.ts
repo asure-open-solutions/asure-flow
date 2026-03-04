@@ -74,12 +74,18 @@ export interface SessionEntities {
 
 // ── AI Events ──
 
+export interface TokenUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+}
+
 export type AIEvent =
-  | { type: "content_delta"; text: string }
-  | { type: "tool_call"; name: string; arguments: Record<string, unknown> }
-  | { type: "tool_result"; name: string; result: Record<string, unknown> }
-  | { type: "done" }
-  | { type: "error"; message: string };
+  | { type: "content_delta"; text: string; specialist?: string }
+  | { type: "tool_call"; name: string; arguments: Record<string, unknown>; specialist?: string }
+  | { type: "tool_result"; name: string; result: Record<string, unknown>; specialist?: string }
+  | { type: "done"; reason?: string; usage?: TokenUsage }
+  | { type: "preempted" }
+  | { type: "error"; message: string; specialist?: string };
 
 // ── Session Settings (per-session overrides) ──
 
@@ -91,7 +97,9 @@ export interface SessionSettings {
   search_sessions?: boolean;
   web_search?: boolean;
   format_code?: boolean;
-  deep_think?: "off" | "auto" | "always";
+  deep_think?: "off" | "auto" | "always" | null;
+  agent_mode?: "unified" | "specialists" | null;
+  parallel_tools?: boolean;
   diarization?: boolean;
   piiRedaction?: boolean;
   privacyMode?: boolean;
@@ -105,6 +113,7 @@ export interface SessionSuggestion {
   id: string;
   text: string;
   timestamp: string;
+  responding_to?: string;
 }
 
 export interface Session {
@@ -120,6 +129,7 @@ export interface Session {
   participants: Participant[];
   topics: string[];
   entities: SessionEntities;
+  token_usage?: TokenUsage;
   settings?: SessionSettings | null;
 }
 
@@ -148,6 +158,9 @@ export interface FeatureToggles {
   format_code: boolean;
   // Deep think mode
   deep_think: "off" | "auto" | "always";
+  // Agent execution mode
+  agent_mode: "unified" | "specialists";
+  parallel_tools: boolean;
 }
 
 // ── Agent Activity Log ──
@@ -161,6 +174,7 @@ export interface AgentLogEntry {
   name?: string;
   summary?: string;
   detail?: string;
+  specialist?: string;
 }
 
 // ── Audio Toggles ──
@@ -206,6 +220,9 @@ export interface UserProfile {
   web_search: boolean;
   format_code: boolean;
   deep_think: "off" | "auto" | "always";
+  // Agent execution mode
+  agent_mode: "unified" | "specialists";
+  parallel_tools: boolean;
   // AI behaviour
   ai_preset: string;
   custom_system_prompt: string | null;
@@ -247,11 +264,14 @@ export interface Preset {
 // ── Server Config (from GET /api/config) ──
 
 export interface LLMProviderConfig {
-  configured: boolean;
-  enabled: boolean;
+  id: string;
+  name: string;
+  litellm_prefix: string;
   model: string;
   api_key_hint: string;
-  api_base?: string;
+  api_base: string;
+  configured: boolean;
+  enabled: boolean;
 }
 
 export interface ServerConfig {
@@ -264,7 +284,7 @@ export interface ServerConfig {
   whisper_compute_type: string;
   whisper_language: string | null;
   // LLM routing
-  provider_order: string[];
+  routing_strategy: string;
   // Audio capture mode + server-side device IDs (only relevant when audio_capture_source="server")
   audio_capture_source: "client" | "server";
   /** Server microphone device (used when audio_capture_source="server"). */
@@ -276,7 +296,8 @@ export interface ServerConfig {
   hf_diarization_token_hint: string;
   // Admin
   locked_settings: string[];
-  llm_providers: Record<string, LLMProviderConfig>;
+  // Providers (ordered array — position = fallback priority)
+  llm_providers: LLMProviderConfig[];
 }
 
 // ── Audio Devices ──
