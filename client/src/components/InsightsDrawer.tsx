@@ -33,7 +33,8 @@ export function InsightsDrawer() {
         <span className="text-xs font-semibold text-white/50 uppercase tracking-wider">Insights</span>
         <button
           onClick={() => setOpen(false)}
-          className="rounded-md p-1 text-white/30 hover:text-white/70 hover:bg-white/5 transition-colors"
+          className="rounded-md p-1 text-white/30 hover:text-white/70 hover:bg-white/5 transition-colors focus-visible:ring-1 focus-visible:ring-white/20 focus-visible:outline-none"
+          aria-label="Close insights drawer"
         >
           <X className="h-3.5 w-3.5" />
         </button>
@@ -46,7 +47,7 @@ export function InsightsDrawer() {
             key={id}
             onClick={() => setTab(id)}
             className={cn(
-              "flex-1 flex items-center justify-center gap-1.5 py-2 text-xs font-medium transition-colors",
+              "flex-1 flex items-center justify-center gap-1.5 py-2 text-xs font-medium transition-colors focus-visible:ring-1 focus-visible:ring-white/20 focus-visible:outline-none",
               activeTab === id
                 ? "text-white/90 border-b-2 border-blue-400"
                 : "text-white/35 hover:text-white/60",

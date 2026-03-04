@@ -128,6 +128,8 @@ interface SessionState {
     audioToggles?: { mic: boolean; system: boolean };
   }) => void;
   clearSuggestions: () => void;
+  clearNotes: () => void;
+  clearFactChecks: () => void;
   requestRerun: () => void;
   clearRerunRequest: () => void;
   reset: () => void;
@@ -317,6 +319,13 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
       ],
     })),
   clearSuggestions: () => set({ suggestions: [] }),
+  clearNotes: () => set({ notes: [] }),
+  clearFactChecks: () =>
+    set((state) => ({
+      transcript: state.transcript.map((e) =>
+        e.fact_checks.length > 0 ? { ...e, fact_checks: [] } : e,
+      ),
+    })),
   requestRerun: () => set({ rerunRequested: true }),
   clearRerunRequest: () => set({ rerunRequested: false }),
   setAIStreaming: (streaming) => set({ aiStreaming: streaming }),

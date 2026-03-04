@@ -15,10 +15,11 @@ export function InsightsPill() {
         "flex items-center gap-1.5 rounded-l-xl px-2.5 py-3",
         "bg-zinc-800/90 border border-r-0 border-white/10 backdrop-blur-sm",
         "text-white/50 hover:text-white/80 hover:bg-zinc-700/90 transition-all",
-        "shadow-lg",
+        "shadow-lg focus-visible:ring-1 focus-visible:ring-white/20 focus-visible:outline-none",
         unseenCount > 0 && "text-blue-400 border-blue-500/30",
       )}
       title="Open Insights (Ctrl+I)"
+      aria-label="Open insights drawer"
     >
       <Sparkles className={cn("h-4 w-4", aiStreaming && "animate-pulse text-blue-400")} />
       {unseenCount > 0 && (

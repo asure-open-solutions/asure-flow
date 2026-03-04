@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useSessionStore } from "@/stores/sessionStore";
 import { listSessions, createSession, deleteSession, getSession, exportSession, exportSessionMarkdown, renameSession } from "@/services/api";
 import { cn } from "@/lib/utils";
-import { Plus, Trash2, Clock, FileText, StickyNote, Download, Tag, Pencil } from "lucide-react";
+import { Plus, Trash2, Clock, FileText, StickyNote, Download, Tag, Pencil, Home } from "lucide-react";
 
 export function SessionList() {
   const sessions = useSessionStore((s) => s.sessions);
@@ -50,6 +50,10 @@ export function SessionList() {
 
   const handleLoad = async (id: string) => {
     if (renamingId) return;
+    if (currentSession?.id === id) {
+      setCurrentSession(null);
+      return;
+    }
     try {
       const session = await getSession(id);
       setCurrentSession(session);
@@ -156,6 +160,20 @@ export function SessionList() {
       </div>
 
       <div className="flex-1 overflow-y-auto p-2 space-y-1">
+        <button
+          onClick={() => setCurrentSession(null)}
+          className={cn(
+            "w-full rounded-lg px-3 py-2 text-left transition-colors flex items-center gap-2",
+            "hover:bg-white/5",
+            !currentSession
+              ? "bg-white/10 ring-1 ring-white/20"
+              : "text-white/50",
+          )}
+        >
+          <Home className="h-4 w-4 shrink-0" />
+          <span className="text-sm font-medium">Home</span>
+        </button>
+
         {sessions.length === 0 && (
           <p className="text-sm text-white/40 text-center py-8">
             {serverOnline
@@ -207,14 +225,14 @@ export function SessionList() {
                 <button
                   onClick={(e) => handleExportMarkdown(s.id, e)}
                   disabled={exportingId === s.id}
-                  className="rounded p-1 text-white/30 hover:text-blue-400 hover:bg-blue-400/10 transition-colors"
+                  className="rounded p-1 text-white/30 hover:text-blue-400 hover:bg-blue-400/10 transition-colors opacity-0 group-hover:opacity-100"
                   title="Export as Markdown"
                 >
                   <Download className="h-3.5 w-3.5" />
                 </button>
                 <button
                   onClick={(e) => handleDelete(s.id, e)}
-                  className="rounded p-1 text-white/30 hover:text-red-400 hover:bg-red-400/10 transition-colors"
+                  className="rounded p-1 text-white/30 hover:text-red-400 hover:bg-red-400/10 transition-colors opacity-0 group-hover:opacity-100"
                 >
                   <Trash2 className="h-3.5 w-3.5" />
                 </button>

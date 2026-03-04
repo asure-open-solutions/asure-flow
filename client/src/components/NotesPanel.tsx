@@ -1,7 +1,8 @@
+import { useState } from "react";
 import { useSessionStore } from "@/stores/sessionStore";
 import type { NoteEntry, NoteType } from "@/types";
 import { cn } from "@/lib/utils";
-import { CheckSquare, Gavel, Lightbulb, AlertTriangle, StickyNote, User, Calendar, Square, CheckCheck } from "lucide-react";
+import { CheckSquare, Gavel, Lightbulb, AlertTriangle, StickyNote, User, Calendar, Square, CheckCheck, Trash2, Check, X } from "lucide-react";
 
 const NOTE_CONFIG: Record<NoteType, { icon: typeof CheckSquare; label: string; className: string }> = {
   action_item: { icon: CheckSquare, label: "Action Items", className: "text-blue-400 bg-blue-400/10 border-blue-400/20" },
@@ -76,6 +77,8 @@ function NoteItem({
 
 export function NotesPanel() {
   const notes = useSessionStore((s) => s.notes);
+  const clearNotes = useSessionStore((s) => s.clearNotes);
+  const [confirmClear, setConfirmClear] = useState(false);
 
   const grouped = NOTE_ORDER.map((type) => ({
     type,
@@ -88,11 +91,44 @@ export function NotesPanel() {
       <h2 className="flex items-center gap-2 border-b border-white/10 px-4 py-3 text-sm font-semibold text-white/80">
         <StickyNote className="h-4 w-4" />
         Rolling Notes
+        {notes.length > 0 && (
+          <>
+            <span className="ml-auto text-xs text-white/30 font-normal">{notes.length}</span>
+            {confirmClear ? (
+              <span className="flex items-center gap-1 text-xs text-white/50 font-normal">
+                Clear?
+                <button
+                  onClick={() => { clearNotes(); setConfirmClear(false); }}
+                  className="rounded p-0.5 text-red-400 hover:bg-red-400/10 transition-colors"
+                  aria-label="Confirm clear notes"
+                >
+                  <Check className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  onClick={() => setConfirmClear(false)}
+                  className="rounded p-0.5 text-white/40 hover:text-white/70 transition-colors"
+                  aria-label="Cancel clear"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </span>
+            ) : (
+              <button
+                onClick={() => setConfirmClear(true)}
+                className="rounded-md p-1 text-white/30 hover:text-white/70 hover:bg-white/5 transition-colors"
+                title="Clear all notes"
+                aria-label="Clear all notes"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </>
+        )}
       </h2>
 
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {grouped.length === 0 && (
-          <p className="text-sm text-white/40 text-center py-8">
+          <p className="text-sm text-white/30 text-center py-8">
             Notes will appear here as the AI extracts them.
           </p>
         )}

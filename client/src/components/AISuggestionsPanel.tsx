@@ -1,13 +1,15 @@
 import { useSessionStore } from "@/stores/sessionStore";
 import type { SuggestionEntry } from "@/stores/sessionStore";
 import { cn } from "@/lib/utils";
-import { MessageSquare, Copy, Check, Loader2, ArrowDown, CornerDownLeft } from "lucide-react";
+import { MessageSquare, Copy, Check, Loader2, ArrowDown, CornerDownLeft, Trash2, X } from "lucide-react";
 import { useState, useRef, useEffect, useCallback } from "react";
 
 export function AISuggestionsPanel() {
   const suggestions = useSessionStore((s) => s.suggestions);
   const streaming = useSessionStore((s) => s.aiStreaming);
+  const clearSuggestions = useSessionStore((s) => s.clearSuggestions);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [confirmClear, setConfirmClear] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [hasNew, setHasNew] = useState(false);
@@ -51,7 +53,37 @@ export function AISuggestionsPanel() {
         Suggestions
         {streaming && <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-400" />}
         {suggestions.length > 0 && (
-          <span className="ml-auto text-xs text-white/30 font-normal">{suggestions.length}</span>
+          <>
+            <span className="ml-auto text-xs text-white/30 font-normal">{suggestions.length}</span>
+            {confirmClear ? (
+              <span className="flex items-center gap-1 text-xs text-white/50 font-normal">
+                Clear?
+                <button
+                  onClick={() => { clearSuggestions(); setConfirmClear(false); }}
+                  className="rounded p-0.5 text-red-400 hover:bg-red-400/10 transition-colors"
+                  aria-label="Confirm clear suggestions"
+                >
+                  <Check className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  onClick={() => setConfirmClear(false)}
+                  className="rounded p-0.5 text-white/40 hover:text-white/70 transition-colors"
+                  aria-label="Cancel clear"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </span>
+            ) : (
+              <button
+                onClick={() => setConfirmClear(true)}
+                className="rounded-md p-1 text-white/30 hover:text-white/70 hover:bg-white/5 transition-colors"
+                title="Clear all suggestions"
+                aria-label="Clear all suggestions"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </>
         )}
       </h2>
 
@@ -62,7 +94,7 @@ export function AISuggestionsPanel() {
           className="h-full overflow-y-auto p-4 space-y-3"
         >
           {suggestions.length === 0 ? (
-            <p className="text-sm text-white/40 text-center py-8">
+            <p className="text-sm text-white/30 text-center py-8">
               Response suggestions will appear here during the conversation.
             </p>
           ) : (

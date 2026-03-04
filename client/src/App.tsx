@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Component, useCallback, useEffect, useRef, useState } from "react";
+import type { ErrorInfo, ReactNode } from "react";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useShallow } from "zustand/react/shallow";
 import { TranscriptPanel } from "@/components/TranscriptPanel";
 import { SessionList } from "@/components/SessionList";
 import { SettingsView } from "@/components/SettingsView";
@@ -9,11 +11,12 @@ import { SessionContextInput } from "@/components/SessionContextInput";
 import { HeaderMoreMenu } from "@/components/HeaderMoreMenu";
 import { InsightsDrawer } from "@/components/InsightsDrawer";
 import { InsightsPill } from "@/components/InsightsPill";
+import { HomePage } from "@/components/HomePage";
 import { OverlayHUD } from "@/components/overlay/OverlayHUD";
 import { WindowControls } from "@/components/WindowControls";
 import { AudioCapture } from "@/services/audioCapture";
 import { AudioWebSocket, SessionWebSocket } from "@/services/websocket";
-import { setServerUrl, getServerConfig, getProfile, checkServerHealth, renameSession, createSession, listSessions } from "@/services/api";
+import { setServerUrl, getServerConfig, getProfile, checkServerHealth, renameSession, createSession, listSessions, getSession } from "@/services/api";
 import { cn } from "@/lib/utils";
 import {
   Mic,
@@ -24,7 +27,6 @@ import {
   Square,
   ServerOff,
   Loader2,
-  Plus,
 } from "lucide-react";
 import { Logo } from "@/components/Logo";
 
@@ -54,12 +56,13 @@ function MainApp() {
   const setInsightsDrawerOpen = useSessionStore((s) => s.setInsightsDrawerOpen);
   const setCurrentSession = useSessionStore((s) => s.setCurrentSession);
   const setSessions = useSessionStore((s) => s.setSessions);
+  const sessions = useSessionStore((s) => s.sessions);
   const rerunRequested = useSessionStore((s) => s.rerunRequested);
   const clearRerunRequest = useSessionStore((s) => s.clearRerunRequest);
 
   const serverUrl = useSettingsStore((s) => s.serverUrl);
   const hydrated = useSettingsStore((s) => s._hydrated);
-  const effectiveToggles = useSettingsStore((s) => s.getEffectiveToggles());
+  const effectiveToggles = useSettingsStore(useShallow((s) => s.getEffectiveToggles()));
   const audioToggles = useSettingsStore((s) => s.audioToggles);
   const setAudioToggles = useSettingsStore((s) => s.setAudioToggles);
   const contentProtection = useSettingsStore((s) => s.overlaySettings.contentProtection);
@@ -565,32 +568,28 @@ function MainApp() {
             </div>
           </div>
         ) : (
-          <div className="flex flex-1 items-center justify-center">
-            <div className="text-center max-w-sm">
-              <Logo size={40} className="mx-auto mb-4 opacity-20" />
-              <h2 className="text-base font-semibold text-white/50 mb-2">Start a Conversation</h2>
-              <p className="text-sm text-white/30 mb-6">
-                Create a new session to begin capturing and analyzing conversations in real time.
-              </p>
-              <button
-                onClick={async () => {
-                  try {
-                    const session = await createSession();
-                    setCurrentSession(session);
-                    const list = await listSessions();
-                    setSessions(list);
-                    if (!showSidebar) setShowSidebar(true);
-                  } catch (err) {
-                    console.error("Failed to create session:", err);
-                  }
-                }}
-                className="inline-flex items-center gap-2 rounded-lg bg-blue-500/15 border border-blue-500/20 px-4 py-2 text-sm text-blue-400 hover:bg-blue-500/25 transition-colors"
-              >
-                <Plus className="h-4 w-4" />
-                New Session
-              </button>
-            </div>
-          </div>
+          <HomePage
+            sessions={sessions}
+            onCreateSession={async () => {
+              try {
+                const session = await createSession();
+                setCurrentSession(session);
+                const list = await listSessions();
+                setSessions(list);
+                if (!showSidebar) setShowSidebar(true);
+              } catch (err) {
+                console.error("Failed to create session:", err);
+              }
+            }}
+            onSelectSession={async (id) => {
+              try {
+                const session = await getSession(id);
+                setCurrentSession(session);
+              } catch (err) {
+                console.error("Failed to load session:", err);
+              }
+            }}
+          />
         )}
 
         <StatusBar />
@@ -601,9 +600,52 @@ function MainApp() {
   );
 }
 
+class ErrorBoundary extends Component<
+  { children: ReactNode },
+  { error: Error | null }
+> {
+  state: { error: Error | null } = { error: null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error("App crashed:", error, info.componentStack);
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="flex h-screen items-center justify-center bg-zinc-950 text-white p-8">
+          <div className="max-w-lg text-center">
+            <h1 className="text-lg font-semibold text-red-400 mb-2">Something went wrong</h1>
+            <pre className="text-xs text-white/60 bg-white/5 rounded-lg p-4 text-left overflow-auto max-h-64 mb-4">
+              {this.state.error.message}
+              {"\n\n"}
+              {this.state.error.stack}
+            </pre>
+            <button
+              onClick={() => this.setState({ error: null })}
+              className="rounded-lg bg-blue-500/15 border border-blue-500/20 px-4 py-2 text-sm text-blue-400 hover:bg-blue-500/25"
+            >
+              Try Again
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export default function App() {
   if (isOverlayRoute()) {
     return <OverlayHUD />;
   }
-  return <MainApp />;
+  return (
+    <ErrorBoundary>
+      <MainApp />
+    </ErrorBoundary>
+  );
 }

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSessionStore } from "@/stores/sessionStore";
+import { useShallow } from "zustand/react/shallow";
 import {
   getServerConfig,
   updateServerConfig,
@@ -723,7 +724,7 @@ const WHISPER_MODELS = [
 
 function AIToolsTab() {
   const { featureToggles, setFeatureToggles, setAiPreset, setCustomSystemPrompt, getEffectiveToggles } = useSettingsStore();
-  const effectiveToggles = useSettingsStore((s) => s.getEffectiveToggles());
+  const effectiveToggles = useSettingsStore(useShallow((s) => s.getEffectiveToggles()));
   const [presets, setPresets] = useState<Preset[]>([]);
   const [serverProfile, setServerProfile] = useState<UserProfile | null>(null);
   const [customPrompt, setCustomPrompt] = useState("");
@@ -935,7 +936,7 @@ function AIToolsTab() {
 
 function DeepThinkSelector() {
   const { featureToggles, setFeatureToggles } = useSettingsStore();
-  const effectiveToggles = useSettingsStore((s) => s.getEffectiveToggles());
+  const effectiveToggles = useSettingsStore(useShallow((s) => s.getEffectiveToggles()));
   const currentSession = useSessionStore((s) => s.currentSession);
   const sessionOverrides = useSettingsStore((s) => s.sessionOverrides);
   const updateSessionOverride = useSettingsStore((s) => s.updateSessionOverride);
@@ -1015,7 +1016,7 @@ function DeepThinkSelector() {
 
 function AgentModeSelector() {
   const { featureToggles, setFeatureToggles } = useSettingsStore();
-  const effectiveToggles = useSettingsStore((s) => s.getEffectiveToggles());
+  const effectiveToggles = useSettingsStore(useShallow((s) => s.getEffectiveToggles()));
   const currentSession = useSessionStore((s) => s.currentSession);
   const sessionOverrides = useSettingsStore((s) => s.sessionOverrides);
   const updateSessionOverride = useSettingsStore((s) => s.updateSessionOverride);

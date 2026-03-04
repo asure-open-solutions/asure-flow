@@ -75,6 +75,13 @@ export function ParticipantList() {
 
   return (
     <div className="flex h-full flex-col">
+      <h2 className="flex items-center gap-2 border-b border-white/10 px-4 py-3 text-sm font-semibold text-white/80">
+        <Users className="h-4 w-4" />
+        Participants
+        {participants.length > 0 && (
+          <span className="ml-auto text-xs text-white/30 font-normal">{participants.length}</span>
+        )}
+      </h2>
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {participants.length === 0 ? (
           <p className="text-sm text-white/30 text-center py-8">

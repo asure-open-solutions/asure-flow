@@ -3,7 +3,7 @@ import { useSessionStore } from "@/stores/sessionStore";
 import { searchTranscripts, deleteTranscriptEntry, editTranscriptEntry } from "@/services/api";
 import { FactCheckBadge } from "./FactCheckBadge";
 import { cn } from "@/lib/utils";
-import { Mic, Monitor, Users, Search, X, Loader2, Pencil, Check, Copy, Trash2 } from "lucide-react";
+import { Mic, Monitor, Users, Search, X, Loader2, Pencil, Check, Copy, Trash2, ShieldX } from "lucide-react";
 
 // ── Dynamic speaker colors ──
 
@@ -109,6 +109,9 @@ export function TranscriptPanel() {
   const storeDeleteEntry = useSessionStore((s) => s.deleteTranscriptEntry);
   const storeEditEntry = useSessionStore((s) => s.editTranscriptEntry);
   const requestRerun = useSessionStore((s) => s.requestRerun);
+  const clearFactChecks = useSessionStore((s) => s.clearFactChecks);
+  const hasFactChecks = useSessionStore((s) => s.transcript.some((e) => e.fact_checks.length > 0));
+  const [confirmClearFacts, setConfirmClearFacts] = useState(false);
 
   // Per-session speaker color function — reset when session changes so colors
   // are assigned from scratch for each session rather than accumulating globally.
@@ -280,18 +283,50 @@ export function TranscriptPanel() {
           <Mic className="h-4 w-4" />
           Live Transcript
         </h2>
-        <button
-          onClick={() => (showSearch ? handleCloseSearch() : setShowSearch(true))}
-          className={cn(
-            "rounded-md p-1.5 transition-colors",
-            showSearch
-              ? "text-blue-400 bg-blue-500/10"
-              : "text-white/40 hover:text-white/70 hover:bg-white/5",
+        <div className="flex items-center gap-1">
+          {hasFactChecks && (
+            confirmClearFacts ? (
+              <span className="flex items-center gap-1 text-xs text-white/50 mr-1">
+                Clear checks?
+                <button
+                  onClick={() => { clearFactChecks(); setConfirmClearFacts(false); }}
+                  className="rounded p-0.5 text-red-400 hover:bg-red-400/10 transition-colors"
+                  aria-label="Confirm clear fact-checks"
+                >
+                  <Check className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  onClick={() => setConfirmClearFacts(false)}
+                  className="rounded p-0.5 text-white/40 hover:text-white/70 transition-colors"
+                  aria-label="Cancel clear"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </span>
+            ) : (
+              <button
+                onClick={() => setConfirmClearFacts(true)}
+                className="rounded-md p-1.5 text-white/40 hover:text-white/70 hover:bg-white/5 transition-colors"
+                title="Clear all fact-checks"
+                aria-label="Clear all fact-checks"
+              >
+                <ShieldX className="h-4 w-4" />
+              </button>
+            )
           )}
-          title="Search transcript"
-        >
-          <Search className="h-4 w-4" />
-        </button>
+          <button
+            onClick={() => (showSearch ? handleCloseSearch() : setShowSearch(true))}
+            className={cn(
+              "rounded-md p-1.5 transition-colors",
+              showSearch
+                ? "text-blue-400 bg-blue-500/10"
+                : "text-white/40 hover:text-white/70 hover:bg-white/5",
+            )}
+            title="Search transcript"
+          >
+            <Search className="h-4 w-4" />
+          </button>
+        </div>
       </div>
 
       {/* Search bar */}
