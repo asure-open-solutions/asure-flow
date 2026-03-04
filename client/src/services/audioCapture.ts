@@ -99,6 +99,7 @@ export class AudioCapture {
   private micEnabling = false;
   private systemEnabling = false;
   private lastMicDeviceId: string | undefined;
+  private pendingMicSwitch: { deviceId?: string } | null = null;
   onChunk: AudioChunkHandler | null = null;
 
   async start(options: AudioCaptureOptions = { mic: true, system: true }): Promise<AudioCaptureResult> {
@@ -153,8 +154,24 @@ export class AudioCapture {
   }
 
   async enableMic(deviceId?: string): Promise<void> {
-    if (this.micStream || this.micEnabling || !this.audioContext) return;
+    if (!this.audioContext) return;
+
+    // If already connected with a different device, tear down first
+    if (this.micStream && deviceId !== undefined && deviceId !== this.lastMicDeviceId) {
+      this.disableMic();
+    }
+
+    // If another enableMic is in-flight, queue this request
+    if (this.micEnabling) {
+      this.pendingMicSwitch = { deviceId };
+      return;
+    }
+
+    // Already connected with the same device
+    if (this.micStream) return;
+
     this.micEnabling = true;
+    this.pendingMicSwitch = null;
 
     if (deviceId !== undefined) this.lastMicDeviceId = deviceId;
     const useDeviceId = deviceId ?? this.lastMicDeviceId;
@@ -182,6 +199,14 @@ export class AudioCapture {
       this.micSource.connect(this.micWorklet);
     } finally {
       this.micEnabling = false;
+    }
+
+    // Process queued device switch
+    if (this.pendingMicSwitch !== null) {
+      const pending = this.pendingMicSwitch;
+      this.pendingMicSwitch = null;
+      this.disableMic();
+      await this.enableMic(pending.deviceId);
     }
   }
 

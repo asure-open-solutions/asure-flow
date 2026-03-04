@@ -459,7 +459,21 @@ async def ws_session(websocket: WebSocket, session_id: str):
     try:
         while True:
             raw = await websocket.receive_text()
-            msg = json.loads(raw)
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                logger.warning("Malformed JSON from client: %s", raw[:200])
+                try:
+                    await websocket.send_json({"type": "error", "message": "Invalid JSON message"})
+                except Exception:
+                    pass
+                continue
+            if not isinstance(msg, dict):
+                try:
+                    await websocket.send_json({"type": "error", "message": "Expected JSON object"})
+                except Exception:
+                    pass
+                continue
             msg_type = msg.get("type")
 
             if msg_type == "config":
