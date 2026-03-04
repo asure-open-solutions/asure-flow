@@ -101,8 +101,8 @@ export interface SessionSettings {
   agent_mode?: "unified" | "specialists" | null;
   parallel_tools?: boolean;
   diarization?: boolean;
-  piiRedaction?: boolean;
-  privacyMode?: boolean;
+  pii_redaction?: boolean;
+  privacy_mode?: boolean;
 }
 
 // ── Session ──

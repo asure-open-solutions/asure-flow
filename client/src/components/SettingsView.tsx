@@ -615,7 +615,7 @@ function LLMTab() {
                   <div className="flex items-center gap-2 ml-2">
                     {isConfigured && (
                       isLocked("providers") ? (
-                        <Lock className="h-3.5 w-3.5 text-white/25" title="Managed by server admin" />
+                        <span title="Managed by server admin"><Lock className="h-3.5 w-3.5 text-white/25" /></span>
                       ) : (
                         <Toggle
                           checked={isEnabled}
@@ -1022,7 +1022,6 @@ function AgentModeSelector() {
   const removeSessionOverride = useSettingsStore((s) => s.removeSessionOverride);
 
   const isModeSessionScoped = currentSession != null && sessionOverrides?.agent_mode !== undefined && sessionOverrides?.agent_mode !== null;
-  const isParallelSessionScoped = currentSession != null && sessionOverrides?.parallel_tools !== undefined && sessionOverrides?.parallel_tools !== null;
 
   const handleModeChange = (value: "unified" | "specialists") => {
     if (isModeSessionScoped && currentSession) {
@@ -1031,16 +1030,6 @@ function AgentModeSelector() {
     } else {
       setFeatureToggles({ agent_mode: value });
       updateProfile({ agent_mode: value }).catch(() => {});
-    }
-  };
-
-  const handleParallelToggle = (value: boolean) => {
-    if (isParallelSessionScoped && currentSession) {
-      updateSessionOverride("parallel_tools", value);
-      updateSessionSettings(currentSession.id, { parallel_tools: value }).catch(() => {});
-    } else {
-      setFeatureToggles({ parallel_tools: value });
-      updateProfile({ parallel_tools: value }).catch(() => {});
     }
   };
 
@@ -1102,11 +1091,15 @@ function AgentModeSelector() {
         )}
       </div>
 
-      <ToggleCard
+      <ScopedToggleCard
         label="Parallel Tool Execution"
         description="Execute independent tool calls concurrently for lower latency"
+        settingsKey="parallel_tools"
         checked={effectiveToggles.parallel_tools}
-        onChange={handleParallelToggle}
+        onGlobalChange={(v) => {
+          setFeatureToggles({ parallel_tools: v });
+          updateProfile({ parallel_tools: v }).catch(() => {});
+        }}
       />
     </div>
   );
@@ -1403,7 +1396,7 @@ function TranscriptionTab() {
       <div>
         <h3 className="text-sm font-medium text-white/80 mb-2 flex items-center gap-2">
           Whisper Model
-          {isLocked("whisper_model") && <Lock className="h-3.5 w-3.5 text-white/25" title="Managed by server admin" />}
+          {isLocked("whisper_model") && <span title="Managed by server admin"><Lock className="h-3.5 w-3.5 text-white/25" /></span>}
         </h3>
         <select
           value={serverConfig?.whisper_model ?? ""}
@@ -1428,7 +1421,7 @@ function TranscriptionTab() {
       <div>
         <h3 className="text-sm font-medium text-white/80 mb-3 flex items-center gap-2">
           Compute Device
-          {isLocked("whisper_device") && <Lock className="h-3.5 w-3.5 text-white/25" title="Managed by server admin" />}
+          {isLocked("whisper_device") && <span title="Managed by server admin"><Lock className="h-3.5 w-3.5 text-white/25" /></span>}
         </h3>
         <div className="flex gap-2">
           <button
@@ -1506,7 +1499,7 @@ function PrivacyTab() {
         <ScopedToggleCard
           label="Privacy Mode"
           description="Master toggle: enables PII redaction and disables web search"
-          settingsKey="privacyMode"
+          settingsKey="privacy_mode"
           checked={effectivePrivacy}
           onGlobalChange={async (v) => {
             setPrivacyMode(v);
@@ -1527,7 +1520,7 @@ function PrivacyTab() {
         <ScopedToggleCard
           label="Redact Personal Information"
           description="Automatically redact emails, phone numbers, SSNs, and credit card numbers from transcripts"
-          settingsKey="piiRedaction"
+          settingsKey="pii_redaction"
           checked={effectivePii}
           onGlobalChange={async (v) => {
             setPiiRedaction(v);

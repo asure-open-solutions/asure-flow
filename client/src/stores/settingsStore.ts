@@ -229,12 +229,12 @@ export const useSettingsStore = create<SettingsState>()(
 
       getEffectivePiiRedaction: () => {
         const state = get();
-        return state.sessionOverrides?.piiRedaction ?? state.piiRedaction;
+        return state.sessionOverrides?.pii_redaction ?? state.piiRedaction;
       },
 
       getEffectivePrivacyMode: () => {
         const state = get();
-        return state.sessionOverrides?.privacyMode ?? state.privacyMode;
+        return state.sessionOverrides?.privacy_mode ?? state.privacyMode;
       },
     }),
     {

@@ -263,7 +263,7 @@ function MainApp() {
       }
       if ((e.ctrlKey || e.metaKey) && e.key === "i") {
         e.preventDefault();
-        setInsightsDrawerOpen((v) => !v);
+        setInsightsDrawerOpen(!useSessionStore.getState().insightsDrawerOpen);
       }
     };
     window.addEventListener("keydown", handler);

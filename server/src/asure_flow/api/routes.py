@@ -142,7 +142,7 @@ async def update_session_settings(session_id: str, body: SessionSettings):
     if session.settings is None:
         session.settings = body
     else:
-        updates = body.model_dump(exclude_none=True)
+        updates = body.model_dump(exclude_unset=True)
         for key, value in updates.items():
             setattr(session.settings, key, value)
     session.updated_at = _utcnow()
