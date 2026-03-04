@@ -96,6 +96,9 @@ export class AudioCapture {
   private systemSource: MediaStreamAudioSourceNode | null = null;
   private micWorklet: AudioWorkletNode | null = null;
   private systemWorklet: AudioWorkletNode | null = null;
+  private micEnabling = false;
+  private systemEnabling = false;
+  private lastMicDeviceId: string | undefined;
   onChunk: AudioChunkHandler | null = null;
 
   async start(options: AudioCaptureOptions = { mic: true, system: true }): Promise<AudioCaptureResult> {
@@ -150,26 +153,40 @@ export class AudioCapture {
   }
 
   async enableMic(deviceId?: string): Promise<void> {
-    if (this.micStream || !this.audioContext) return;
+    if (this.micStream || this.micEnabling || !this.audioContext) return;
+    this.micEnabling = true;
 
-    this.micStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        channelCount: 1,
-        echoCancellation: true,
-        noiseSuppression: true,
-        ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
-      },
-    });
+    if (deviceId !== undefined) this.lastMicDeviceId = deviceId;
+    const useDeviceId = deviceId ?? this.lastMicDeviceId;
 
-    this.micSource = this.audioContext.createMediaStreamSource(this.micStream);
-    this.micWorklet = new AudioWorkletNode(this.audioContext, "pcm-processor");
-    this.micWorklet.port.onmessage = (e: MessageEvent) => {
-      this.onChunk?.(STREAM_MIC, e.data.pcmData);
-    };
-    this.micSource.connect(this.micWorklet);
+    try {
+      // Ensure AudioContext is running — Chrome may suspend it when all sources are removed
+      if (this.audioContext.state === "suspended") {
+        await this.audioContext.resume();
+      }
+
+      this.micStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          ...(useDeviceId ? { deviceId: { exact: useDeviceId } } : {}),
+        },
+      });
+
+      this.micSource = this.audioContext.createMediaStreamSource(this.micStream);
+      this.micWorklet = new AudioWorkletNode(this.audioContext, "pcm-processor");
+      this.micWorklet.port.onmessage = (e: MessageEvent) => {
+        this.onChunk?.(STREAM_MIC, e.data.pcmData);
+      };
+      this.micSource.connect(this.micWorklet);
+    } finally {
+      this.micEnabling = false;
+    }
   }
 
   disableMic(): void {
+    this.micEnabling = false;
     this.micWorklet?.disconnect();
     this.micSource?.disconnect();
     this.micStream?.getTracks().forEach((t) => t.stop());
@@ -179,36 +196,47 @@ export class AudioCapture {
   }
 
   async enableSystem(): Promise<void> {
-    if (this.systemStream || !this.audioContext) return;
+    if (this.systemStream || this.systemEnabling || !this.audioContext) return;
+    this.systemEnabling = true;
 
-    // Use getDisplayMedia to capture system audio
-    this.systemStream = await navigator.mediaDevices.getDisplayMedia({
-      video: true, // Required by API
-      audio: true,
-    });
+    try {
+      // Ensure AudioContext is running — Chrome may suspend it when all sources are removed
+      if (this.audioContext.state === "suspended") {
+        await this.audioContext.resume();
+      }
 
-    // Remove video tracks — we only want audio
-    for (const track of this.systemStream.getVideoTracks()) {
-      track.stop();
-      this.systemStream.removeTrack(track);
+      // Use getDisplayMedia to capture system audio
+      this.systemStream = await navigator.mediaDevices.getDisplayMedia({
+        video: true, // Required by API
+        audio: true,
+      });
+
+      // Remove video tracks — we only want audio
+      for (const track of this.systemStream.getVideoTracks()) {
+        track.stop();
+        this.systemStream.removeTrack(track);
+      }
+
+      // Check if we actually got audio tracks
+      if (this.systemStream.getAudioTracks().length === 0) {
+        console.warn("No audio track in system capture");
+        this.systemStream = null;
+        return;
+      }
+
+      this.systemSource = this.audioContext.createMediaStreamSource(this.systemStream);
+      this.systemWorklet = new AudioWorkletNode(this.audioContext, "pcm-processor");
+      this.systemWorklet.port.onmessage = (e: MessageEvent) => {
+        this.onChunk?.(STREAM_SYSTEM, e.data.pcmData);
+      };
+      this.systemSource.connect(this.systemWorklet);
+    } finally {
+      this.systemEnabling = false;
     }
-
-    // Check if we actually got audio tracks
-    if (this.systemStream.getAudioTracks().length === 0) {
-      console.warn("No audio track in system capture");
-      this.systemStream = null;
-      return;
-    }
-
-    this.systemSource = this.audioContext.createMediaStreamSource(this.systemStream);
-    this.systemWorklet = new AudioWorkletNode(this.audioContext, "pcm-processor");
-    this.systemWorklet.port.onmessage = (e: MessageEvent) => {
-      this.onChunk?.(STREAM_SYSTEM, e.data.pcmData);
-    };
-    this.systemSource.connect(this.systemWorklet);
   }
 
   disableSystem(): void {
+    this.systemEnabling = false;
     this.systemWorklet?.disconnect();
     this.systemSource?.disconnect();
     this.systemStream?.getTracks().forEach((t) => t.stop());

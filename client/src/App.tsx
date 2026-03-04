@@ -193,7 +193,8 @@ function MainApp() {
     if (!capture || !recording) return;
 
     if (audioToggles.mic) {
-      capture.enableMic().catch((err) => {
+      const deviceId = useSettingsStore.getState().micDeviceId ?? undefined;
+      capture.enableMic(deviceId).catch((err) => {
         const msg = err instanceof DOMException && err.name === "NotAllowedError"
           ? "Microphone permission denied"
           : `Microphone error: ${(err as Error).message}`;
