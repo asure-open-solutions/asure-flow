@@ -38,6 +38,7 @@ if exist ".env" (
     )
 )
 
+if not defined HOST set "HOST=0.0.0.0"
 if not defined PORT set "PORT=8000"
 
 :: ---- Detect LAN IP ----
@@ -51,7 +52,7 @@ echo.
 :: ---- Start server in new window ----
 echo   Starting server...
 set "PYTHONPATH=%~dp0server\src"
-start "AsuréFlow Server" /D "%~dp0server" .venv\Scripts\python.exe -m uvicorn asure_flow.main:app --host 0.0.0.0 --port %PORT% --reload --reload-exclude .venv --ws-max-size 1048576
+start "AsuréFlow Server" /D "%~dp0server" .venv\Scripts\python.exe -m uvicorn asure_flow.main:app --host %HOST% --port %PORT% --reload --reload-exclude .venv --ws-max-size 1048576
 
 :: ---- Wait for server ----
 echo   Waiting for server to start...

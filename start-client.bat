@@ -38,6 +38,10 @@ if not exist "client\node_modules" (
 )
 
 echo   Server: %ASUREFLOW_SERVER%
+
+:: ---- Health check ----
+powershell -NoProfile -Command "try{$r=Invoke-WebRequest -Uri '%ASUREFLOW_SERVER%/api/health' -TimeoutSec 3 -UseBasicParsing -ErrorAction Stop;Write-Host '  Status: online'}catch{Write-Host '  Status: server not reachable (start the server first)'}" 2>nul
+
 echo.
 echo   Tip: Change server URL in Settings inside the app.
 echo   Press Ctrl+C to stop.

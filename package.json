@@ -1,0 +1,11 @@
+{
+  "private": true,
+  "name": "asure-flow",
+  "description": "Asuré Flow — real-time conversation assistant",
+  "scripts": {
+    "start": "node scripts/launch.mjs",
+    "server": "node scripts/launch.mjs server",
+    "client": "node scripts/launch.mjs client",
+    "setup": "node scripts/launch.mjs setup"
+  }
+}
