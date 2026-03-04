@@ -52,4 +52,4 @@ echo ""
 
 # ---- Run ----
 cd client
-exec npm run dev
+exec npm run electron:dev
