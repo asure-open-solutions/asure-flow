@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useShallow } from "zustand/react/shallow";
@@ -12,6 +12,7 @@ import {
   getClientAudioInputDevices,
   getPresets,
   updateSessionSettings,
+  checkServerHealth,
   updateProvider as apiUpdateProvider,
   addProvider as apiAddProvider,
   removeProvider as apiRemoveProvider,
@@ -353,6 +354,14 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
 
 // ── LLM Tab ──
 
+/** Ensure a URL has an http(s):// protocol prefix. */
+function normalizeServerUrl(url: string): string {
+  const trimmed = url.trim().replace(/\/+$/, "");
+  if (!trimmed) return trimmed;
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  return `http://${trimmed}`;
+}
+
 function LLMTab() {
   const { serverUrl, setServerUrl } = useSettingsStore();
   const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null);
@@ -362,11 +371,43 @@ function LLMTab() {
   const [showAddForm, setShowAddForm] = useState(false);
   const [newProvider, setNewProvider] = useState({ id: "", name: "", litellm_prefix: "openai", model: "" });
 
+  // Connection indicator for the server URL input
+  const [urlStatus, setUrlStatus] = useState<"idle" | "checking" | "online" | "offline">("idle");
+  const urlCheckTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Debounced health check when URL changes
+  const checkUrl = useCallback((url: string) => {
+    if (urlCheckTimer.current) clearTimeout(urlCheckTimer.current);
+    const normalized = normalizeServerUrl(url);
+    if (!normalized) { setUrlStatus("idle"); return; }
+    setUrlStatus("checking");
+    urlCheckTimer.current = setTimeout(async () => {
+      const health = await checkServerHealth();
+      setUrlStatus(health.online ? "online" : "offline");
+    }, 600);
+  }, []);
+
   useEffect(() => {
+    checkUrl(serverUrl);
+    return () => { if (urlCheckTimer.current) clearTimeout(urlCheckTimer.current); };
+  }, [serverUrl]);
+
+  // Normalize URL on blur (auto-add http:// if missing)
+  const handleUrlBlur = () => {
+    const normalized = normalizeServerUrl(serverUrl);
+    if (normalized && normalized !== serverUrl) {
+      setServerUrl(normalized);
+    }
+  };
+
+  // Reload server config when URL changes and server becomes reachable
+  const isOnline = urlStatus === "online";
+  useEffect(() => {
+    if (!isOnline) return;
     getServerConfig()
       .then(setServerConfig)
       .catch(() => {});
-  }, []);
+  }, [isOnline]);
 
   // Field-level form helpers (keyed by "providerId:fieldName")
   const fieldKey = (pid: string, field: string) => `${pid}:${field}`;
@@ -464,14 +505,30 @@ function LLMTab() {
           <Server className="h-4 w-4" />
           Server URL
         </label>
-        <input
-          type="url"
-          value={serverUrl}
-          onChange={(e) => setServerUrl(e.target.value)}
-          placeholder="http://localhost:8000"
-          className="w-full rounded-lg bg-white/5 border border-white/10 px-3 py-2 text-sm text-white placeholder-white/30 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
-        />
-        <p className="text-[11px] text-white/30 mt-1.5">Saved on this device. LLM and transcription settings are stored on the server.</p>
+        <div className="relative">
+          <input
+            type="url"
+            value={serverUrl}
+            onChange={(e) => setServerUrl(e.target.value)}
+            onBlur={handleUrlBlur}
+            placeholder="http://localhost:8000"
+            className="w-full rounded-lg bg-white/5 border border-white/10 px-3 py-2 pr-8 text-sm text-white placeholder-white/30 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+          />
+          <div className="absolute right-2.5 top-1/2 -translate-y-1/2" title={
+            urlStatus === "online" ? "Connected" :
+            urlStatus === "offline" ? "Cannot reach server" :
+            urlStatus === "checking" ? "Checking..." : ""
+          }>
+            {urlStatus === "checking" && <Loader2 className="h-3.5 w-3.5 text-white/30 animate-spin" />}
+            {urlStatus === "online" && <Check className="h-3.5 w-3.5 text-emerald-400" />}
+            {urlStatus === "offline" && <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />}
+          </div>
+        </div>
+        <p className="text-[11px] text-white/30 mt-1.5">
+          {urlStatus === "offline"
+            ? "Cannot reach server — check the URL and ensure the server is running."
+            : "Saved on this device. LLM and transcription settings are stored on the server."}
+        </p>
       </div>
 
       {/* Providers */}

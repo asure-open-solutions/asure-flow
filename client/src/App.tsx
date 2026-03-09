@@ -78,6 +78,8 @@ function MainApp() {
   // Keep server URL in sync — wait for hydration to avoid overwriting with default
   useEffect(() => {
     if (hydrated) setServerUrl(serverUrl);
+    // Reset so config/profile reload from the new server
+    serverConfigLoaded.current = false;
   }, [serverUrl, hydrated]);
 
   // Poll server health — wait for hydration so we use the correct server URL
@@ -100,7 +102,7 @@ function MainApp() {
     };
   }, [serverOnline, serverUrl, hydrated]);
 
-  // Load server config + user profile once on first successful connection
+  // Load server config + user profile once on first successful connection (or after URL change)
   useEffect(() => {
     if (serverOnline && !serverConfigLoaded.current) {
       serverConfigLoaded.current = true;
@@ -113,7 +115,7 @@ function MainApp() {
         .then((p) => useSettingsStore.getState().initFromServerProfile(p))
         .catch(() => {});
     }
-  }, [serverOnline]);
+  }, [serverOnline, serverUrl]);
 
   // Connect WebSockets when session changes
   useEffect(() => {

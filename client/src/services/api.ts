@@ -19,7 +19,12 @@ import type {
 let baseUrl = "http://localhost:8000";
 
 export function setServerUrl(url: string) {
-  baseUrl = url.replace(/\/+$/, "");
+  let normalized = url.replace(/\/+$/, "");
+  // Auto-prepend http:// if user entered a bare host/IP
+  if (normalized && !/^https?:\/\//i.test(normalized)) {
+    normalized = `http://${normalized}`;
+  }
+  baseUrl = normalized;
 }
 
 export function getServerUrl() {
