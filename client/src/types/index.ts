@@ -294,6 +294,9 @@ export interface ServerConfig {
   // Diarization hardware
   diarization_device: string | null;
   hf_diarization_token_hint: string;
+  // VAD / speed
+  vad_silence_ms: number;
+  vad_min_buffer_sec: number;
   // Admin
   locked_settings: string[];
   // Providers (ordered array — position = fallback priority)
@@ -355,6 +358,10 @@ declare global {
       // Audio toggle (overlay → main window)
       setAudioToggle: (toggle: { mic?: boolean; system?: boolean }) => void;
       onAudioToggle: (callback: (toggle: { mic?: boolean; system?: boolean }) => void) => () => void;
+
+      // Suggestion focus (overlay ↔ main window)
+      focusSuggestion: (id: string | null) => void;
+      onFocusSuggestion: (callback: (id: string | null) => void) => () => void;
     };
   }
 }

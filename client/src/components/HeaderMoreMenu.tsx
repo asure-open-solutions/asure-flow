@@ -1,6 +1,8 @@
 import { useState, useRef, useEffect } from "react";
 import { useSessionStore } from "@/stores/sessionStore";
 import { exportSession, exportSessionMarkdown, generateFollowup } from "@/services/api";
+import { downloadFile } from "@/lib/downloadFile";
+import { useConnectionStatus } from "@/lib/useConnectionStatus";
 import { cn } from "@/lib/utils";
 import {
   MoreHorizontal,
@@ -17,9 +19,7 @@ import {
 
 export function HeaderMoreMenu() {
   const currentSession = useSessionStore((s) => s.currentSession);
-  const audioConnected = useSessionStore((s) => s.audioConnected);
-  const sessionConnected = useSessionStore((s) => s.sessionConnected);
-  const serverOnline = useSessionStore((s) => s.serverOnline);
+  const { label: connLabel, isOffline } = useConnectionStatus();
   const [open, setOpen] = useState(false);
   const [followupModal, setFollowupModal] = useState<{
     subject: string;
@@ -40,34 +40,16 @@ export function HeaderMoreMenu() {
     return () => document.removeEventListener("mousedown", handler);
   }, []);
 
-  let connLabel: string;
-  let connIcon: React.ReactNode;
-  if (!serverOnline) {
-    connLabel = "Server offline";
-    connIcon = <WifiOff className="h-4 w-4 text-red-400" />;
-  } else if (audioConnected && sessionConnected) {
-    connLabel = "Connected";
-    connIcon = <Wifi className="h-4 w-4 text-emerald-400" />;
-  } else if (sessionConnected) {
-    connLabel = "No audio";
-    connIcon = <Wifi className="h-4 w-4 text-amber-400" />;
-  } else {
-    connLabel = "Server online";
-    connIcon = <Wifi className="h-4 w-4 text-blue-400" />;
-  }
+  const connIcon = isOffline
+    ? <WifiOff className="h-4 w-4 text-red-400" />
+    : <Wifi className="h-4 w-4 text-emerald-400" />;
 
   const handleExportJson = async () => {
     if (!currentSession) return;
     setOpen(false);
     try {
       const session = await exportSession(currentSession.id);
-      const blob = new Blob([JSON.stringify(session, null, 2)], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${currentSession.name || "session"}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
+      downloadFile(JSON.stringify(session, null, 2), `${currentSession.name || "session"}.json`, "application/json");
     } catch (err) {
       console.error("Export failed:", err);
     }
@@ -78,13 +60,7 @@ export function HeaderMoreMenu() {
     setOpen(false);
     try {
       const md = await exportSessionMarkdown(currentSession.id);
-      const blob = new Blob([md], { type: "text/markdown" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${currentSession.name || "session"}.md`;
-      a.click();
-      URL.revokeObjectURL(url);
+      downloadFile(md, `${currentSession.name || "session"}.md`, "text/markdown");
     } catch (err) {
       console.error("Markdown export failed:", err);
     }

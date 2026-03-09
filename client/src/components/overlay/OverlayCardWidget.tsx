@@ -10,6 +10,7 @@ interface Props {
   initialY?: number;
   onPositionChange?: (x: number, y: number) => void;
   onDismiss?: () => void;
+  headerAction?: React.ReactNode;
   children: React.ReactNode;
 }
 
@@ -21,6 +22,7 @@ export function OverlayCardWidget({
   initialY = 100,
   onPositionChange,
   onDismiss,
+  headerAction,
   children,
 }: Props) {
   const [pos, setPos] = useState({ x: initialX, y: initialY });
@@ -98,6 +100,7 @@ export function OverlayCardWidget({
             {title}
           </div>
           <div className="flex items-center gap-1">
+            {headerAction}
             <GripHorizontal className="h-3 w-3 text-white/20" />
             {onDismiss && (
               <button

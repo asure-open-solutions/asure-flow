@@ -1408,6 +1408,12 @@ function AudioTab() {
 
 // ── Transcription Tab ──
 
+const SPEED_PROFILES = [
+  { id: "fast", label: "Fast", desc: "Lowest latency, may fragment segments", vad_silence_ms: 300, vad_min_buffer_sec: 0.6 },
+  { id: "balanced", label: "Balanced", desc: "Good tradeoff for most use cases", vad_silence_ms: 450, vad_min_buffer_sec: 1.0 },
+  { id: "accurate", label: "Accurate", desc: "Longer segments, better context", vad_silence_ms: 700, vad_min_buffer_sec: 1.8 },
+] as const;
+
 function TranscriptionTab() {
   const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null);
   const [switching, setSwitching] = useState(false);
@@ -1423,6 +1429,27 @@ function TranscriptionTab() {
 
   const currentDevice = serverConfig?.whisper_device ?? "cpu";
   const targetDevice = currentDevice === "cuda" ? "cpu" : "cuda";
+
+  const activeProfile = serverConfig
+    ? SPEED_PROFILES.find(
+        (p) => p.vad_silence_ms === serverConfig.vad_silence_ms && p.vad_min_buffer_sec === serverConfig.vad_min_buffer_sec,
+      )?.id ?? "custom"
+    : null;
+
+  const handleSpeedProfile = async (profile: typeof SPEED_PROFILES[number]) => {
+    setSwitching(true);
+    try {
+      const config = await updateServerConfig({
+        vad_silence_ms: profile.vad_silence_ms,
+        vad_min_buffer_sec: profile.vad_min_buffer_sec,
+      });
+      setServerConfig(config);
+    } catch (err) {
+      console.error("Failed to set speed profile:", err);
+    } finally {
+      setSwitching(false);
+    }
+  };
 
   const handleSwitch = async () => {
     setSwitching(true);
@@ -1450,6 +1477,38 @@ function TranscriptionTab() {
 
   return (
     <div className="space-y-5">
+      {/* Speed profile */}
+      <div>
+        <h3 className="text-sm font-medium text-white/80 mb-2">Speed Profile</h3>
+        <p className="text-xs text-white/40 mb-3">
+          Controls how quickly transcriptions appear. Faster profiles may produce shorter segments.
+        </p>
+        <div className="grid grid-cols-3 gap-2">
+          {SPEED_PROFILES.map((p) => (
+            <button
+              key={p.id}
+              onClick={() => handleSpeedProfile(p)}
+              disabled={switching || !serverConfig}
+              className={cn(
+                "flex flex-col items-start rounded-lg border px-3 py-2.5 text-left transition-colors",
+                activeProfile === p.id
+                  ? "border-blue-500/30 bg-blue-500/10"
+                  : "border-white/10 bg-white/[0.02] hover:bg-white/5",
+                switching && "opacity-60 cursor-not-allowed",
+              )}
+            >
+              <span className={cn("text-sm font-medium", activeProfile === p.id ? "text-blue-400" : "text-white/70")}>
+                {p.label}
+              </span>
+              <span className="text-[11px] text-white/40 mt-0.5">{p.desc}</span>
+            </button>
+          ))}
+        </div>
+        {activeProfile === "custom" && (
+          <p className="text-[11px] text-white/30 mt-1.5">Custom values set — select a profile to reset.</p>
+        )}
+      </div>
+
       {/* Model selector */}
       <div>
         <h3 className="text-sm font-medium text-white/80 mb-2 flex items-center gap-2">

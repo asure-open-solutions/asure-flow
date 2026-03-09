@@ -1,4 +1,5 @@
 import { useSessionStore } from "@/stores/sessionStore";
+import { ClearConfirmButton } from "./ClearConfirmButton";
 import { cn } from "@/lib/utils";
 import { X, MessageSquare, StickyNote, Users, Activity } from "lucide-react";
 import { AISuggestionsPanel } from "./AISuggestionsPanel";
@@ -14,11 +15,35 @@ const TABS: { id: InsightsTab; label: string; icon: typeof MessageSquare }[] = [
   { id: "activity", label: "Activity", icon: Activity },
 ];
 
+/** Map each tab to its store count selector and optional clear action. */
+function useTabMeta(tab: InsightsTab) {
+  const count = useSessionStore((s) => {
+    switch (tab) {
+      case "suggestions": return s.suggestions.length;
+      case "notes": return s.notes.length;
+      case "people": return s.participants.length;
+      case "activity": return s.agentLog.length;
+    }
+  });
+  const clearSuggestions = useSessionStore((s) => s.clearSuggestions);
+  const clearNotes = useSessionStore((s) => s.clearNotes);
+  const clearAgentLog = useSessionStore((s) => s.clearAgentLog);
+
+  const clearFn =
+    tab === "suggestions" ? clearSuggestions
+    : tab === "notes" ? clearNotes
+    : tab === "activity" ? clearAgentLog
+    : undefined;
+
+  return { count, clearFn };
+}
+
 export function InsightsDrawer() {
   const isOpen = useSessionStore((s) => s.insightsDrawerOpen);
   const activeTab = useSessionStore((s) => s.insightsDrawerTab);
   const setOpen = useSessionStore((s) => s.setInsightsDrawerOpen);
   const setTab = useSessionStore((s) => s.setInsightsDrawerTab);
+  const { count: activeCount, clearFn } = useTabMeta(activeTab);
 
   return (
     <div
@@ -28,16 +53,26 @@ export function InsightsDrawer() {
         isOpen ? "w-[360px]" : "w-0",
       )}
     >
-      {/* Header */}
+      {/* Header with active tab title, count, and clear */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-white/[0.06]">
-        <span className="text-xs font-semibold text-white/50 uppercase tracking-wider">Insights</span>
-        <button
-          onClick={() => setOpen(false)}
-          className="rounded-md p-1 text-white/30 hover:text-white/70 hover:bg-white/5 transition-colors focus-visible:ring-1 focus-visible:ring-white/20 focus-visible:outline-none"
-          aria-label="Close insights drawer"
-        >
-          <X className="h-3.5 w-3.5" />
-        </button>
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-semibold text-white/50 uppercase tracking-wider">Insights</span>
+          {activeCount > 0 && (
+            <span className="text-[10px] text-white/30 font-normal">{activeCount}</span>
+          )}
+        </div>
+        <div className="flex items-center gap-1">
+          {clearFn && activeCount > 0 && (
+            <ClearConfirmButton onClear={clearFn} ariaLabel={`Clear all ${activeTab}`} />
+          )}
+          <button
+            onClick={() => setOpen(false)}
+            className="rounded-md p-1 text-white/30 hover:text-white/70 hover:bg-white/5 transition-colors focus-visible:ring-1 focus-visible:ring-white/20 focus-visible:outline-none"
+            aria-label="Close insights drawer"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
       </div>
 
       {/* Tabs */}
@@ -59,12 +94,12 @@ export function InsightsDrawer() {
         ))}
       </div>
 
-      {/* Content */}
+      {/* Content — headers hidden since tabs + drawer header provide context */}
       <div className="flex-1 min-h-0 overflow-hidden">
-        {activeTab === "suggestions" && <AISuggestionsPanel />}
-        {activeTab === "notes" && <NotesPanel />}
-        {activeTab === "people" && <ParticipantList />}
-        {activeTab === "activity" && <AgentActivityPanel />}
+        {activeTab === "suggestions" && <AISuggestionsPanel showHeader={false} />}
+        {activeTab === "notes" && <NotesPanel showHeader={false} />}
+        {activeTab === "people" && <ParticipantList showHeader={false} />}
+        {activeTab === "activity" && <AgentActivityPanel showHeader={false} />}
       </div>
     </div>
   );

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useSessionStore } from "@/stores/sessionStore";
 import { listSessions, createSession, deleteSession, getSession, exportSession, exportSessionMarkdown, renameSession } from "@/services/api";
+import { downloadFile } from "@/lib/downloadFile";
 import { cn } from "@/lib/utils";
 import { Plus, Trash2, Clock, FileText, StickyNote, Download, Tag, Pencil, Home } from "lucide-react";
 
@@ -108,13 +109,7 @@ export function SessionList() {
     setExportingId(id);
     try {
       const session = await exportSession(id);
-      const blob = new Blob([JSON.stringify(session, null, 2)], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${session.name || "session"}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
+      downloadFile(JSON.stringify(session, null, 2), `${session.name || "session"}.json`, "application/json");
     } catch (err) {
       console.error("Export failed:", err);
     } finally {
@@ -127,13 +122,7 @@ export function SessionList() {
     setExportingId(id);
     try {
       const md = await exportSessionMarkdown(id);
-      const blob = new Blob([md], { type: "text/markdown" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `session-${id.slice(0, 8)}.md`;
-      a.click();
-      URL.revokeObjectURL(url);
+      downloadFile(md, `session-${id.slice(0, 8)}.md`, "text/markdown");
     } catch (err) {
       console.error("Markdown export failed:", err);
     } finally {

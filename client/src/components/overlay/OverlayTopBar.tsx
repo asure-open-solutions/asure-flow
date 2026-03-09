@@ -2,12 +2,18 @@ import { useEffect, useRef, useState } from "react";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { cn } from "@/lib/utils";
-import { ChevronDown, CheckSquare, X, LayoutGrid, Circle, Square, Mic, MicOff, Volume2, VolumeX } from "lucide-react";
+import { ChevronDown, CheckSquare, X, LayoutGrid, Circle, Square, Mic, MicOff, Volume2, VolumeX, Crosshair } from "lucide-react";
 import { Logo } from "../Logo";
 
 export function OverlayTopBar() {
   const transcript = useSessionStore((s) => s.transcript);
-  const suggestion = useSessionStore((s) => s.suggestions[s.suggestions.length - 1]?.text ?? null);
+  const focusedEntry = useSessionStore((s) =>
+    s.focusedSuggestionId ? s.suggestions.find((x) => x.id === s.focusedSuggestionId) : null,
+  );
+  const latestEntry = useSessionStore((s) => s.suggestions[s.suggestions.length - 1] ?? null);
+  const displayEntry = focusedEntry ?? latestEntry;
+  const suggestion = displayEntry?.text ?? null;
+  const isFocused = !!focusedEntry;
   const notes = useSessionStore((s) => s.notes);
   const recording = useSessionStore((s) => s.recording);
   const audioToggles = useSessionStore((s) => s.overlayAudioToggles);
@@ -74,6 +80,25 @@ export function OverlayTopBar() {
         </div>
 
         <div className="flex items-center gap-1 shrink-0">
+          {suggestion && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                const id = isFocused ? null : displayEntry?.id ?? null;
+                window.electronAPI?.focusSuggestion(id);
+              }}
+              className={cn(
+                "rounded-md p-1 transition-colors",
+                isFocused
+                  ? "text-blue-400 bg-blue-400/10 hover:bg-blue-400/20"
+                  : "text-white/25 hover:text-blue-400 hover:bg-blue-400/10",
+              )}
+              title={isFocused ? "Unfocus suggestion" : "Focus suggestion"}
+            >
+              <Crosshair className="h-3 w-3" />
+            </button>
+          )}
+
           {actionItems.length > 0 && (
             <span className="flex items-center gap-1 text-[10px] text-amber-400/80 bg-amber-400/10 rounded-full px-2 py-0.5">
               <CheckSquare className="h-3 w-3" />

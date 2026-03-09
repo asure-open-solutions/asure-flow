@@ -16,8 +16,6 @@ from asure_flow.config import settings
 logger = logging.getLogger(__name__)
 
 SAMPLE_RATE = 16000
-# How often (in samples) to re-run the VAD check inside the `ready` property.
-_VAD_CHECK_INTERVAL = int(0.5 * SAMPLE_RATE)  # ~500 ms
 # Speech probability below this value is treated as silence by the flush gate.
 _VAD_SILENCE_THRESHOLD = 0.35
 
@@ -136,6 +134,11 @@ class WhisperEngine:
             # A second VAD pass here is redundant and harmful for short (~1-2 s) chunks
             # that arrive from remote clients — it aggressively strips them as "silence".
             vad_filter=False,
+            # Skip timestamp prediction — useless for pre-segmented chunks and saves decode time.
+            without_timestamps=True,
+            # Disable auto-conditioning on prior decoded text within a single transcribe call
+            # to prevent repetition hallucinations. The explicit initial_prompt still provides context.
+            condition_on_previous_text=False,
         )
         if settings.whisper_language:
             kwargs["language"] = settings.whisper_language
@@ -186,6 +189,8 @@ class AudioBuffer:
         self._min_samples = int(settings.vad_min_buffer_sec * SAMPLE_RATE)
         self._max_samples = int(settings.vad_max_buffer_sec * SAMPLE_RATE)
         self._silence_windows = max(1, int(settings.vad_silence_ms / 1000 * SAMPLE_RATE) // 512)
+        # VAD check interval: half the silence window, minimum ~150 ms
+        self._vad_check_interval = max(int(settings.vad_silence_ms / 1000 * 0.5 * SAMPLE_RATE), 2400)
 
         # Rate-limiting state for VAD checks
         self._last_vad_len: int = 0
@@ -212,8 +217,8 @@ class AudioBuffer:
             return False
         if buf_len >= self._max_samples:
             return True
-        # Rate-limit: only re-run VAD after ~500 ms of new audio
-        if buf_len - self._last_vad_len < _VAD_CHECK_INTERVAL:
+        # Rate-limit: only re-run VAD after a fraction of the silence window
+        if buf_len - self._last_vad_len < self._vad_check_interval:
             return self._cached_ready
         self._cached_ready = self._check_vad_state()
         self._last_vad_len = buf_len

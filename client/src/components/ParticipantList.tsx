@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useSessionStore } from "@/stores/sessionStore";
+import { PanelHeader } from "./PanelHeader";
 import type { Participant } from "@/types";
 import { cn } from "@/lib/utils";
 import { Users, Pencil, Check, X } from "lucide-react";
@@ -68,20 +69,16 @@ function ParticipantRow({
   );
 }
 
-export function ParticipantList() {
+export function ParticipantList({ showHeader = true }: { showHeader?: boolean }) {
   const participants = useSessionStore((s) => s.participants);
   const renameSpeaker = useSessionStore((s) => s.renameSpeaker);
   const sessionContext = useSessionStore((s) => s.sessionContext);
 
   return (
     <div className="flex h-full flex-col">
-      <h2 className="flex items-center gap-2 border-b border-white/10 px-4 py-3 text-sm font-semibold text-white/80">
-        <Users className="h-4 w-4" />
-        Participants
-        {participants.length > 0 && (
-          <span className="ml-auto text-xs text-white/30 font-normal">{participants.length}</span>
-        )}
-      </h2>
+      {showHeader && (
+        <PanelHeader icon={Users} title="Participants" count={participants.length} />
+      )}
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {participants.length === 0 ? (
           <p className="text-sm text-white/30 text-center py-8">

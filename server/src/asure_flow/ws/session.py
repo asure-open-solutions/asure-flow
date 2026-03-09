@@ -278,7 +278,7 @@ async def ws_session(websocket: WebSocket, session_id: str):
                     "event": {"type": "preempted"},
                 })
             except Exception:
-                pass
+                logger.debug("Failed to send preemption notice", exc_info=True)
 
         last_fire_time = time.monotonic()
 
@@ -374,7 +374,7 @@ async def ws_session(websocket: WebSocket, session_id: str):
                         "message": "AI processing failed",
                     })
                 except Exception:
-                    pass
+                    logger.debug("Failed to send agent error notification", exc_info=True)
 
         agent_task = asyncio.create_task(process_agent())
 
@@ -466,13 +466,13 @@ async def ws_session(websocket: WebSocket, session_id: str):
                 try:
                     await websocket.send_json({"type": "error", "message": "Invalid JSON message"})
                 except Exception:
-                    pass
+                    logger.debug("Failed to send JSON error response", exc_info=True)
                 continue
             if not isinstance(msg, dict):
                 try:
                     await websocket.send_json({"type": "error", "message": "Expected JSON object"})
                 except Exception:
-                    pass
+                    logger.debug("Failed to send type error response", exc_info=True)
                 continue
             msg_type = msg.get("type")
 
@@ -607,7 +607,7 @@ async def ws_session(websocket: WebSocket, session_id: str):
                     await task
                 except (asyncio.CancelledError, Exception):
                     pass
-        session_manager.save(session)
+        await session_manager.save_async(session)
 
 
 def _persist_tool_result(session, transcript_id: str, event: dict) -> None:

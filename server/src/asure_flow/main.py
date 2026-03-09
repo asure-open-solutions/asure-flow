@@ -95,10 +95,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS — allow all origins for local-first usage; tighten in production
+# CORS — restrict to localhost origins (file:// doesn't trigger CORS preflight)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

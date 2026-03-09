@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useMemo } from "react";
 import { useSessionStore } from "@/stores/sessionStore";
+import { PanelHeader } from "./PanelHeader";
 import type { NoteEntry, NoteType } from "@/types";
 import { cn } from "@/lib/utils";
-import { CheckSquare, Gavel, Lightbulb, AlertTriangle, StickyNote, User, Calendar, Square, CheckCheck, Trash2, Check, X } from "lucide-react";
+import { CheckSquare, Gavel, Lightbulb, AlertTriangle, StickyNote, User, Calendar, Square, CheckCheck } from "lucide-react";
 
 const NOTE_CONFIG: Record<NoteType, { icon: typeof CheckSquare; label: string; className: string }> = {
   action_item: { icon: CheckSquare, label: "Action Items", className: "text-blue-400 bg-blue-400/10 border-blue-400/20" },
@@ -21,15 +22,7 @@ function NoteItem({
   config: { className: string };
 }) {
   const isActionItem = note.type === "action_item";
-
-  const toggleCompleted = () => {
-    // Use functional setState to read fresh state and avoid stale closure
-    useSessionStore.setState((state) => ({
-      notes: state.notes.map((n) =>
-        n.id === note.id ? { ...n, completed: !n.completed } : n,
-      ),
-    }));
-  };
+  const toggleNoteCompleted = useSessionStore((s) => s.toggleNoteCompleted);
 
   return (
     <li
@@ -42,7 +35,7 @@ function NoteItem({
       <div className="flex items-start gap-2">
         {isActionItem && (
           <button
-            onClick={toggleCompleted}
+            onClick={() => toggleNoteCompleted(note.id)}
             className="mt-0.5 shrink-0 text-current"
             title={note.completed ? "Mark incomplete" : "Mark complete"}
           >
@@ -75,56 +68,31 @@ function NoteItem({
   );
 }
 
-export function NotesPanel() {
+export function NotesPanel({ showHeader = true }: { showHeader?: boolean }) {
   const notes = useSessionStore((s) => s.notes);
   const clearNotes = useSessionStore((s) => s.clearNotes);
-  const [confirmClear, setConfirmClear] = useState(false);
 
-  const grouped = NOTE_ORDER.map((type) => ({
-    type,
-    items: notes.filter((n) => n.type === type),
-    config: NOTE_CONFIG[type],
-  })).filter((g) => g.items.length > 0);
+  const grouped = useMemo(
+    () =>
+      NOTE_ORDER.map((type) => ({
+        type,
+        items: notes.filter((n) => n.type === type),
+        config: NOTE_CONFIG[type],
+      })).filter((g) => g.items.length > 0),
+    [notes],
+  );
 
   return (
     <div className="flex h-full flex-col">
-      <h2 className="flex items-center gap-2 border-b border-white/10 px-4 py-3 text-sm font-semibold text-white/80">
-        <StickyNote className="h-4 w-4" />
-        Rolling Notes
-        {notes.length > 0 && (
-          <>
-            <span className="ml-auto text-xs text-white/30 font-normal">{notes.length}</span>
-            {confirmClear ? (
-              <span className="flex items-center gap-1 text-xs text-white/50 font-normal">
-                Clear?
-                <button
-                  onClick={() => { clearNotes(); setConfirmClear(false); }}
-                  className="rounded p-0.5 text-red-400 hover:bg-red-400/10 transition-colors"
-                  aria-label="Confirm clear notes"
-                >
-                  <Check className="h-3.5 w-3.5" />
-                </button>
-                <button
-                  onClick={() => setConfirmClear(false)}
-                  className="rounded p-0.5 text-white/40 hover:text-white/70 transition-colors"
-                  aria-label="Cancel clear"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              </span>
-            ) : (
-              <button
-                onClick={() => setConfirmClear(true)}
-                className="rounded-md p-1 text-white/30 hover:text-white/70 hover:bg-white/5 transition-colors"
-                title="Clear all notes"
-                aria-label="Clear all notes"
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-              </button>
-            )}
-          </>
-        )}
-      </h2>
+      {showHeader && (
+        <PanelHeader
+          icon={StickyNote}
+          title="Rolling Notes"
+          count={notes.length}
+          onClear={clearNotes}
+          clearAriaLabel="Clear all notes"
+        />
+      )}
 
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {grouped.length === 0 && (

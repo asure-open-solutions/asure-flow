@@ -65,4 +65,12 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.on("set-audio-toggle", handler);
     return () => { ipcRenderer.removeListener("set-audio-toggle", handler); };
   },
+
+  // Suggestion focus (overlay → main window via main process relay)
+  focusSuggestion: (id: string | null) => ipcRenderer.send("focus-suggestion", id),
+  onFocusSuggestion: (callback: (id: string | null) => void) => {
+    const handler = (_event: unknown, id: string | null) => callback(id);
+    ipcRenderer.on("focus-suggestion", handler);
+    return () => { ipcRenderer.removeListener("focus-suggestion", handler); };
+  },
 });

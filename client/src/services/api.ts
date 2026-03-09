@@ -196,7 +196,7 @@ export async function getServerConfig(): Promise<ServerConfig> {
 }
 
 export async function updateServerConfig(
-  changes: Record<string, string | boolean | string[] | null>,
+  changes: Record<string, string | boolean | number | string[] | null>,
 ): Promise<ServerConfig> {
   return request("/api/config", {
     method: "PUT",

@@ -14,6 +14,8 @@ export function OverlayHUD() {
       const d = data as {
         transcript: any[];
         latestSuggestion: string | null;
+        focusedSuggestionId?: string | null;
+        focusedSuggestionText?: string | null;
         notes: any[];
         recording?: boolean;
         recordingStartedAt?: number | null;

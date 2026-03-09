@@ -52,6 +52,7 @@ interface SessionState {
 
   // AI state
   suggestions: SuggestionEntry[];
+  focusedSuggestionId: string | null;
   aiStreaming: boolean;
   currentToolName: string | null;
   searchResults: SearchResult[];
@@ -103,6 +104,7 @@ interface SessionState {
   deleteTranscriptEntry: (entryId: string) => void;
   editTranscriptEntry: (entryId: string, newText: string) => void;
   addSuggestion: (text: string, respondingTo?: string) => void;
+  focusSuggestion: (id: string | null) => void;
   setAIStreaming: (streaming: boolean) => void;
   setServerOnline: (online: boolean) => void;
   setLlmStatus: (available: boolean, provider: string | null) => void;
@@ -122,6 +124,8 @@ interface SessionState {
   syncFromMain: (data: {
     transcript: TranscriptEntry[];
     latestSuggestion: string | null;
+    focusedSuggestionId?: string | null;
+    focusedSuggestionText?: string | null;
     notes: NoteEntry[];
     recording?: boolean;
     recordingStartedAt?: number | null;
@@ -129,6 +133,7 @@ interface SessionState {
   }) => void;
   clearSuggestions: () => void;
   clearNotes: () => void;
+  toggleNoteCompleted: (noteId: string) => void;
   clearFactChecks: () => void;
   requestRerun: () => void;
   clearRerunRequest: () => void;
@@ -174,6 +179,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   participants: [],
   sessionContext: "",
   suggestions: [],
+  focusedSuggestionId: null,
   aiStreaming: false,
   currentToolName: null,
   searchResults: [],
@@ -318,8 +324,18 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
         { id: genId(), text, responding_to: respondingTo, timestamp: new Date().toISOString() },
       ],
     })),
-  clearSuggestions: () => set({ suggestions: [] }),
+  focusSuggestion: (id) =>
+    set((state) => ({
+      focusedSuggestionId: state.focusedSuggestionId === id ? null : id,
+    })),
+  clearSuggestions: () => set({ suggestions: [], focusedSuggestionId: null }),
   clearNotes: () => set({ notes: [] }),
+  toggleNoteCompleted: (noteId) =>
+    set((state) => ({
+      notes: state.notes.map((n) =>
+        n.id === noteId ? { ...n, completed: !n.completed } : n,
+      ),
+    })),
   clearFactChecks: () =>
     set((state) => ({
       transcript: state.transcript.map((e) =>
@@ -544,17 +560,27 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
     }
   },
 
-  syncFromMain: (data) =>
+  syncFromMain: (data) => {
+    const suggestions: SuggestionEntry[] = [];
+    if (data.focusedSuggestionText) {
+      suggestions.push({ id: data.focusedSuggestionId ?? "focused", text: data.focusedSuggestionText, responding_to: "", timestamp: new Date().toISOString() });
+    }
+    if (data.latestSuggestion && data.latestSuggestion !== data.focusedSuggestionText) {
+      suggestions.push({ id: "overlay", text: data.latestSuggestion, responding_to: "", timestamp: new Date().toISOString() });
+    }
+    if (!suggestions.length && data.latestSuggestion) {
+      suggestions.push({ id: "overlay", text: data.latestSuggestion, responding_to: "", timestamp: new Date().toISOString() });
+    }
     set({
       transcript: data.transcript,
-      suggestions: data.latestSuggestion
-        ? [{ id: "overlay", text: data.latestSuggestion, responding_to: "", timestamp: new Date().toISOString() }]
-        : [],
+      suggestions,
+      focusedSuggestionId: data.focusedSuggestionId ?? null,
       notes: data.notes,
       recording: data.recording ?? false,
       recordingStartedAt: data.recordingStartedAt ?? null,
       overlayAudioToggles: data.audioToggles ?? { mic: true, system: true },
-    }),
+    });
+  },
 
   reset: () =>
     set({
@@ -564,6 +590,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
       participants: [],
       sessionContext: "",
       suggestions: [],
+      focusedSuggestionId: null,
       aiStreaming: false,
       currentToolName: null,
       searchResults: [],

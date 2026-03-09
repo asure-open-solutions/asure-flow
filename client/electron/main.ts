@@ -210,6 +210,10 @@ ipcMain.on("set-audio-toggle", (_event, toggle: { mic?: boolean; system?: boolea
   mainWindow?.webContents.send("set-audio-toggle", toggle);
 });
 
+ipcMain.on("focus-suggestion", (_event, id: string | null) => {
+  mainWindow?.webContents.send("focus-suggestion", id);
+});
+
 // ── Window Controls ──
 
 ipcMain.on("window-minimize", () => mainWindow?.minimize());

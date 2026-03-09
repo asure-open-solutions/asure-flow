@@ -125,7 +125,7 @@ class Settings(BaseSettings):
     )
 
     # ── Server ──
-    host: str = "0.0.0.0"
+    host: str = "127.0.0.1"
     port: int = 8000
 
     # ── Transcription ──
@@ -167,8 +167,8 @@ class Settings(BaseSettings):
     system_device_id: Optional[str] = None
 
     # ── VAD Flush ──
-    vad_silence_ms: int = 600
-    vad_min_buffer_sec: float = 1.5
+    vad_silence_ms: int = 450
+    vad_min_buffer_sec: float = 1.0
     vad_max_buffer_sec: float = 30.0
 
     # ── Diarization hardware (secrets + device — user preference is in profile.py) ──
@@ -224,6 +224,9 @@ class Settings(BaseSettings):
             "diarization_device": self.diarization_device,
             "hf_diarization_token_hint": _mask(self.hf_diarization_token),
             "locked_settings": self.locked_settings,
+            # VAD / speed
+            "vad_silence_ms": self.vad_silence_ms,
+            "vad_min_buffer_sec": self.vad_min_buffer_sec,
             # Providers (ordered array — position = priority)
             "llm_providers": [
                 {

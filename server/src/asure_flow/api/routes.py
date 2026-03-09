@@ -33,10 +33,21 @@ async def health():
     provider_name = None
     if llm and llm.model_list:
         provider_name = llm.model_list[0].get("model_name", "unknown")
+
+    whisper_loaded = whisper_engine._model is not None
+
+    try:
+        from asure_flow.audio.manager import audio_capture_manager
+        audio_capturing = audio_capture_manager._running
+    except Exception:
+        audio_capturing = False
+
     return {
         "status": "ok",
         "llm_available": llm is not None,
         "llm_provider": provider_name,
+        "whisper_loaded": whisper_loaded,
+        "audio_capturing": audio_capturing,
     }
 
 
@@ -250,6 +261,9 @@ class UpdateConfigRequest(BaseModel):
     # Transcription
     whisper_model: Optional[str] = None
     whisper_device: Optional[str] = None  # "cuda" | "cpu"
+    # VAD / speed profile
+    vad_silence_ms: Optional[int] = None
+    vad_min_buffer_sec: Optional[float] = None
     # Audio capture (server-mode device IDs — used when audio_capture_source="server")
     audio_capture_source: Optional[str] = None  # "client" | "server"
     mic_device_id: Optional[str] = None
@@ -499,7 +513,7 @@ async def get_audio_devices():
                 for d in devices
             ],
         }
-    except Exception:
+    except (ImportError, OSError):
         return {"available": False, "devices": []}
 
 

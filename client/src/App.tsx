@@ -39,34 +39,54 @@ function MainApp() {
   const [showSidebar, setShowSidebar] = useState(true);
   const [editingHeaderName, setEditingHeaderName] = useState(false);
   const [headerNameValue, setHeaderNameValue] = useState("");
-  const currentSession = useSessionStore((s) => s.currentSession);
-  const renameCurrentSession = useSessionStore((s) => s.renameCurrentSession);
-  const recording = useSessionStore((s) => s.recording);
-  const serverOnline = useSessionStore((s) => s.serverOnline);
-  const setServerOnline = useSessionStore((s) => s.setServerOnline);
-  const setRecording = useSessionStore((s) => s.setRecording);
-  const setAudioWarning = useSessionStore((s) => s.setAudioWarning);
-  const setAudioConnected = useSessionStore((s) => s.setAudioConnected);
-  const setSessionConnected = useSessionStore((s) => s.setSessionConnected);
-  const addTranscriptEntry = useSessionStore((s) => s.addTranscriptEntry);
-  const relabelSpeaker = useSessionStore((s) => s.relabelSpeaker);
-  const handleAIEvent = useSessionStore((s) => s.handleAIEvent);
-  const clearAgentLog = useSessionStore((s) => s.clearAgentLog);
-  const insightsDrawerOpen = useSessionStore((s) => s.insightsDrawerOpen);
-  const setInsightsDrawerOpen = useSessionStore((s) => s.setInsightsDrawerOpen);
-  const setCurrentSession = useSessionStore((s) => s.setCurrentSession);
-  const setSessions = useSessionStore((s) => s.setSessions);
-  const sessions = useSessionStore((s) => s.sessions);
-  const rerunRequested = useSessionStore((s) => s.rerunRequested);
-  const clearRerunRequest = useSessionStore((s) => s.clearRerunRequest);
+  // Session data (re-render-relevant, shallow-compared)
+  const {
+    currentSession, recording, serverOnline, sessions,
+    insightsDrawerOpen, rerunRequested,
+  } = useSessionStore(useShallow((s) => ({
+    currentSession: s.currentSession,
+    recording: s.recording,
+    serverOnline: s.serverOnline,
+    sessions: s.sessions,
+    insightsDrawerOpen: s.insightsDrawerOpen,
+    rerunRequested: s.rerunRequested,
+  })));
 
-  const serverUrl = useSettingsStore((s) => s.serverUrl);
-  const hydrated = useSettingsStore((s) => s._hydrated);
+  // Session actions (stable function refs — single subscription)
+  const {
+    renameCurrentSession, setServerOnline, setRecording, setAudioWarning,
+    setAudioConnected, setSessionConnected, addTranscriptEntry, relabelSpeaker,
+    handleAIEvent, clearAgentLog, setInsightsDrawerOpen, setCurrentSession,
+    setSessions, clearRerunRequest, setLlmStatus,
+  } = useSessionStore((s) => ({
+    renameCurrentSession: s.renameCurrentSession,
+    setServerOnline: s.setServerOnline,
+    setRecording: s.setRecording,
+    setAudioWarning: s.setAudioWarning,
+    setAudioConnected: s.setAudioConnected,
+    setSessionConnected: s.setSessionConnected,
+    addTranscriptEntry: s.addTranscriptEntry,
+    relabelSpeaker: s.relabelSpeaker,
+    handleAIEvent: s.handleAIEvent,
+    clearAgentLog: s.clearAgentLog,
+    setInsightsDrawerOpen: s.setInsightsDrawerOpen,
+    setCurrentSession: s.setCurrentSession,
+    setSessions: s.setSessions,
+    clearRerunRequest: s.clearRerunRequest,
+    setLlmStatus: s.setLlmStatus,
+  }));
+
+  // Settings data (shallow-compared)
+  const { serverUrl, hydrated, audioToggles, contentProtection } = useSettingsStore(
+    useShallow((s) => ({
+      serverUrl: s.serverUrl,
+      hydrated: s._hydrated,
+      audioToggles: s.audioToggles,
+      contentProtection: s.overlaySettings.contentProtection,
+    })),
+  );
   const effectiveToggles = useSettingsStore(useShallow((s) => s.getEffectiveToggles()));
-  const audioToggles = useSettingsStore((s) => s.audioToggles);
   const setAudioToggles = useSettingsStore((s) => s.setAudioToggles);
-  const contentProtection = useSettingsStore((s) => s.overlaySettings.contentProtection);
-  const setLlmStatus = useSessionStore((s) => s.setLlmStatus);
 
   const audioWsRef = useRef<AudioWebSocket | null>(null);
   const sessionWsRef = useRef<SessionWebSocket | null>(null);
@@ -233,11 +253,14 @@ function MainApp() {
   // Sync session state to overlay window via IPC (debounced to avoid flooding during AI streaming)
   useEffect(() => {
     const sendSync = () => {
-      const { transcript, suggestions, notes, recording: rec, recordingStartedAt: rsa } = useSessionStore.getState();
+      const { transcript, suggestions, focusedSuggestionId, notes, recording: rec, recordingStartedAt: rsa } = useSessionStore.getState();
       const latestSuggestion = suggestions[suggestions.length - 1]?.text ?? null;
+      const focusedEntry = focusedSuggestionId ? suggestions.find((s) => s.id === focusedSuggestionId) : null;
       window.electronAPI?.sendOverlaySync({
         transcript: transcript.slice(-20),
         latestSuggestion,
+        focusedSuggestionId,
+        focusedSuggestionText: focusedEntry?.text ?? null,
         notes,
         recording: rec,
         recordingStartedAt: rsa,
@@ -299,6 +322,14 @@ function MainApp() {
   useEffect(() => {
     const cleanup = window.electronAPI?.onAudioToggle((toggle) => {
       useSettingsStore.getState().setAudioToggles(toggle);
+    });
+    return () => cleanup?.();
+  }, []);
+
+  // IPC: overlay requests suggestion focus change
+  useEffect(() => {
+    const cleanup = window.electronAPI?.onFocusSuggestion((id) => {
+      useSessionStore.getState().focusSuggestion(id);
     });
     return () => cleanup?.();
   }, []);

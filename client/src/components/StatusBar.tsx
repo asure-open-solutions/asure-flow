@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useSessionStore } from "@/stores/sessionStore";
+import { useConnectionStatus } from "@/lib/useConnectionStatus";
 import { cn } from "@/lib/utils";
 import { formatElapsed } from "@/lib/formatElapsed";
 
@@ -18,11 +19,9 @@ function friendlyToolName(name: string): string {
 }
 
 export function StatusBar() {
-  const serverOnline = useSessionStore((s) => s.serverOnline);
+  const { label: connLabel, dotColor: connColor, isOffline } = useConnectionStatus();
   const llmAvailable = useSessionStore((s) => s.llmAvailable);
   const llmProvider = useSessionStore((s) => s.llmProvider);
-  const audioConnected = useSessionStore((s) => s.audioConnected);
-  const sessionConnected = useSessionStore((s) => s.sessionConnected);
   const recording = useSessionStore((s) => s.recording);
   const recordingStartedAt = useSessionStore((s) => s.recordingStartedAt);
   const audioWarning = useSessionStore((s) => s.audioWarning);
@@ -42,22 +41,6 @@ export function StatusBar() {
     return () => clearInterval(interval);
   }, [recording, recordingStartedAt]);
 
-  let connLabel: string;
-  let connColor: string;
-  if (!serverOnline) {
-    connLabel = "Server offline";
-    connColor = "bg-red-400";
-  } else if (audioConnected && sessionConnected) {
-    connLabel = "Connected";
-    connColor = "bg-emerald-400";
-  } else if (sessionConnected) {
-    connLabel = "No audio";
-    connColor = "bg-amber-400";
-  } else {
-    connLabel = "Server online";
-    connColor = "bg-blue-400";
-  }
-
   let aiLabel: string;
   if (currentToolName) {
     aiLabel = `Using ${friendlyToolName(currentToolName)}...`;
@@ -74,7 +57,7 @@ export function StatusBar() {
         {connLabel}
       </span>
 
-      {serverOnline && (
+      {!isOffline && (
         <span
           className="flex items-center gap-1.5"
           title={llmAvailable ? `Active provider: ${llmProvider}` : "No LLM provider configured"}

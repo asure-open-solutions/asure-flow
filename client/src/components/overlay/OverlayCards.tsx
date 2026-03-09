@@ -4,12 +4,19 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { OverlayCardWidget } from "./OverlayCardWidget";
 import { FactCheckBadge } from "../FactCheckBadge";
 import { cn } from "@/lib/utils";
-import { MessageSquare, CheckSquare, AlignLeft, X, Monitor, Circle, Square, Mic, MicOff, Volume2, VolumeX } from "lucide-react";
+import { MessageSquare, CheckSquare, AlignLeft, X, Monitor, Circle, Square, Mic, MicOff, Volume2, VolumeX, Crosshair } from "lucide-react";
 import { Logo } from "../Logo";
 
 export function OverlayCards() {
   const transcript = useSessionStore((s) => s.transcript);
-  const suggestion = useSessionStore((s) => s.suggestions[s.suggestions.length - 1]?.text ?? null);
+  const focusedSuggestionId = useSessionStore((s) => s.focusedSuggestionId);
+  const focusedEntry = useSessionStore((s) =>
+    s.focusedSuggestionId ? s.suggestions.find((x) => x.id === s.focusedSuggestionId) : null,
+  );
+  const latestEntry = useSessionStore((s) => s.suggestions[s.suggestions.length - 1] ?? null);
+  const displayEntry = focusedEntry ?? latestEntry;
+  const suggestion = displayEntry?.text ?? null;
+  const isFocused = !!focusedEntry;
   const notes = useSessionStore((s) => s.notes);
   const recording = useSessionStore((s) => s.recording);
   const audioToggles = useSessionStore((s) => s.overlayAudioToggles);
@@ -164,12 +171,31 @@ export function OverlayCards() {
       {/* Suggestion card */}
       {overlaySettings.showSuggestions && suggestion && (
         <OverlayCardWidget
-          title="Suggestion"
+          title={isFocused ? "Suggestion (Focused)" : "Suggestion"}
           icon={<MessageSquare className="h-3 w-3" />}
           accentColor="text-blue-400"
           initialX={getPos("suggestion").x}
           initialY={getPos("suggestion").y}
           onPositionChange={(x, y) => updateCardPosition("suggestion", x, y)}
+          headerAction={
+            displayEntry ? (
+              <button
+                onClick={() => {
+                  const id = isFocused ? null : displayEntry.id;
+                  window.electronAPI?.focusSuggestion(id);
+                }}
+                className={cn(
+                  "rounded p-0.5 transition-colors",
+                  isFocused
+                    ? "text-blue-400 hover:bg-blue-400/20"
+                    : "text-white/30 hover:text-blue-400 hover:bg-blue-400/10",
+                )}
+                title={isFocused ? "Unfocus" : "Focus suggestion"}
+              >
+                <Crosshair className="h-3 w-3" />
+              </button>
+            ) : undefined
+          }
         >
           <p className="text-xs text-white/75 leading-relaxed whitespace-pre-wrap">{suggestion}</p>
         </OverlayCardWidget>
