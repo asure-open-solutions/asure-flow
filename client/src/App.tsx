@@ -58,7 +58,7 @@ function MainApp() {
     setAudioConnected, setSessionConnected, addTranscriptEntry, relabelSpeaker,
     handleAIEvent, clearAgentLog, setInsightsDrawerOpen, setCurrentSession,
     setSessions, clearRerunRequest, setLlmStatus,
-  } = useSessionStore((s) => ({
+  } = useSessionStore(useShallow((s) => ({
     renameCurrentSession: s.renameCurrentSession,
     setServerOnline: s.setServerOnline,
     setRecording: s.setRecording,
@@ -74,7 +74,7 @@ function MainApp() {
     setSessions: s.setSessions,
     clearRerunRequest: s.clearRerunRequest,
     setLlmStatus: s.setLlmStatus,
-  }));
+  })));
 
   // Settings data (shallow-compared)
   const { serverUrl, hydrated, audioToggles, contentProtection } = useSettingsStore(
@@ -371,11 +371,19 @@ function MainApp() {
     const wantMic = audioToggles.mic;
     const wantSystem = audioToggles.system && !serverHandlesSystem;
 
-    const result = await capture.start({
-      mic: wantMic,
-      system: wantSystem,
-      micDeviceId,
-    });
+    let result;
+    try {
+      result = await capture.start({
+        mic: wantMic,
+        system: wantSystem,
+        micDeviceId,
+      });
+    } catch (err) {
+      capture.stop?.();
+      startingRecordingRef.current = false;
+      setAudioWarning(`Audio error: ${(err as Error).message}`);
+      return;
+    }
 
     // If nothing is capturing (and server isn't handling system), bail out
     const serverHandlesEverything = serverHandlesSystem && !wantMic;

@@ -5,11 +5,13 @@ import electronRenderer from "vite-plugin-electron-renderer";
 import tailwindcss from "@tailwindcss/vite";
 import path from "node:path";
 
+const webOnly = process.env.ASUREFLOW_WEB_ONLY === "1";
+
 export default defineConfig({
   plugins: [
     react(),
     tailwindcss(),
-    electron([
+    ...(!webOnly ? electron([
       {
         entry: "electron/main.ts",
         onstart(args) {
@@ -43,8 +45,8 @@ export default defineConfig({
           },
         },
       },
-    ]),
-    electronRenderer(),
+    ]) : []),
+    ...(!webOnly ? [electronRenderer()] : []),
   ],
   resolve: {
     alias: {
@@ -52,3 +54,5 @@ export default defineConfig({
     },
   },
 });
+
+

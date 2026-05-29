@@ -202,8 +202,8 @@ export class AudioCapture {
     }
 
     // Process queued device switch
-    if (this.pendingMicSwitch !== null) {
-      const pending = this.pendingMicSwitch;
+    const pending = this.pendingMicSwitch as { deviceId?: string } | null;
+    if (pending !== null) {
       this.pendingMicSwitch = null;
       this.disableMic();
       await this.enableMic(pending.deviceId);

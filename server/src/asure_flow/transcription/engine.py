@@ -117,7 +117,7 @@ class WhisperEngine:
     ) -> list[TranscriptSegment]:
         """Transcribe a float32 audio buffer. Returns a list of segments."""
         if self._model is None:
-            raise RuntimeError("Whisper model not loaded — call load() first")
+            await self.load()
 
         loop = asyncio.get_event_loop()
         segments = await loop.run_in_executor(
@@ -314,3 +314,5 @@ class AudioBuffer:
 
 # Singleton engine
 whisper_engine = WhisperEngine()
+
+

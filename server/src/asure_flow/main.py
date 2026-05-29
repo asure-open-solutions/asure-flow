@@ -28,13 +28,8 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     logger.info("Starting Asuré Flow server …")
 
-    # Load whisper model
-    await whisper_engine.load()
-
-    # Pre-warm VAD model (used for silence-aware flush gating)
-    from faster_whisper.vad import get_vad_model
-    get_vad_model()
-    logger.info("VAD model loaded")
+    # Load Whisper/VAD lazily on first transcription so the API starts immediately.
+    logger.info("Whisper/VAD will load lazily on first transcription")
 
     # Initialise LLM router
     init_router()
@@ -124,3 +119,5 @@ if __name__ == "__main__":
         port=settings.port,
         ws_max_size=1048576,
     )
+
+
