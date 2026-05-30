@@ -16,6 +16,8 @@ node_modules/
 client/dist/
 client/dist-electron/
 client/out/
+client/release/
+client/server-bundle/
 
 # IDE
 .idea/
