@@ -44,6 +44,9 @@ DELAY_NORMAL = 1.0                 # Same speaker continues
 ECHO_THRESHOLD = 0.6
 DEDUP_THRESHOLD = 0.6
 ECHO_SUGGESTION_LOOKBACK = 5
+# Safety expiry: auto-release the delivery-lock after this many agent fires if the
+# other party never speaks, so suggestions can't be suppressed forever.
+SUGGESTION_LOCK_MAX_FIRES = 4
 
 # ── Trivial content patterns ──
 _TRIVIAL_PATTERN = re.compile(
@@ -253,11 +256,15 @@ async def ws_session(websocket: WebSocket, session_id: str):
     # suggestions until the other party speaks again, so the AI stops rewriting the
     # answer out from under the user mid-delivery. Auto-managed; replaces manual pin.
     suggestions_locked: bool = False
+    # Fires the lock has been held without the other party speaking. A safety
+    # expiry so the lock can never wedge if they never respond (monologue,
+    # mislabeled audio): it auto-releases after SUGGESTION_LOCK_MAX_FIRES.
+    suggestions_lock_age: int = 0
 
     # ── Agent fire logic ──
 
     async def _do_fire_agent(max_iterations: int = 5) -> None:
-        nonlocal agent_task, last_fire_time, suggestions_locked
+        nonlocal agent_task, last_fire_time, suggestions_locked, suggestions_lock_age
 
         entries = pending_entries[:]
         pending_entries.clear()
@@ -298,15 +305,27 @@ async def ws_session(websocket: WebSocket, session_id: str):
         last_entry_id = entries[-1][2]
 
         # ── Suggestion delivery-lock ──
-        # Release the lock once the conversation returns to the other party: a new
-        # suggestion is wanted again only after they've responded.
         was_locked = suggestions_locked
-        if any(not is_user for _, _, _, is_user in entries):
-            suggestions_locked = False
+        other_spoke = any(not is_user for _, _, _, is_user in entries)
 
-        # Echo detection: if the user's speech is tracking a suggestion we gave, they
-        # are delivering it — lock suggestions so the AI doesn't rewrite it mid-sentence.
-        if session.suggestions:
+        if other_spoke:
+            # Conversation returned to the other party — release the lock and do
+            # NOT re-lock from trailing user echo in this same batch; a fresh
+            # suggestion is exactly what's wanted now.
+            suggestions_locked = False
+            suggestions_lock_age = 0
+        elif suggestions_locked:
+            # Still the user's turn while locked — age the lock so it can't wedge
+            # if the other party never speaks (monologue / mislabeled audio).
+            suggestions_lock_age += 1
+            if suggestions_lock_age >= SUGGESTION_LOCK_MAX_FIRES:
+                suggestions_locked = False
+                suggestions_lock_age = 0
+
+        # Echo detection: only when the other party did NOT just speak. If the
+        # user's speech is tracking a suggestion we gave, they're delivering it —
+        # lock so the AI doesn't rewrite it mid-sentence.
+        if not other_spoke and session.suggestions:
             recent_sugs = [s.text for s in session.suggestions[-ECHO_SUGGESTION_LOOKBACK:]]
             user_texts = [t for _, t, _, is_user in entries if is_user]
             if user_texts:
@@ -317,6 +336,8 @@ async def ws_session(websocket: WebSocket, session_id: str):
                             "[The user's speech echoes a prior suggestion.]\n\n"
                             + transcript_text
                         )
+                        if not suggestions_locked:
+                            suggestions_lock_age = 0
                         suggestions_locked = True
                         logger.debug("Echo detected: locking suggestions until the other party responds")
                         break

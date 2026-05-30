@@ -31,7 +31,9 @@ _PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
 
 
 def detect_pii(text: str) -> list[PIIMatch]:
-    """Detect PII patterns in text."""
+    """Detect PII patterns in text. May return overlapping matches (e.g. a phone
+    pattern matching a sub-span of a credit-card number) — redact_pii resolves
+    overlaps before applying replacements."""
     matches: list[PIIMatch] = []
     for pii_type, pattern, replacement in _PATTERNS:
         for m in pattern.finditer(text):
@@ -47,13 +49,29 @@ def detect_pii(text: str) -> list[PIIMatch]:
     return sorted(matches, key=lambda m: m.start)
 
 
+def _select_non_overlapping(matches: list[PIIMatch]) -> list[PIIMatch]:
+    """Pick a non-overlapping subset: earliest start wins, ties broken by the
+    longest span (so a credit-card match beats a phone sub-match), then greedily
+    skip any match overlapping one already kept. Applying overlapping matches
+    would corrupt the surrounding text and could leave real PII partly exposed."""
+    ordered = sorted(matches, key=lambda m: (m.start, -(m.end - m.start)))
+    selected: list[PIIMatch] = []
+    last_end = -1
+    for m in ordered:
+        if m.start >= last_end:
+            selected.append(m)
+            last_end = m.end
+    return selected
+
+
 def redact_pii(text: str) -> tuple[str, list[PIIMatch]]:
-    """Redact PII in text. Returns (redacted_text, matches)."""
+    """Redact PII in text. Returns (redacted_text, applied_matches)."""
     matches = detect_pii(text)
     if not matches:
         return text, []
+    applied = _select_non_overlapping(matches)
     # Apply replacements from end to start to preserve offsets
     result = text
-    for m in reversed(matches):
+    for m in sorted(applied, key=lambda m: m.start, reverse=True):
         result = result[: m.start] + m.redacted + result[m.end :]
-    return result, matches
+    return result, applied

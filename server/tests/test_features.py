@@ -81,15 +81,13 @@ class TestIsPassthrough:
 
 
 class TestExecuteFeature:
-    @pytest.mark.anyio
-    async def test_echoes_arguments(self):
+    def test_echoes_arguments(self):
         args = {"claims": [{"claim": "test", "verdict": "supported", "reasoning": "ok"}]}
-        result = await execute_feature("fact_check", args)
+        result = execute_feature("fact_check", args)
         parsed = json.loads(result)
         assert parsed == args
 
-    @pytest.mark.anyio
-    async def test_extract_notes_schema(self):
+    def test_extract_notes_schema(self):
         """Verify extract_notes accepts structured action items."""
         args = {
             "action_items": [
@@ -100,7 +98,7 @@ class TestExecuteFeature:
             "key_facts": ["Budget is 50k"],
             "risks": ["Tight deadline"],
         }
-        result = await execute_feature("extract_notes", args)
+        result = execute_feature("extract_notes", args)
         parsed = json.loads(result)
         assert parsed["action_items"][0]["owner"] == "Alice"
         assert parsed["action_items"][1].get("owner") is None
