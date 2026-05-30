@@ -44,6 +44,9 @@
       "dist/**/*",
       "dist-electron/**/*"
     ],
+    "extraResources": [
+      { "from": "server-bundle", "to": "server", "filter": ["**/*"] }
+    ],
     "win": {
       "target": [
         { "target": "nsis", "arch": ["x64"] }
