@@ -146,7 +146,19 @@ interface SessionState {
   reset: () => void;
 }
 
-const genId = () => crypto.randomUUID().replace(/-/g, "").slice(0, 12);
+// crypto.randomUUID exists only in secure contexts (https/localhost). Remote
+// clients connecting over plain http:// would otherwise crash on the first
+// transcript line, so fall back to a non-crypto id there.
+export const genId = (): string => {
+  try {
+    if (typeof crypto !== "undefined" && crypto.randomUUID) {
+      return crypto.randomUUID().replace(/-/g, "").slice(0, 12);
+    }
+  } catch {
+    // fall through
+  }
+  return (Date.now().toString(36) + Math.random().toString(36).slice(2, 10)).slice(0, 12);
+};
 
 /** Build a brief summary string for a tool_result event. */
 function summarizeToolResult(name: string, result: Record<string, unknown>): string {

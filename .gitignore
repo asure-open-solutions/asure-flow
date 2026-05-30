@@ -28,8 +28,9 @@ client/server-bundle/
 .DS_Store
 Thumbs.db
 
-# Sessions (user data)
-sessions/
+# Sessions (user data) — repo-root dir only, NOT the source package at
+# server/src/asure_flow/sessions/. Real user data lives in ~/.asure-flow/sessions.
+/sessions/
 
 # Logs
 *.log

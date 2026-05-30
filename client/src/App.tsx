@@ -1,6 +1,6 @@
 import { Component, useCallback, useEffect, useRef, useState } from "react";
 import type { ErrorInfo, ReactNode } from "react";
-import { useSessionStore } from "@/stores/sessionStore";
+import { useSessionStore, genId } from "@/stores/sessionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useShallow } from "zustand/react/shallow";
 import { TranscriptPanel } from "@/components/TranscriptPanel";
@@ -406,7 +406,7 @@ function MainApp() {
     const aws = new AudioWebSocket();
     aws.onConnectionChange = setAudioConnected;
     aws.onTranscription = (data) => {
-      const id = crypto.randomUUID().replace(/-/g, "").slice(0, 12);
+      const id = genId();
       addTranscriptEntry({
         id,
         speaker: data.speaker,

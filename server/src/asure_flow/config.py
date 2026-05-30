@@ -437,6 +437,9 @@ def reset_settings() -> None:
             settings.providers = [p.model_copy() for p in _DEFAULT_PROVIDERS]
         else:
             setattr(settings, key, getattr(defaults, key))
+    # Re-overlay env/.env API keys — the defaults carry none, so without this a
+    # config reset would silently disable all key-based providers until restart.
+    _seed_providers()
     path = _config_path()
     if path.exists():
         path.unlink()
