@@ -19,6 +19,9 @@ client/out/
 client/release/
 client/server-bundle/
 
+# TypeScript incremental build cache (regenerated on every tsc run)
+*.tsbuildinfo
+
 # IDE
 .idea/
 *.swp
