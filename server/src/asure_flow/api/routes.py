@@ -34,7 +34,7 @@ async def health():
     if llm and llm.model_list:
         provider_name = llm.model_list[0].get("model_name", "unknown")
 
-    whisper_loaded = whisper_engine._model is not None
+    whisper_status = whisper_engine.status
 
     try:
         from asure_flow.audio.manager import audio_capture_manager
@@ -46,7 +46,8 @@ async def health():
         "status": "ok",
         "llm_available": llm is not None,
         "llm_provider": provider_name,
-        "whisper_loaded": whisper_loaded,
+        "whisper_loaded": whisper_status["loaded"],
+        "whisper": whisper_status,
         "audio_capturing": audio_capturing,
     }
 

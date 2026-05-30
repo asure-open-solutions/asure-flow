@@ -74,6 +74,8 @@ interface SessionState {
   recording: boolean;
   recordingStartedAt: number | null;
   audioWarning: string | null;
+  // Whisper accuracy-degradation notice (e.g. OOM fell back to a weaker model).
+  transcriptionWarning: string | null;
 
   // Overlay-synced audio toggles (read-only in overlay)
   overlayAudioToggles: { mic: boolean; system: boolean };
@@ -115,6 +117,7 @@ interface SessionState {
   setSessionConnected: (connected: boolean) => void;
   setRecording: (recording: boolean) => void;
   setAudioWarning: (warning: string | null) => void;
+  setTranscriptionWarning: (warning: string | null) => void;
   setSessions: (sessions: SessionSummary[]) => void;
   handleAIEvent: (event: AIEvent) => void;
   clearAgentLog: () => void;
@@ -198,6 +201,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   recording: false,
   recordingStartedAt: null,
   audioWarning: null,
+  transcriptionWarning: null,
   overlayAudioToggles: { mic: true, system: true },
   sessions: [],
   insightsDrawerOpen: false,
@@ -356,6 +360,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   setRecording: (recording) =>
     set({ recording, recordingStartedAt: recording ? Date.now() : null, ...(!recording && { audioWarning: null }) }),
   setAudioWarning: (warning) => set({ audioWarning: warning }),
+  setTranscriptionWarning: (warning) => set({ transcriptionWarning: warning }),
   setSessions: (sessions) => set({ sessions }),
   clearAgentLog: () => set({ agentLog: [] }),
 
@@ -618,6 +623,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
       recording: false,
       recordingStartedAt: null,
       audioWarning: null,
+      transcriptionWarning: null,
       insightsDrawerOpen: false,
       insightsDrawerTab: "suggestions" as InsightsTab,
       unseenInsightCount: 0,

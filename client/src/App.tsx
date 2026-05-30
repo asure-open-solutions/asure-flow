@@ -111,6 +111,7 @@ function MainApp() {
       if (active) {
         setServerOnline(health.online);
         setLlmStatus(health.llmAvailable, health.llmProvider);
+        useSessionStore.getState().setTranscriptionWarning(health.whisperWarning);
       }
     };
     check();

@@ -25,6 +25,7 @@ export function StatusBar() {
   const recording = useSessionStore((s) => s.recording);
   const recordingStartedAt = useSessionStore((s) => s.recordingStartedAt);
   const audioWarning = useSessionStore((s) => s.audioWarning);
+  const transcriptionWarning = useSessionStore((s) => s.transcriptionWarning);
   const aiStreaming = useSessionStore((s) => s.aiStreaming);
   const currentToolName = useSessionStore((s) => s.currentToolName);
 
@@ -77,6 +78,12 @@ export function StatusBar() {
       {audioWarning && (
         <span className="text-amber-400 truncate max-w-[300px]" title={audioWarning}>
           {audioWarning}
+        </span>
+      )}
+
+      {transcriptionWarning && (
+        <span className="text-amber-400 truncate max-w-[220px]" title={transcriptionWarning}>
+          Transcription degraded
         </span>
       )}
 

@@ -49,6 +49,8 @@ export interface HealthStatus {
   online: boolean;
   llmAvailable: boolean;
   llmProvider: string | null;
+  /** Set when Whisper fell back to a weaker model/device (reduced accuracy). */
+  whisperWarning: string | null;
 }
 
 export async function checkHealth(): Promise<{ status: string; llm_available: boolean }> {
@@ -61,15 +63,21 @@ export async function checkServerHealth(): Promise<HealthStatus> {
     const res = await fetch(`${baseUrl}/api/health`, {
       signal: AbortSignal.timeout(3000),
     });
-    if (!res.ok) return { online: false, llmAvailable: false, llmProvider: null };
+    if (!res.ok) return { online: false, llmAvailable: false, llmProvider: null, whisperWarning: null };
     const data = await res.json();
+    const w = data.whisper;
+    const whisperWarning =
+      w && w.degraded
+        ? `Transcription degraded: running ${w.model} on ${w.device} (requested ${w.requested_model}). Accuracy is reduced — close other GPU apps or choose a smaller model in Settings.`
+        : null;
     return {
       online: true,
       llmAvailable: data.llm_available ?? false,
       llmProvider: data.llm_provider ?? null,
+      whisperWarning,
     };
   } catch {
-    return { online: false, llmAvailable: false, llmProvider: null };
+    return { online: false, llmAvailable: false, llmProvider: null, whisperWarning: null };
   }
 }
 
