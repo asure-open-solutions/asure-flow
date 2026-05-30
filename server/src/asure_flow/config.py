@@ -133,6 +133,7 @@ class Settings(BaseSettings):
     whisper_device: Optional[str] = None  # auto-detect
     whisper_compute_type: Optional[str] = None  # auto-select
     whisper_language: Optional[str] = None  # auto-detect
+    whisper_beam_size: int = 0  # 0 = auto (5 on GPU, 1 on CPU); >0 overrides
 
     # ── LLM Providers (data-driven list, persisted in config.json) ──
     providers: list[ProviderEntry] = Field(default_factory=list)

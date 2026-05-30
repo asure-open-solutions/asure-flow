@@ -249,11 +249,15 @@ async def ws_session(websocket: WebSocket, session_id: str):
     last_summarized_index = 0
     last_speaker: str | None = None
     last_fire_time: float = 0.0  # monotonic timestamp of last agent fire
+    # Set while the user is delivering a suggestion we gave them. Suppresses new
+    # suggestions until the other party speaks again, so the AI stops rewriting the
+    # answer out from under the user mid-delivery. Auto-managed; replaces manual pin.
+    suggestions_locked: bool = False
 
     # ── Agent fire logic ──
 
     async def _do_fire_agent(max_iterations: int = 5) -> None:
-        nonlocal agent_task, last_fire_time
+        nonlocal agent_task, last_fire_time, suggestions_locked
 
         entries = pending_entries[:]
         pending_entries.clear()
@@ -293,7 +297,15 @@ async def ws_session(websocket: WebSocket, session_id: str):
         transcript_text = "\n".join(f"[{s}]: {t}" for s, t, _, _ in entries)
         last_entry_id = entries[-1][2]
 
-        # Echo detection
+        # ── Suggestion delivery-lock ──
+        # Release the lock once the conversation returns to the other party: a new
+        # suggestion is wanted again only after they've responded.
+        was_locked = suggestions_locked
+        if any(not is_user for _, _, _, is_user in entries):
+            suggestions_locked = False
+
+        # Echo detection: if the user's speech is tracking a suggestion we gave, they
+        # are delivering it — lock suggestions so the AI doesn't rewrite it mid-sentence.
         if session.suggestions:
             recent_sugs = [s.text for s in session.suggestions[-ECHO_SUGGESTION_LOOKBACK:]]
             user_texts = [t for _, t, _, is_user in entries if is_user]
@@ -305,8 +317,23 @@ async def ws_session(websocket: WebSocket, session_id: str):
                             "[The user's speech echoes a prior suggestion.]\n\n"
                             + transcript_text
                         )
-                        logger.debug("Echo detected: user speech matches a recent suggestion")
+                        suggestions_locked = True
+                        logger.debug("Echo detected: locking suggestions until the other party responds")
                         break
+
+        # Suppress new suggestions while the lock is held (the other features still run).
+        effective_suggestions = toggles.suggestions and not suggestions_locked
+
+        # Tell the client when the lock flips so the UI can freeze/unfreeze the live
+        # suggestion card automatically — no manual pin required.
+        if toggles.suggestions and suggestions_locked != was_locked:
+            try:
+                await websocket.send_json({
+                    "type": "ai_event",
+                    "event": {"type": "suggestion_lock", "locked": suggestions_locked},
+                })
+            except Exception:
+                logger.debug("Failed to send suggestion_lock notice", exc_info=True)
 
         async def process_agent():
             try:
@@ -314,7 +341,7 @@ async def ws_session(websocket: WebSocket, session_id: str):
                     # Parallel specialist agents mode
                     specialists = get_enabled_specialists(
                         fact_checking=toggles.fact_checking,
-                        suggestions=toggles.suggestions,
+                        suggestions=effective_suggestions,
                         notes=toggles.notes,
                         search_transcript=toggles.search_transcript,
                         search_sessions=toggles.search_sessions,
@@ -344,7 +371,7 @@ async def ws_session(websocket: WebSocket, session_id: str):
                         session_context=session_context,
                         prior_outputs=prior_outputs,
                         fact_checking=toggles.fact_checking,
-                        suggestions=toggles.suggestions,
+                        suggestions=effective_suggestions,
                         notes=toggles.notes,
                         search_transcript=toggles.search_transcript,
                         search_sessions=toggles.search_sessions,

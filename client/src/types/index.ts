@@ -85,6 +85,7 @@ export type AIEvent =
   | { type: "tool_result"; name: string; result: Record<string, unknown>; specialist?: string }
   | { type: "done"; reason?: string; usage?: TokenUsage }
   | { type: "preempted" }
+  | { type: "suggestion_lock"; locked: boolean }
   | { type: "error"; message: string; specialist?: string };
 
 // ── Session Settings (per-session overrides) ──

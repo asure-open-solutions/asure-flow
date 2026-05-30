@@ -53,6 +53,9 @@ interface SessionState {
   // AI state
   suggestions: SuggestionEntry[];
   focusedSuggestionId: string | null;
+  // True while the user is delivering a suggestion (server echo-lock). The live
+  // card freezes and the AI holds new suggestions until the other party responds.
+  suggestionsLocked: boolean;
   aiStreaming: boolean;
   currentToolName: string | null;
   searchResults: SearchResult[];
@@ -180,6 +183,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   sessionContext: "",
   suggestions: [],
   focusedSuggestionId: null,
+  suggestionsLocked: false,
   aiStreaming: false,
   currentToolName: null,
   searchResults: [],
@@ -328,7 +332,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
     set((state) => ({
       focusedSuggestionId: state.focusedSuggestionId === id ? null : id,
     })),
-  clearSuggestions: () => set({ suggestions: [], focusedSuggestionId: null }),
+  clearSuggestions: () => set({ suggestions: [], focusedSuggestionId: null, suggestionsLocked: false }),
   clearNotes: () => set({ notes: [] }),
   toggleNoteCompleted: (noteId) =>
     set((state) => ({
@@ -541,6 +545,19 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
         });
         break;
 
+      case "suggestion_lock":
+        // The user is delivering a suggestion (or has stopped). Freeze/unfreeze the
+        // live card. On lock, auto-pin the current focal suggestion so it stays put
+        // even if a queued suggestion arrives — the automatic replacement for manual pin.
+        set({
+          suggestionsLocked: event.locked,
+          focusedSuggestionId:
+            event.locked && !state.focusedSuggestionId && state.suggestions.length > 0
+              ? state.suggestions[state.suggestions.length - 1].id
+              : state.focusedSuggestionId,
+        });
+        break;
+
       case "error":
         set({
           aiStreaming: false,
@@ -591,6 +608,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
       sessionContext: "",
       suggestions: [],
       focusedSuggestionId: null,
+      suggestionsLocked: false,
       aiStreaming: false,
       currentToolName: null,
       searchResults: [],

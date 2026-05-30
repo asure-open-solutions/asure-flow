@@ -59,17 +59,52 @@ class WhisperEngine:
     def __init__(self) -> None:
         self._model = None
         self._lock = asyncio.Lock()
+        # What actually loaded (may differ from what was requested after OOM fallback).
+        self._loaded_model: str | None = None
+        self._loaded_device: str | None = None
+        self._loaded_compute_type: str | None = None
+        self._degraded: bool = False  # True if we fell back to a weaker model/device
+
+    @property
+    def status(self) -> dict:
+        """Current engine state — surfaced via /health so the UI can warn on degradation."""
+        return {
+            "loaded": self._model is not None,
+            "requested_model": settings.whisper_model,
+            "requested_device": settings.detect_device(),
+            "model": self._loaded_model,
+            "device": self._loaded_device,
+            "compute_type": self._loaded_compute_type,
+            "degraded": self._degraded,
+        }
+
+    def _effective_beam_size(self) -> int:
+        """Beam size: explicit setting wins; otherwise 5 on GPU, 1 on CPU.
+
+        Beam search is much more accurate but costs decode time; a GPU has the
+        headroom, a CPU does not. Keyed on the *actually loaded* device so an OOM
+        fallback to CPU doesn't leave us doing slow beam search there.
+        """
+        if settings.whisper_beam_size > 0:
+            return settings.whisper_beam_size
+        return 5 if self._loaded_device == "cuda" else 1
 
     async def load(self) -> None:
         """Load the whisper model (call once at server startup)."""
         loop = asyncio.get_event_loop()
         self._model = await loop.run_in_executor(None, self._load_model)
-        logger.info(
-            "Whisper model loaded: %s on %s (%s)",
-            settings.whisper_model,
-            settings.detect_device(),
-            settings.detect_compute_type(),
-        )
+        if self._degraded:
+            logger.warning(
+                "Whisper running DEGRADED: requested %s on %s but loaded %s on %s (%s) "
+                "after out-of-memory fallback — transcription accuracy is reduced.",
+                settings.whisper_model, settings.detect_device(),
+                self._loaded_model, self._loaded_device, self._loaded_compute_type,
+            )
+        else:
+            logger.info(
+                "Whisper model loaded: %s on %s (%s)",
+                self._loaded_model, self._loaded_device, self._loaded_compute_type,
+            )
 
     def _load_model(self):
         from faster_whisper import WhisperModel
@@ -95,13 +130,19 @@ class WhisperEngine:
 
         last_exc: RuntimeError | None = None
         for model_name, dev, ct in candidates:
+            is_fallback = (model_name, dev, ct) != (settings.whisper_model, device, compute_type)
             try:
-                if (model_name, dev, ct) != (settings.whisper_model, device, compute_type):
+                if is_fallback:
                     logger.warning(
                         "Retrying with model=%s device=%s compute_type=%s",
                         model_name, dev, ct,
                     )
-                return WhisperModel(model_name, device=dev, compute_type=ct)
+                model = WhisperModel(model_name, device=dev, compute_type=ct)
+                self._loaded_model = model_name
+                self._loaded_device = dev
+                self._loaded_compute_type = ct
+                self._degraded = is_fallback
+                return model
             except RuntimeError as exc:
                 if _is_oom(exc):
                     last_exc = exc
@@ -129,7 +170,7 @@ class WhisperEngine:
         self, audio: np.ndarray, initial_prompt: str | None = None,
     ) -> list[TranscriptSegment]:
         kwargs: dict = dict(
-            beam_size=1,
+            beam_size=self._effective_beam_size(),
             # AudioBuffer already gates flushes with Silero VAD (speech-then-silence).
             # A second VAD pass here is redundant and harmful for short (~1-2 s) chunks
             # that arrive from remote clients — it aggressively strips them as "silence".
