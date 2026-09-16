@@ -40,6 +40,9 @@ async def run_agent(
     max_iterations: int = MAX_ITERATIONS,
     parallel_tools: bool = False,
     tools_override: list[dict] | None = None,
+    model_name: str = "assistant",
+    request_timeout: float | None = None,
+    max_completion_tokens: int | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """
     Run the agentic loop on a transcript segment.
@@ -103,13 +106,20 @@ async def run_agent(
             tool_calls_acc: dict[int, dict] = {}
             finish_reason = None
 
+            completion_kwargs: dict[str, Any] = {
+                "model": model_name,
+                "messages": messages,
+                "tools": tools if tools else None,
+                "tool_choice": "auto" if tools else None,
+                "stream": True,
+                "temperature": 0.7,
+            }
+            if request_timeout is not None:
+                completion_kwargs["timeout"] = request_timeout
+            if max_completion_tokens is not None:
+                completion_kwargs["max_tokens"] = max_completion_tokens
             response = await router.acompletion(
-                model="assistant",
-                messages=messages,
-                tools=tools if tools else None,
-                tool_choice="auto" if tools else None,
-                stream=True,
-                temperature=0.7,
+                **completion_kwargs,
             )
 
             async for chunk in response:

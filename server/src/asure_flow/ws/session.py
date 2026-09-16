@@ -26,13 +26,18 @@ from asure_flow.sessions.models import FactCheck, NoteEntry, NoteType, Suggestio
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-AUTOSAVE_INTERVAL = 30  # seconds
+AUTOSAVE_INTERVAL = 5  # seconds — keep crash-loss small during live sessions
+EMBEDDING_SAVE_DELAY = 2.0
+
+_embedding_locks: dict[str, asyncio.Lock] = {}
+_embedding_save_tasks: dict[str, asyncio.Task] = {}
 
 # ── Smart trigger constants ──
 MIN_FIRE_INTERVAL = 3.0            # Minimum seconds between agent fires (cost throttle)
 MONOLOGUE_INTERVAL = 15.0          # Periodic fire during long unbroken speech
 SUMMARY_CHECK_INTERVAL = 5.0       # How often to check if rolling summary needs refresh
 RERUN_CONTEXT_ENTRIES = 5          # How many recent entries to use for rerun triggers
+HEARTBEAT_INTERVAL = 20.0
 
 # Debounce delays (lowered since trivial gate saves us from wasted calls)
 DELAY_IMMEDIATE = 0.0              # Other asked a question
@@ -44,6 +49,9 @@ DELAY_NORMAL = 1.0                 # Same speaker continues
 ECHO_THRESHOLD = 0.6
 DEDUP_THRESHOLD = 0.6
 ECHO_SUGGESTION_LOOKBACK = 5
+# Safety expiry: auto-release the delivery-lock after this many agent fires if the
+# other party never speaks, so suggestions can't be suppressed forever.
+SUGGESTION_LOCK_MAX_FIRES = 4
 
 # ── Trivial content patterns ──
 _TRIVIAL_PATTERN = re.compile(
@@ -117,7 +125,10 @@ def _compute_signals(
     )
 
 
-def _compute_trigger_delay(signals: TriggerSignals) -> float | None:
+def _compute_trigger_delay(
+    signals: TriggerSignals,
+    response_profile: str = "balanced",
+) -> float | None:
     """Determine trigger delay from signals. Returns None to skip entirely."""
     # Gate: skip trivial content
     if signals.is_trivial:
@@ -137,9 +148,14 @@ def _compute_trigger_delay(signals: TriggerSignals) -> float | None:
     else:
         delay = DELAY_NORMAL
 
-    # Enforce minimum fire interval (cost throttle)
-    if signals.seconds_since_last_fire < MIN_FIRE_INTERVAL:
-        remaining = MIN_FIRE_INTERVAL - signals.seconds_since_last_fire
+    # Interactive profiles trade a little extra API usage for prompt replies.
+    interval = {
+        "realtime": 0.25,
+        "balanced": 1.0,
+        "quality": MIN_FIRE_INTERVAL,
+    }.get(response_profile, 1.0)
+    if signals.seconds_since_last_fire < interval:
+        remaining = interval - signals.seconds_since_last_fire
         delay = max(delay, remaining)
 
     return delay
@@ -167,6 +183,16 @@ def _suggestion_similarity(a: str, b: str) -> float:
         return 0.0
     overlap = len(words_a & words_b)
     return overlap / len(words_a | words_b)
+
+
+def _is_user_speaker(session, speaker: str) -> bool:
+    """Recognize the user even after their display label has been renamed."""
+    if speaker == "User":
+        return True
+    return any(
+        p.speaker_label == "User" and p.display_name == speaker
+        for p in session.participants
+    )
 
 
 # ── Feature toggles ──
@@ -249,11 +275,19 @@ async def ws_session(websocket: WebSocket, session_id: str):
     last_summarized_index = 0
     last_speaker: str | None = None
     last_fire_time: float = 0.0  # monotonic timestamp of last agent fire
+    # Set while the user is delivering a suggestion we gave them. Suppresses new
+    # suggestions until the other party speaks again, so the AI stops rewriting the
+    # answer out from under the user mid-delivery. Auto-managed; replaces manual pin.
+    suggestions_locked: bool = False
+    # Fires the lock has been held without the other party speaking. A safety
+    # expiry so the lock can never wedge if they never respond (monologue,
+    # mislabeled audio): it auto-releases after SUGGESTION_LOCK_MAX_FIRES.
+    suggestions_lock_age: int = 0
 
     # ── Agent fire logic ──
 
-    async def _do_fire_agent(max_iterations: int = 5) -> None:
-        nonlocal agent_task, last_fire_time
+    async def _do_fire_agent(max_iterations: int = 5, realtime_turn: bool = False) -> None:
+        nonlocal agent_task, last_fire_time, suggestions_locked, suggestions_lock_age
 
         entries = pending_entries[:]
         pending_entries.clear()
@@ -283,8 +317,16 @@ async def ws_session(websocket: WebSocket, session_id: str):
         last_fire_time = time.monotonic()
 
         # Use whatever rolling summary is available (updated by background task)
-        context = build_context(session, rolling_summary)
-        prior_outputs = build_prior_outputs(session)
+        use_realtime_route = realtime_turn and profile.ai_response_profile != "quality"
+        context = build_context(
+            session,
+            rolling_summary,
+            recent_token_budget=2500 if use_realtime_route else 4500,
+        )
+        prior_outputs = build_prior_outputs(
+            session,
+            token_budget=600 if use_realtime_route else 1500,
+        )
         system_prompt = _resolve_system_prompt(toggles)
         deep_think_enabled = toggles.deep_think != "off"
         session_context = session.context
@@ -292,9 +334,31 @@ async def ws_session(websocket: WebSocket, session_id: str):
 
         transcript_text = "\n".join(f"[{s}]: {t}" for s, t, _, _ in entries)
         last_entry_id = entries[-1][2]
+        fire_started = time.perf_counter()
+        first_result_sent = False
 
-        # Echo detection
-        if session.suggestions:
+        # ── Suggestion delivery-lock ──
+        was_locked = suggestions_locked
+        other_spoke = any(not is_user for _, _, _, is_user in entries)
+
+        if other_spoke:
+            # Conversation returned to the other party — release the lock and do
+            # NOT re-lock from trailing user echo in this same batch; a fresh
+            # suggestion is exactly what's wanted now.
+            suggestions_locked = False
+            suggestions_lock_age = 0
+        elif suggestions_locked:
+            # Still the user's turn while locked — age the lock so it can't wedge
+            # if the other party never speaks (monologue / mislabeled audio).
+            suggestions_lock_age += 1
+            if suggestions_lock_age >= SUGGESTION_LOCK_MAX_FIRES:
+                suggestions_locked = False
+                suggestions_lock_age = 0
+
+        # Echo detection: only when the other party did NOT just speak. If the
+        # user's speech is tracking a suggestion we gave, they're delivering it —
+        # lock so the AI doesn't rewrite it mid-sentence.
+        if not other_spoke and session.suggestions:
             recent_sugs = [s.text for s in session.suggestions[-ECHO_SUGGESTION_LOOKBACK:]]
             user_texts = [t for _, t, _, is_user in entries if is_user]
             if user_texts:
@@ -305,16 +369,35 @@ async def ws_session(websocket: WebSocket, session_id: str):
                             "[The user's speech echoes a prior suggestion.]\n\n"
                             + transcript_text
                         )
-                        logger.debug("Echo detected: user speech matches a recent suggestion")
+                        if not suggestions_locked:
+                            suggestions_lock_age = 0
+                        suggestions_locked = True
+                        logger.debug("Echo detected: locking suggestions until the other party responds")
                         break
 
-        async def process_agent():
+        # Suppress new suggestions while the lock is held (the other features still run).
+        effective_suggestions = toggles.suggestions and not suggestions_locked
+
+        # Tell the client when the lock flips so the UI can freeze/unfreeze the live
+        # suggestion card automatically — no manual pin required.
+        if toggles.suggestions and suggestions_locked != was_locked:
             try:
+                await websocket.send_json({
+                    "type": "ai_event",
+                    "event": {"type": "suggestion_lock", "locked": suggestions_locked},
+                })
+            except Exception:
+                logger.debug("Failed to send suggestion_lock notice", exc_info=True)
+
+        async def process_agent():
+            nonlocal first_result_sent
+            try:
+                background_stream = None
                 if toggles.agent_mode == "specialists":
                     # Parallel specialist agents mode
                     specialists = get_enabled_specialists(
                         fact_checking=toggles.fact_checking,
-                        suggestions=toggles.suggestions,
+                        suggestions=effective_suggestions,
                         notes=toggles.notes,
                         search_transcript=toggles.search_transcript,
                         search_sessions=toggles.search_sessions,
@@ -337,35 +420,82 @@ async def ws_session(websocket: WebSocket, session_id: str):
                     )
                 else:
                     # Unified agent mode (default)
+                    fast_lane = (
+                        use_realtime_route
+                        and profile.ai_response_profile == "realtime"
+                        and effective_suggestions
+                    )
                     event_stream = run_agent(
                         router=llm_router,
                         transcript_text=transcript_text,
                         conversation_context=context,
                         session_context=session_context,
                         prior_outputs=prior_outputs,
-                        fact_checking=toggles.fact_checking,
-                        suggestions=toggles.suggestions,
-                        notes=toggles.notes,
-                        search_transcript=toggles.search_transcript,
-                        search_sessions=toggles.search_sessions,
-                        web_search=effective_ws,
-                        format_code=toggles.format_code,
-                        deep_think=deep_think_enabled,
-                        system_prompt=system_prompt,
+                        fact_checking=False if fast_lane else toggles.fact_checking,
+                        suggestions=effective_suggestions,
+                        notes=False if fast_lane else toggles.notes,
+                        search_transcript=False if fast_lane else toggles.search_transcript,
+                        search_sessions=False if fast_lane else toggles.search_sessions,
+                        web_search=False if fast_lane else effective_ws,
+                        format_code=False if fast_lane else toggles.format_code,
+                        deep_think=False if fast_lane else deep_think_enabled,
+                        system_prompt=(
+                            system_prompt
+                            + "\nFor this realtime pass, produce only a concise response suggestion."
+                            if fast_lane else system_prompt
+                        ),
                         session=session,
                         max_iterations=max_iterations,
                         parallel_tools=toggles.parallel_tools,
+                        model_name="assistant_realtime" if use_realtime_route else "assistant",
+                        request_timeout=12 if use_realtime_route else None,
+                        max_completion_tokens=450 if use_realtime_route else None,
                     )
 
-                async for event in event_stream:
-                    if event.get("type") == "tool_result":
-                        _persist_tool_result(session, last_entry_id, event)
-                    # Accumulate token usage on done events
-                    if event.get("type") == "done":
-                        usage = event.get("usage", {})
-                        session.token_usage.prompt_tokens += usage.get("prompt_tokens", 0)
-                        session.token_usage.completion_tokens += usage.get("completion_tokens", 0)
-                    await websocket.send_json({"type": "ai_event", "event": event})
+                    if fast_lane and (
+                        toggles.fact_checking or toggles.notes or toggles.search_transcript
+                        or toggles.search_sessions or effective_ws or toggles.format_code
+                    ):
+                        background_stream = run_agent(
+                            router=llm_router,
+                            transcript_text=transcript_text,
+                            conversation_context=context,
+                            session_context=session_context,
+                            prior_outputs=prior_outputs,
+                            fact_checking=toggles.fact_checking,
+                            suggestions=False,
+                            notes=toggles.notes,
+                            search_transcript=toggles.search_transcript,
+                            search_sessions=toggles.search_sessions,
+                            web_search=effective_ws,
+                            format_code=toggles.format_code,
+                            deep_think=deep_think_enabled,
+                            system_prompt=system_prompt,
+                            session=session,
+                            max_iterations=2,
+                            parallel_tools=toggles.parallel_tools,
+                            model_name="assistant",
+                        )
+
+                streams = [event_stream] + ([background_stream] if background_stream else [])
+                for stream_index, stream in enumerate(streams):
+                    async for event in stream:
+                        if event.get("type") == "tool_result":
+                            if not first_result_sent:
+                                event["latency_ms"] = round(
+                                    (time.perf_counter() - fire_started) * 1000,
+                                    1,
+                                )
+                                first_result_sent = True
+                            event["transcript_id"] = last_entry_id
+                            _persist_tool_result(session, last_entry_id, event)
+                        if event.get("type") == "done":
+                            usage = event.get("usage", {})
+                            session.token_usage.prompt_tokens += usage.get("prompt_tokens", 0)
+                            session.token_usage.completion_tokens += usage.get("completion_tokens", 0)
+                            if stream_index < len(streams) - 1:
+                                continue
+                        await websocket.send_json({"type": "ai_event", "event": event})
             except Exception:
                 logger.exception("Agent processing error")
                 try:
@@ -378,10 +508,14 @@ async def ws_session(websocket: WebSocket, session_id: str):
 
         agent_task = asyncio.create_task(process_agent())
 
-    async def _schedule_fire(delay: float, max_iterations: int = 5) -> None:
+    async def _schedule_fire(
+        delay: float,
+        max_iterations: int = 5,
+        realtime_turn: bool = False,
+    ) -> None:
         if delay > 0:
             await asyncio.sleep(delay)
-        await _do_fire_agent(max_iterations)
+        await _do_fire_agent(max_iterations, realtime_turn)
 
     # ── Background summary refresh (off critical path) ──
 
@@ -390,6 +524,8 @@ async def ws_session(websocket: WebSocket, session_id: str):
         consecutive_failures = 0
         while True:
             await asyncio.sleep(SUMMARY_CHECK_INTERVAL)
+            if agent_task and not agent_task.done():
+                continue
             if not needs_summary_refresh(session, last_summarized_index):
                 continue
             llm_router = get_router()
@@ -437,10 +573,16 @@ async def ws_session(websocket: WebSocket, session_id: str):
         if trigger_task and not trigger_task.done():
             trigger_task.cancel()
 
-    def _start_trigger(delay: float, max_iterations: int = 5) -> None:
+    def _start_trigger(
+        delay: float,
+        max_iterations: int = 5,
+        realtime_turn: bool = False,
+    ) -> None:
         nonlocal trigger_task
         _cancel_trigger()
-        trigger_task = asyncio.create_task(_schedule_fire(delay, max_iterations))
+        trigger_task = asyncio.create_task(
+            _schedule_fire(delay, max_iterations, realtime_turn)
+        )
 
     # Auto-save task
     async def autosave_loop():
@@ -452,7 +594,16 @@ async def ws_session(websocket: WebSocket, session_id: str):
             except Exception:
                 logger.debug("Autosave WS notification failed, continuing saves")
 
+    async def heartbeat_loop():
+        while True:
+            await asyncio.sleep(HEARTBEAT_INTERVAL)
+            try:
+                await websocket.send_json({"type": "heartbeat", "timestamp": time.time()})
+            except Exception:
+                return
+
     save_task = asyncio.create_task(autosave_loop())
+    heartbeat_task = asyncio.create_task(heartbeat_loop())
     monologue_task = asyncio.create_task(_monologue_check())
     summary_bg_task = asyncio.create_task(_summary_refresh_loop())
 
@@ -537,12 +688,19 @@ async def ws_session(websocket: WebSocket, session_id: str):
                 signals = _compute_signals(pending_entries, last_speaker, last_fire_time)
                 last_speaker = raw_speaker
 
-                delay = _compute_trigger_delay(signals)
+                delay = _compute_trigger_delay(signals, profile.ai_response_profile)
                 if delay is not None:
                     # Use fast path (fewer iterations) for urgent scenarios
                     # Base on has_question directly — delay may be > 0 after throttle even for questions
+                    interactive = signals.has_question or signals.speaker_changed
                     iters = 2 if signals.has_question else 5
-                    _start_trigger(delay, max_iterations=iters)
+                    if profile.ai_response_profile == "realtime" and interactive:
+                        iters = 1
+                    _start_trigger(
+                        delay,
+                        max_iterations=iters,
+                        realtime_turn=interactive,
+                    )
                 else:
                     logger.debug("Skipping trivial segment: %r", text[:50])
 
@@ -551,7 +709,10 @@ async def ws_session(websocket: WebSocket, session_id: str):
                     recent = session.transcript[-RERUN_CONTEXT_ENTRIES:]
                     pending_entries.clear()
                     for te in recent:
-                        pending_entries.append((te.speaker, te.text, te.id, False))
+                        pending_entries.append((
+                            te.speaker, te.text, te.id,
+                            _is_user_speaker(session, te.speaker),
+                        ))
                     _start_trigger(0.0)
 
             elif msg_type == "relabel":
@@ -577,6 +738,8 @@ async def ws_session(websocket: WebSocket, session_id: str):
                     await session_manager.save_async(session)
                     await websocket.send_json({
                         "type": "speaker_renamed",
+                        "speaker_label": speaker_label,
+                        "display_name": display_name,
                         "participant": participant.model_dump(mode="json"),
                     })
 
@@ -600,18 +763,20 @@ async def ws_session(websocket: WebSocket, session_id: str):
     except Exception:
         logger.exception("Session WebSocket error")
     finally:
-        for task in [save_task, trigger_task, monologue_task, agent_task, summary_bg_task]:
+        for task in [save_task, heartbeat_task, trigger_task, monologue_task, agent_task, summary_bg_task]:
             if task and not task.done():
                 task.cancel()
                 try:
                     await task
                 except (asyncio.CancelledError, Exception):
                     pass
+        await _flush_embedding_index(session.id)
         await session_manager.save_async(session)
 
 
 def _persist_tool_result(session, transcript_id: str, event: dict) -> None:
     """Save tool results (fact-checks, notes) into the session model."""
+    event.setdefault("transcript_id", transcript_id)
     name = event.get("name", "")
     result = event.get("result", {})
 
@@ -683,9 +848,49 @@ def _persist_tool_result(session, transcript_id: str, event: dict) -> None:
 
 async def _embed_entry(session_id: str, entry_id: str, text: str) -> None:
     try:
-        embedding = await embedding_engine.embed_single(text)
-        idx = get_index(session_id)
-        idx.add(entry_id, embedding)
-        idx.save()
+        lock = _embedding_locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            embedding = await embedding_engine.embed_single(text)
+            idx = get_index(session_id)
+            if not idx.has_entry(entry_id):
+                idx.add(entry_id, embedding)
+        _schedule_embedding_save(session_id)
     except Exception:
         logger.debug("Failed to embed entry %s", entry_id, exc_info=True)
+
+
+def _schedule_embedding_save(session_id: str) -> None:
+    previous = _embedding_save_tasks.get(session_id)
+    if previous and not previous.done():
+        previous.cancel()
+
+    async def save_later() -> None:
+        try:
+            await asyncio.sleep(EMBEDDING_SAVE_DELAY)
+            lock = _embedding_locks.setdefault(session_id, asyncio.Lock())
+            async with lock:
+                await asyncio.to_thread(get_index(session_id).save)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("Failed to save embedding index for %s", session_id, exc_info=True)
+        finally:
+            if _embedding_save_tasks.get(session_id) is asyncio.current_task():
+                _embedding_save_tasks.pop(session_id, None)
+
+    _embedding_save_tasks[session_id] = asyncio.create_task(
+        save_later(), name=f"embedding-save-{session_id}",
+    )
+
+
+async def _flush_embedding_index(session_id: str) -> None:
+    pending = _embedding_save_tasks.pop(session_id, None)
+    if pending and not pending.done():
+        pending.cancel()
+        try:
+            await pending
+        except asyncio.CancelledError:
+            pass
+    lock = _embedding_locks.setdefault(session_id, asyncio.Lock())
+    async with lock:
+        await asyncio.to_thread(get_index(session_id).save)

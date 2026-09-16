@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -15,6 +16,15 @@ router = APIRouter()
 
 STREAM_MIC = 0
 STREAM_SYSTEM = 1
+
+
+def _resolve_capture_mode(requested_capture: str) -> tuple[bool, bool]:
+    """Return whether mic/system should use server-side capture."""
+    force_client = requested_capture == "client"
+    return (
+        not force_client and settings.audio_capture_source == "server",
+        not force_client and bool(settings.system_device_id),
+    )
 
 
 @router.websocket("/ws/audio")
@@ -31,8 +41,13 @@ async def ws_audio(websocket: WebSocket):
     await websocket.accept()
     logger.info("Audio WebSocket connected: %s", websocket.client)
 
-    server_mic = settings.audio_capture_source == "server"
-    server_system = bool(settings.system_device_id)
+    requested_capture = websocket.query_params.get("capture", "auto")
+    server_mic, server_system = _resolve_capture_mode(requested_capture)
+    logger.info(
+        "Audio capture mode: requested=%s mic=%s system=%s",
+        requested_capture, "server" if server_mic else "client",
+        "server" if server_system else "client",
+    )
 
     if server_mic:
         await _handle_server_capture(websocket)
@@ -78,6 +93,8 @@ async def _handle_mixed_capture(websocket: WebSocket) -> None:
     from asure_flow.audio.manager import audio_capture_manager
 
     mic_buffer = AudioBuffer(whisper_engine, speaker_label="User")
+    mic_queue = asyncio.Queue[bytes](maxsize=500)
+    send_lock = asyncio.Lock()
 
     # Ensure system capture is running
     if settings.system_device_id and not audio_capture_manager._system_capture:
@@ -88,17 +105,31 @@ async def _handle_mixed_capture(websocket: WebSocket) -> None:
 
     async def send_transcription(seg):
         try:
-            await websocket.send_json({
-                "type": "transcription",
-                "speaker": seg.speaker,
-                "text": seg.text,
-                "start": seg.start,
-                "end": seg.end,
-            })
+            async with send_lock:
+                await websocket.send_json({
+                    "type": "transcription",
+                    "speaker": seg.speaker,
+                    "text": seg.text,
+                    "start": seg.start,
+                    "end": seg.end,
+                })
         except Exception:
             logger.debug("Failed to send transcription to WebSocket", exc_info=True)
 
     audio_capture_manager.on_transcription = send_transcription
+
+    async def process_mic() -> None:
+        while True:
+            pcm_data = await mic_queue.get()
+            try:
+                mic_buffer.add_audio(pcm_data)
+                if mic_buffer.ready:
+                    for seg in await mic_buffer.flush():
+                        await send_transcription(seg)
+            finally:
+                mic_queue.task_done()
+
+    mic_worker = asyncio.create_task(process_mic(), name="mixed-mic-worker")
 
     try:
         while True:
@@ -111,17 +142,7 @@ async def _handle_mixed_capture(websocket: WebSocket) -> None:
 
             # Only process mic audio from client; system audio is handled server-side
             if stream_id == STREAM_MIC:
-                mic_buffer.add_audio(pcm_data)
-                if mic_buffer.ready:
-                    segments = await mic_buffer.flush()
-                    for seg in segments:
-                        await websocket.send_json({
-                            "type": "transcription",
-                            "speaker": seg.speaker,
-                            "text": seg.text,
-                            "start": seg.start,
-                            "end": seg.end,
-                        })
+                await mic_queue.put(pcm_data)
 
     except WebSocketDisconnect:
         logger.info("Audio WebSocket disconnected (mixed capture mode)")
@@ -129,16 +150,12 @@ async def _handle_mixed_capture(websocket: WebSocket) -> None:
         logger.exception("Audio WebSocket error (mixed capture mode)")
     finally:
         audio_capture_manager.on_transcription = None
+        mic_worker.cancel()
+        await asyncio.gather(mic_worker, return_exceptions=True)
         try:
             remaining = await mic_buffer.flush()
             for seg in remaining:
-                await websocket.send_json({
-                    "type": "transcription",
-                    "speaker": seg.speaker,
-                    "text": seg.text,
-                    "start": seg.start,
-                    "end": seg.end,
-                })
+                await send_transcription(seg)
         except Exception:
             logger.debug("Failed to flush remaining buffer on disconnect", exc_info=True)
 
@@ -158,10 +175,66 @@ def _get_speaker_tracker():
 
 
 async def _handle_client_capture(websocket: WebSocket) -> None:
-    """Client-side capture: receive PCM from client and transcribe."""
+    """Client capture with independent bounded workers for mic and system audio."""
     mic_buffer = AudioBuffer(whisper_engine, speaker_label="User")
     system_buffer = AudioBuffer(whisper_engine, speaker_label="Third Party")
     speaker_tracker = _get_speaker_tracker()
+    buffers = {STREAM_MIC: mic_buffer, STREAM_SYSTEM: system_buffer}
+    queues = {
+        STREAM_MIC: asyncio.Queue[bytes](maxsize=500),
+        STREAM_SYSTEM: asyncio.Queue[bytes](maxsize=500),
+    }
+    send_lock = asyncio.Lock()
+
+    async def send_json(message: dict) -> None:
+        async with send_lock:
+            await websocket.send_json(message)
+
+    async def process_stream(stream_id: int) -> None:
+        buf = buffers[stream_id]
+        queue = queues[stream_id]
+        while True:
+            pcm_data = await queue.get()
+            try:
+                buf.add_audio(pcm_data)
+                if stream_id == STREAM_SYSTEM and speaker_tracker is not None:
+                    speaker_tracker.add_audio(pcm16_bytes_to_float32(pcm_data))
+
+                if buf.ready:
+                    segments = await buf.flush()
+                    for seg in segments:
+                        await send_json({
+                            "type": "transcription",
+                            "speaker": seg.speaker,
+                            "text": seg.text,
+                            "start": seg.start,
+                            "end": seg.end,
+                        })
+                        if stream_id == STREAM_SYSTEM and speaker_tracker is not None:
+                            speaker_tracker.add_segment(
+                                entry_id=f"{seg.start:.3f}-{seg.end:.3f}",
+                                start=seg.start,
+                                end=seg.end,
+                            )
+
+                if (
+                    stream_id == STREAM_SYSTEM
+                    and speaker_tracker is not None
+                    and speaker_tracker.ready
+                ):
+                    for relabel in await speaker_tracker.flush():
+                        await send_json({
+                            "type": "relabel",
+                            "entry_id": relabel.entry_id,
+                            "speaker": relabel.new_speaker,
+                        })
+            finally:
+                queue.task_done()
+
+    workers = [
+        asyncio.create_task(process_stream(STREAM_MIC), name="audio-mic-worker"),
+        asyncio.create_task(process_stream(STREAM_SYSTEM), name="audio-system-worker"),
+    ]
 
     try:
         while True:
@@ -171,62 +244,19 @@ async def _handle_client_capture(websocket: WebSocket) -> None:
 
             stream_id = data[0]
             pcm_data = data[1:]
-
-            if stream_id == STREAM_MIC:
-                mic_buffer.add_audio(pcm_data)
-                if mic_buffer.ready:
-                    segments = await mic_buffer.flush()
-                    for seg in segments:
-                        await websocket.send_json({
-                            "type": "transcription",
-                            "speaker": seg.speaker,
-                            "text": seg.text,
-                            "start": seg.start,
-                            "end": seg.end,
-                        })
-
-            elif stream_id == STREAM_SYSTEM:
-                system_buffer.add_audio(pcm_data)
-
-                # Feed raw PCM to speaker tracker for diarization
-                if speaker_tracker is not None:
-                    speaker_tracker.add_audio(pcm16_bytes_to_float32(pcm_data))
-
-                if system_buffer.ready:
-                    segments = await system_buffer.flush()
-                    for seg in segments:
-                        msg = {
-                            "type": "transcription",
-                            "speaker": seg.speaker,
-                            "text": seg.text,
-                            "start": seg.start,
-                            "end": seg.end,
-                        }
-                        await websocket.send_json(msg)
-
-                        # Register segment for future relabeling
-                        if speaker_tracker is not None:
-                            speaker_tracker.add_segment(
-                                entry_id=f"{seg.start:.3f}-{seg.end:.3f}",
-                                start=seg.start,
-                                end=seg.end,
-                            )
-
-                # Run diarization when the speaker tracker buffer is full
-                if speaker_tracker is not None and speaker_tracker.ready:
-                    relabels = await speaker_tracker.flush()
-                    for relabel in relabels:
-                        await websocket.send_json({
-                            "type": "relabel",
-                            "entry_id": relabel.entry_id,
-                            "speaker": relabel.new_speaker,
-                        })
+            if stream_id in queues:
+                # Backpressure starts only after ~10 seconds per stream. Until
+                # then, receiving continues while Whisper decodes another chunk.
+                await queues[stream_id].put(pcm_data)
 
     except WebSocketDisconnect:
         logger.info("Audio WebSocket disconnected: %s", websocket.client)
     except Exception:
         logger.exception("Audio WebSocket error")
     finally:
+        for worker in workers:
+            worker.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
         for buf in [mic_buffer, system_buffer]:
             try:
                 remaining = await buf.flush()

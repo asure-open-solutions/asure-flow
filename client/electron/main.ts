@@ -13,6 +13,7 @@ import path from "node:path";
 import { createOverlayWindow } from "./overlay";
 import { applyContentProtection } from "./contentProtection";
 import { createTrayIcon, createAppIcon } from "./trayIcon";
+import { startServer, stopServer } from "./serverProcess";
 
 let mainWindow: BrowserWindow | null = null;
 let overlayWindow: BrowserWindow | null = null;
@@ -227,6 +228,11 @@ ipcMain.handle("window-is-maximized", () => mainWindow?.isMaximized() ?? false);
 // ── App Lifecycle ──
 
 app.whenReady().then(() => {
+  // Boot the bundled Python server (packaged builds only; no-op in dev where
+  // launch.mjs owns it). The renderer polls /api/health and shows "Offline"
+  // until it answers, so we don't block startup here.
+  startServer((line) => console.log(line));
+
   createMainWindow();
   createTray();
 
@@ -248,4 +254,5 @@ app.on("activate", () => {
 
 app.on("will-quit", () => {
   globalShortcut.unregisterAll();
+  stopServer();
 });

@@ -16,6 +16,11 @@ node_modules/
 client/dist/
 client/dist-electron/
 client/out/
+client/release/
+client/server-bundle/
+
+# TypeScript incremental build cache (regenerated on every tsc run)
+*.tsbuildinfo
 
 # IDE
 .idea/
@@ -26,8 +31,9 @@ client/out/
 .DS_Store
 Thumbs.db
 
-# Sessions (user data)
-sessions/
+# Sessions (user data) — repo-root dir only, NOT the source package at
+# server/src/asure_flow/sessions/. Real user data lives in ~/.asure-flow/sessions.
+/sessions/
 
 # Logs
 *.log

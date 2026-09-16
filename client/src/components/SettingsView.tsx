@@ -730,6 +730,21 @@ function LLMTab() {
                       />
                     </div>
 
+                    <div>
+                      <label className="text-xs text-white/50 mb-1 flex items-center gap-1.5">
+                        Realtime Model (optional)
+                        {savedFields[fieldKey(provider.id, "realtime_model")] && <Check className="h-3 w-3 text-emerald-400" />}
+                      </label>
+                      <input
+                        type="text"
+                        value={formState[fieldKey(provider.id, "realtime_model")] ?? provider.realtime_model}
+                        onChange={(e) => handleFieldChange(provider.id, "realtime_model", e.target.value)}
+                        onBlur={() => handleFieldBlur(provider.id, "realtime_model")}
+                        placeholder="Uses the main model when empty"
+                        className="w-full rounded-md bg-white/5 border border-white/10 px-3 py-1.5 text-sm text-white placeholder-white/20 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+                      />
+                    </div>
+
                     {/* API Base URL */}
                     <div>
                       <label className="text-xs text-white/50 mb-1 flex items-center gap-1.5">
@@ -780,7 +795,7 @@ const WHISPER_MODELS = [
 ];
 
 function AIToolsTab() {
-  const { featureToggles, setFeatureToggles, setAiPreset, setCustomSystemPrompt, getEffectiveToggles } = useSettingsStore();
+  const { featureToggles, setFeatureToggles, setAiPreset, setAiResponseProfile, setCustomSystemPrompt, getEffectiveToggles } = useSettingsStore();
   const effectiveToggles = useSettingsStore(useShallow((s) => s.getEffectiveToggles()));
   const [presets, setPresets] = useState<Preset[]>([]);
   const [serverProfile, setServerProfile] = useState<UserProfile | null>(null);
@@ -864,6 +879,33 @@ function AIToolsTab() {
 
   return (
     <div className="space-y-6">
+      <div>
+        <h3 className="text-sm font-medium text-white/80 mb-2">Response Profile</h3>
+        <p className="text-xs text-white/40 mb-3">
+          Applies to every preset. Realtime prioritizes the first useful response; Quality allows deeper analysis.
+        </p>
+        <div className="grid grid-cols-3 gap-2">
+          {(["realtime", "balanced", "quality"] as const).map((value) => (
+            <button
+              key={value}
+              onClick={async () => {
+                const updated = await updateProfile({ ai_response_profile: value });
+                setServerProfile(updated);
+                setAiResponseProfile(value);
+              }}
+              className={cn(
+                "rounded-lg border px-3 py-2 text-sm font-medium capitalize transition-colors",
+                serverProfile?.ai_response_profile === value
+                  ? "border-blue-500/30 bg-blue-500/10 text-blue-400"
+                  : "border-white/10 bg-white/[0.02] text-white/50 hover:bg-white/5",
+              )}
+            >
+              {value}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {/* Situation Preset */}
       <div>
         <h3 className="text-sm font-medium text-white/80 mb-3">Situation Preset</h3>
@@ -1166,7 +1208,8 @@ function AgentModeSelector() {
 // ── Audio Tab ──
 
 function AudioTab() {
-  const { audioToggles, setAudioToggles, diarization, setDiarization, serverUrl,
+  const { audioToggles, setAudioToggles, audioCaptureLocation, setAudioCaptureLocation,
+          diarization, setDiarization, serverUrl,
           micDeviceId, setMicDeviceId, systemDeviceId, setSystemDeviceId } =
     useSettingsStore();
   const effectiveDiarization = useSettingsStore((s) => s.sessionOverrides?.diarization ?? s.diarization);
@@ -1176,7 +1219,9 @@ function AudioTab() {
   const [serverAudioAvailable, setServerAudioAvailable] = useState(false);
 
   const sameMachine = isSameMachine(serverUrl, serverConfig?.hostname);
-  const captureSource = serverConfig?.audio_capture_source ?? "client";
+  const captureSource = audioCaptureLocation === "auto"
+    ? (serverConfig?.audio_capture_source ?? "client")
+    : audioCaptureLocation;
 
   useEffect(() => {
     getServerConfig().then(setServerConfig).catch(() => {});
@@ -1189,13 +1234,8 @@ function AudioTab() {
     getClientAudioInputDevices().then(setClientDevices).catch(() => {});
   }, []);
 
-  const handleCaptureSourceChange = async (source: "client" | "server") => {
-    try {
-      const config = await updateServerConfig({ audio_capture_source: source });
-      setServerConfig(config);
-    } catch (err) {
-      console.error("Failed to update capture source:", err);
-    }
+  const handleCaptureSourceChange = (source: "auto" | "client" | "server") => {
+    setAudioCaptureLocation(source);
   };
 
   const handleMicDeviceChange = async (deviceId: string) => {
@@ -1285,36 +1325,46 @@ function AudioTab() {
         )}
       </div>
 
-      {/* Capture source — only show if NOT same machine and server audio available */}
-      {!sameMachine && serverAudioAvailable && (
+      {/* Per-client capture preference. Auto chooses the client across machines. */}
+      {!sameMachine && (
         <div>
-          <h3 className="text-sm font-medium text-white/80 mb-3">Microphone Capture Source</h3>
-          <div className="flex gap-2">
+          <h3 className="text-sm font-medium text-white/80 mb-1">Audio Capture Location</h3>
+          <p className="text-xs text-white/40 mb-3">
+            Auto captures on this client when connected to another machine.
+          </p>
+          <div className="grid grid-cols-3 gap-2">
             <button
-              onClick={() =>
-                captureSource !== "client" && handleCaptureSourceChange("client")
-              }
+              onClick={() => handleCaptureSourceChange("auto")}
               className={cn(
-                "flex-1 flex items-center justify-center gap-2 rounded-lg border px-4 py-3 text-sm font-medium transition-colors",
-                captureSource === "client"
+                "rounded-lg border px-3 py-3 text-sm font-medium transition-colors",
+                audioCaptureLocation === "auto"
                   ? "border-blue-500/30 bg-blue-500/10 text-blue-400"
-                  : "border-white/10 bg-white/[0.02] text-white/50 hover:bg-white/5 cursor-pointer",
+                  : "border-white/10 bg-white/[0.02] text-white/50 hover:bg-white/5",
               )}
             >
-              This Machine (Client)
+              Auto
             </button>
             <button
-              onClick={() =>
-                captureSource !== "server" && handleCaptureSourceChange("server")
-              }
+              onClick={() => handleCaptureSourceChange("client")}
               className={cn(
-                "flex-1 flex items-center justify-center gap-2 rounded-lg border px-4 py-3 text-sm font-medium transition-colors",
-                captureSource === "server"
+                "rounded-lg border px-3 py-3 text-sm font-medium transition-colors",
+                audioCaptureLocation === "client"
                   ? "border-blue-500/30 bg-blue-500/10 text-blue-400"
-                  : "border-white/10 bg-white/[0.02] text-white/50 hover:bg-white/5 cursor-pointer",
+                  : "border-white/10 bg-white/[0.02] text-white/50 hover:bg-white/5",
               )}
             >
-              Server Machine
+              This Client
+            </button>
+            <button
+              onClick={() => handleCaptureSourceChange("server")}
+              className={cn(
+                "rounded-lg border px-3 py-3 text-sm font-medium transition-colors",
+                audioCaptureLocation === "server"
+                  ? "border-blue-500/30 bg-blue-500/10 text-blue-400"
+                  : "border-white/10 bg-white/[0.02] text-white/50 hover:bg-white/5",
+              )}
+            >
+              Server
             </button>
           </div>
         </div>
@@ -1409,9 +1459,9 @@ function AudioTab() {
 // ── Transcription Tab ──
 
 const SPEED_PROFILES = [
-  { id: "fast", label: "Fast", desc: "Lowest latency, may fragment segments", vad_silence_ms: 300, vad_min_buffer_sec: 0.6 },
-  { id: "balanced", label: "Balanced", desc: "Good tradeoff for most use cases", vad_silence_ms: 450, vad_min_buffer_sec: 1.0 },
-  { id: "accurate", label: "Accurate", desc: "Longer segments, better context", vad_silence_ms: 700, vad_min_buffer_sec: 1.8 },
+  { id: "realtime", label: "Realtime", desc: "Fastest response, shorter segments", vad_silence_ms: 250, vad_min_buffer_sec: 0.5, vad_check_interval_ms: 100, whisper_beam_size: 1 },
+  { id: "balanced", label: "Balanced", desc: "Strong speed and accuracy", vad_silence_ms: 450, vad_min_buffer_sec: 1.0, vad_check_interval_ms: 150, whisper_beam_size: 3 },
+  { id: "accurate", label: "Accurate", desc: "More context and beam search", vad_silence_ms: 700, vad_min_buffer_sec: 1.8, vad_check_interval_ms: 250, whisper_beam_size: 5 },
 ] as const;
 
 function TranscriptionTab() {
@@ -1431,17 +1481,18 @@ function TranscriptionTab() {
   const targetDevice = currentDevice === "cuda" ? "cpu" : "cuda";
 
   const activeProfile = serverConfig
-    ? SPEED_PROFILES.find(
-        (p) => p.vad_silence_ms === serverConfig.vad_silence_ms && p.vad_min_buffer_sec === serverConfig.vad_min_buffer_sec,
-      )?.id ?? "custom"
+    ? serverConfig.transcription_profile
     : null;
 
   const handleSpeedProfile = async (profile: typeof SPEED_PROFILES[number]) => {
     setSwitching(true);
     try {
       const config = await updateServerConfig({
+        transcription_profile: profile.id,
         vad_silence_ms: profile.vad_silence_ms,
         vad_min_buffer_sec: profile.vad_min_buffer_sec,
+        vad_check_interval_ms: profile.vad_check_interval_ms,
+        whisper_beam_size: profile.whisper_beam_size,
       });
       setServerConfig(config);
     } catch (err) {
@@ -1582,9 +1633,27 @@ function TranscriptionTab() {
 
       {/* Compute type info */}
       <div>
+        <h3 className="text-sm font-medium text-white/80 mb-2">Language</h3>
+        <input
+          key={serverConfig?.whisper_language ?? "auto"}
+          defaultValue={serverConfig?.whisper_language ?? ""}
+          onBlur={async (e) => {
+            const config = await updateServerConfig({ whisper_language: e.target.value.trim() });
+            setServerConfig(config);
+          }}
+          placeholder="Auto-detect (or en, fr, es...)"
+          className="w-full rounded-md bg-white/5 border border-white/10 px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+        />
+        <p className="text-[11px] text-white/35 mt-1">Setting a known language improves speed and consistency.</p>
+      </div>
+
+      <div>
         <h3 className="text-sm font-medium text-white/80 mb-2">Compute Type</h3>
         <p className="text-sm text-white/60">
           {serverConfig?.whisper_compute_type ?? "\u2014"}
+        </p>
+        <p className="text-xs text-white/40 mt-1">
+          Beam size: {serverConfig?.whisper_beam_size || "Auto"}
         </p>
       </div>
 

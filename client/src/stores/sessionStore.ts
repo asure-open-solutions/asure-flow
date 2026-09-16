@@ -53,6 +53,9 @@ interface SessionState {
   // AI state
   suggestions: SuggestionEntry[];
   focusedSuggestionId: string | null;
+  // True while the user is delivering a suggestion (server echo-lock). The live
+  // card freezes and the AI holds new suggestions until the other party responds.
+  suggestionsLocked: boolean;
   aiStreaming: boolean;
   currentToolName: string | null;
   searchResults: SearchResult[];
@@ -66,11 +69,17 @@ interface SessionState {
   serverOnline: boolean;
   llmAvailable: boolean;
   llmProvider: string | null;
+  connectionLatencyMs: number | null;
+  whisperLoaded: boolean;
+  whisperDevice: string | null;
+  lastAiLatencyMs: number | null;
   audioConnected: boolean;
   sessionConnected: boolean;
   recording: boolean;
   recordingStartedAt: number | null;
   audioWarning: string | null;
+  // Whisper accuracy-degradation notice (e.g. OOM fell back to a weaker model).
+  transcriptionWarning: string | null;
 
   // Overlay-synced audio toggles (read-only in overlay)
   overlayAudioToggles: { mic: boolean; system: boolean };
@@ -96,7 +105,7 @@ interface SessionState {
   setSessionContext: (context: string) => void;
   addTranscriptEntry: (entry: Omit<TranscriptEntry, "id" | "fact_checks"> & { id?: string }) => void;
   relabelSpeaker: (entryId: string, newSpeaker: string) => void;
-  addFactChecks: (transcriptIndex: number, checks: FactCheck[]) => void;
+  addFactChecks: (transcriptId: string, checks: FactCheck[]) => void;
   addNotes: (notes: NoteEntry[]) => void;
   renameSpeaker: (speakerLabel: string, displayName: string) => void;
   updateParticipant: (participant: Participant) => void;
@@ -108,10 +117,12 @@ interface SessionState {
   setAIStreaming: (streaming: boolean) => void;
   setServerOnline: (online: boolean) => void;
   setLlmStatus: (available: boolean, provider: string | null) => void;
+  setConnectionDiagnostics: (latencyMs: number | null, whisperLoaded: boolean, whisperDevice: string | null) => void;
   setAudioConnected: (connected: boolean) => void;
   setSessionConnected: (connected: boolean) => void;
   setRecording: (recording: boolean) => void;
   setAudioWarning: (warning: string | null) => void;
+  setTranscriptionWarning: (warning: string | null) => void;
   setSessions: (sessions: SessionSummary[]) => void;
   handleAIEvent: (event: AIEvent) => void;
   clearAgentLog: () => void;
@@ -140,7 +151,19 @@ interface SessionState {
   reset: () => void;
 }
 
-const genId = () => crypto.randomUUID().replace(/-/g, "").slice(0, 12);
+// crypto.randomUUID exists only in secure contexts (https/localhost). Remote
+// clients connecting over plain http:// would otherwise crash on the first
+// transcript line, so fall back to a non-crypto id there.
+export const genId = (): string => {
+  try {
+    if (typeof crypto !== "undefined" && crypto.randomUUID) {
+      return crypto.randomUUID().replace(/-/g, "").slice(0, 12);
+    }
+  } catch {
+    // fall through
+  }
+  return (Date.now().toString(36) + Math.random().toString(36).slice(2, 10)).slice(0, 12);
+};
 
 /** Build a brief summary string for a tool_result event. */
 function summarizeToolResult(name: string, result: Record<string, unknown>): string {
@@ -172,6 +195,12 @@ function summarizeToolResult(name: string, result: Record<string, unknown>): str
   return "completed";
 }
 
+const MAX_AGENT_LOG_ENTRIES = 200;
+
+function appendAgentLog(log: AgentLogEntry[], entry: AgentLogEntry): AgentLogEntry[] {
+  return [...log, entry].slice(-MAX_AGENT_LOG_ENTRIES);
+}
+
 export const useSessionStore = create<SessionState>()((set, get) => ({
   currentSession: null,
   transcript: [],
@@ -180,6 +209,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   sessionContext: "",
   suggestions: [],
   focusedSuggestionId: null,
+  suggestionsLocked: false,
   aiStreaming: false,
   currentToolName: null,
   searchResults: [],
@@ -189,11 +219,16 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   serverOnline: false,
   llmAvailable: false,
   llmProvider: null,
+  connectionLatencyMs: null,
+  whisperLoaded: false,
+  whisperDevice: null,
+  lastAiLatencyMs: null,
   audioConnected: false,
   sessionConnected: false,
   recording: false,
   recordingStartedAt: null,
   audioWarning: null,
+  transcriptionWarning: null,
   overlayAudioToggles: { mic: true, system: true },
   sessions: [],
   insightsDrawerOpen: false,
@@ -257,17 +292,14 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
       }),
     })),
 
-  addFactChecks: (transcriptIndex, checks) =>
-    set((state) => {
-      const updated = [...state.transcript];
-      if (updated[transcriptIndex]) {
-        updated[transcriptIndex] = {
-          ...updated[transcriptIndex],
-          fact_checks: [...updated[transcriptIndex].fact_checks, ...checks],
-        };
-      }
-      return { transcript: updated };
-    }),
+  addFactChecks: (transcriptId, checks) =>
+    set((state) => ({
+      transcript: state.transcript.map((entry) =>
+        entry.id === transcriptId
+          ? { ...entry, fact_checks: [...entry.fact_checks, ...checks] }
+          : entry,
+      ),
+    })),
 
   addNotes: (newNotes) =>
     set((state) => ({
@@ -328,7 +360,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
     set((state) => ({
       focusedSuggestionId: state.focusedSuggestionId === id ? null : id,
     })),
-  clearSuggestions: () => set({ suggestions: [], focusedSuggestionId: null }),
+  clearSuggestions: () => set({ suggestions: [], focusedSuggestionId: null, suggestionsLocked: false }),
   clearNotes: () => set({ notes: [] }),
   toggleNoteCompleted: (noteId) =>
     set((state) => ({
@@ -347,11 +379,14 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
   setAIStreaming: (streaming) => set({ aiStreaming: streaming }),
   setServerOnline: (online) => set({ serverOnline: online }),
   setLlmStatus: (available, provider) => set({ llmAvailable: available, llmProvider: provider }),
+  setConnectionDiagnostics: (connectionLatencyMs, whisperLoaded, whisperDevice) =>
+    set({ connectionLatencyMs, whisperLoaded, whisperDevice }),
   setAudioConnected: (connected) => set({ audioConnected: connected }),
   setSessionConnected: (connected) => set({ sessionConnected: connected }),
   setRecording: (recording) =>
     set({ recording, recordingStartedAt: recording ? Date.now() : null, ...(!recording && { audioWarning: null }) }),
   setAudioWarning: (warning) => set({ audioWarning: warning }),
+  setTranscriptionWarning: (warning) => set({ transcriptionWarning: warning }),
   setSessions: (sessions) => set({ sessions }),
   clearAgentLog: () => set({ agentLog: [] }),
 
@@ -376,36 +411,35 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
         // Do NOT write content_delta text to latestSuggestion — these deltas contain
         // raw LLM output which may include function-call XML from providers that stream
         // tool calls as text. The real suggestion arrives via tool_result.
-        const updates: Partial<SessionState> = { aiStreaming: true };
-        // Add "Thinking..." log entry only on first delta
         if (isFirst) {
-          updates.agentLog = [
-            ...state.agentLog,
-            { id: genId(), timestamp: now, type: "thinking", summary: "Thinking..." },
-          ];
+          set({
+            aiStreaming: true,
+            agentLog: appendAgentLog(state.agentLog, {
+              id: genId(), timestamp: now, type: "thinking", summary: "Thinking...",
+            }),
+          });
         }
-        set(updates);
         break;
       }
 
       case "tool_call":
         set({
           currentToolName: event.name,
-          agentLog: [
-            ...state.agentLog,
-            {
-              id: genId(),
-              timestamp: now,
-              type: "tool_call",
-              name: event.name,
-              summary: `Calling ${event.name}`,
-              specialist: event.specialist,
-            },
-          ],
+          agentLog: appendAgentLog(state.agentLog, {
+            id: genId(),
+            timestamp: now,
+            type: "tool_call",
+            name: event.name,
+            summary: `Calling ${event.name}`,
+            specialist: event.specialist,
+          }),
         });
         break;
 
       case "tool_result": {
+        if (event.latency_ms != null) {
+          set({ lastAiLatencyMs: event.latency_ms });
+        }
         const summary = summarizeToolResult(event.name, event.result);
         const detail =
           event.name === "deep_think"
@@ -414,30 +448,27 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
 
         set({
           currentToolName: null,
-          agentLog: [
-            ...state.agentLog,
-            {
-              id: genId(),
-              timestamp: now,
-              type: "tool_result",
-              name: event.name,
-              summary: event.specialist
-                ? `[${event.specialist}] ${event.name}: ${summary}`
-                : `${event.name}: ${summary}`,
-              detail,
-              specialist: event.specialist,
-            },
-          ],
+          agentLog: appendAgentLog(state.agentLog, {
+            id: genId(),
+            timestamp: now,
+            type: "tool_result",
+            name: event.name,
+            summary: event.specialist
+              ? `[${event.specialist}] ${event.name}: ${summary}`
+              : `${event.name}: ${summary}`,
+            detail,
+            specialist: event.specialist,
+          }),
         });
 
         // Existing tool result handling
         if (event.name === "fact_check") {
           const result = event.result as { claims?: FactCheck[] };
           if (result.claims && result.claims.length > 0) {
-            // Use get() for a fresh snapshot so the index is not stale
             const freshTranscript = get().transcript;
-            if (freshTranscript.length > 0) {
-              get().addFactChecks(freshTranscript.length - 1, result.claims);
+            const targetId = event.transcript_id ?? freshTranscript[freshTranscript.length - 1]?.id;
+            if (targetId) {
+              get().addFactChecks(targetId, result.claims);
             }
           }
         } else if (event.name === "suggest_response") {
@@ -517,15 +548,12 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
         set({
           aiStreaming: false,
           currentToolName: null,
-          agentLog: [
-            ...state.agentLog,
-            {
-              id: genId(),
-              timestamp: now,
-              type: "done",
-              summary: event.reason === "preempted" ? "Preempted — new input" : "Done",
-            },
-          ],
+          agentLog: appendAgentLog(state.agentLog, {
+            id: genId(),
+            timestamp: now,
+            type: "done",
+            summary: event.reason === "preempted" ? "Preempted — new input" : "Done",
+          }),
         });
         break;
 
@@ -534,10 +562,22 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
         set({
           aiStreaming: false,
           currentToolName: null,
-          agentLog: [
-            ...state.agentLog,
-            { id: genId(), timestamp: now, type: "done", summary: "Preempted — new input" },
-          ],
+          agentLog: appendAgentLog(state.agentLog, {
+            id: genId(), timestamp: now, type: "done", summary: "Preempted — new input",
+          }),
+        });
+        break;
+
+      case "suggestion_lock":
+        // The user is delivering a suggestion (or has stopped). Freeze/unfreeze the
+        // live card. On lock, auto-pin the current focal suggestion so it stays put
+        // even if a queued suggestion arrives — the automatic replacement for manual pin.
+        set({
+          suggestionsLocked: event.locked,
+          focusedSuggestionId:
+            event.locked && !state.focusedSuggestionId && state.suggestions.length > 0
+              ? state.suggestions[state.suggestions.length - 1].id
+              : state.focusedSuggestionId,
         });
         break;
 
@@ -545,15 +585,12 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
         set({
           aiStreaming: false,
           currentToolName: null,
-          agentLog: [
-            ...state.agentLog,
-            {
-              id: genId(),
-              timestamp: now,
-              type: "error",
-              summary: `Error: ${event.message}`,
-            },
-          ],
+          agentLog: appendAgentLog(state.agentLog, {
+            id: genId(),
+            timestamp: now,
+            type: "error",
+            summary: `Error: ${event.message}`,
+          }),
         });
         console.error("AI error:", event.message);
         break;
@@ -591,6 +628,7 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
       sessionContext: "",
       suggestions: [],
       focusedSuggestionId: null,
+      suggestionsLocked: false,
       aiStreaming: false,
       currentToolName: null,
       searchResults: [],
@@ -600,6 +638,8 @@ export const useSessionStore = create<SessionState>()((set, get) => ({
       recording: false,
       recordingStartedAt: null,
       audioWarning: null,
+      transcriptionWarning: null,
+      lastAiLatencyMs: null,
       insightsDrawerOpen: false,
       insightsDrawerTab: "suggestions" as InsightsTab,
       unseenInsightCount: 0,

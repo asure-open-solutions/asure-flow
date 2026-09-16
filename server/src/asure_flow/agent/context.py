@@ -148,7 +148,11 @@ def build_prior_outputs(session: Session, token_budget: int = PRIOR_OUTPUTS_TOKE
     return header + "\n\n".join(sections)
 
 
-def build_context(session: Session, rolling_summary: str | None = None) -> str:
+def build_context(
+    session: Session,
+    rolling_summary: str | None = None,
+    recent_token_budget: int = RECENT_TOKEN_BUDGET,
+) -> str:
     """
     Build the context string for the AI agent.
 
@@ -167,7 +171,7 @@ def build_context(session: Session, rolling_summary: str | None = None) -> str:
     for entry in reversed(session.transcript):
         line = _format_entry(entry.speaker, entry.text)
         line_tokens = _estimate_tokens(line)
-        if tokens_used + line_tokens > RECENT_TOKEN_BUDGET:
+        if tokens_used + line_tokens > recent_token_budget:
             break
         recent_lines.append(line)
         tokens_used += line_tokens
@@ -178,7 +182,10 @@ def build_context(session: Session, rolling_summary: str | None = None) -> str:
     parts: list[str] = []
 
     if rolling_summary:
-        parts.append(f"[Summary of earlier conversation]\n{rolling_summary}\n")
+        parts.append(
+            f"[Summary of earlier conversation]\n"
+            f"{cap_text(rolling_summary, SUMMARY_TOKEN_BUDGET)}\n"
+        )
 
     if recent_lines:
         parts.append("\n".join(recent_lines))

@@ -23,6 +23,7 @@ class ProviderEntry(BaseModel):
     name: str                        # display label
     litellm_prefix: str              # LiteLLM routing prefix: "openrouter", "openai", "anthropic", "gemini", "groq", …
     model: str                       # model ID after prefix, e.g. "anthropic/claude-sonnet-4-20250514"
+    realtime_model: Optional[str] = None  # optional lower-latency model for live turns
     api_key: Optional[str] = None
     api_base: Optional[str] = None   # custom API base URL (OpenRouter, Ollama, LM Studio, vLLM, …)
     enabled: bool = True
@@ -80,11 +81,12 @@ _OLD_DEFAULT_ORDER = ["openrouter", "openai", "gemini", "huggingface", "github",
 # live in profile.py / profile.json — not here.
 _PERSISTABLE_FIELDS = frozenset({
     "providers",
-    "whisper_model", "whisper_device",
+    "whisper_model", "whisper_device", "whisper_language", "whisper_beam_size",
+    "transcription_profile",
     # Audio capture
     "audio_capture_source", "mic_device_id", "system_device_id",
     # VAD flush
-    "vad_silence_ms", "vad_min_buffer_sec", "vad_max_buffer_sec",
+    "vad_silence_ms", "vad_min_buffer_sec", "vad_max_buffer_sec", "vad_check_interval_ms",
     # Diarization hardware
     "hf_diarization_token", "diarization_device", "diarization_buffer_sec",
     # LLM routing
@@ -133,6 +135,8 @@ class Settings(BaseSettings):
     whisper_device: Optional[str] = None  # auto-detect
     whisper_compute_type: Optional[str] = None  # auto-select
     whisper_language: Optional[str] = None  # auto-detect
+    whisper_beam_size: int = 0  # 0 = auto (5 on GPU, 1 on CPU); >0 overrides
+    transcription_profile: str = "balanced"
 
     # ── LLM Providers (data-driven list, persisted in config.json) ──
     providers: list[ProviderEntry] = Field(default_factory=list)
@@ -170,6 +174,7 @@ class Settings(BaseSettings):
     vad_silence_ms: int = 450
     vad_min_buffer_sec: float = 1.0
     vad_max_buffer_sec: float = 30.0
+    vad_check_interval_ms: int = 150
 
     # ── Diarization hardware (secrets + device — user preference is in profile.py) ──
     hf_diarization_token: Optional[str] = None
@@ -215,6 +220,8 @@ class Settings(BaseSettings):
             "whisper_device": self.detect_device(),
             "whisper_compute_type": self.detect_compute_type(),
             "whisper_language": self.whisper_language,
+            "whisper_beam_size": self.whisper_beam_size,
+            "transcription_profile": self.transcription_profile,
             "routing_strategy": self.routing_strategy,
             # Audio capture
             "audio_capture_source": self.audio_capture_source,
@@ -227,6 +234,7 @@ class Settings(BaseSettings):
             # VAD / speed
             "vad_silence_ms": self.vad_silence_ms,
             "vad_min_buffer_sec": self.vad_min_buffer_sec,
+            "vad_check_interval_ms": self.vad_check_interval_ms,
             # Providers (ordered array — position = priority)
             "llm_providers": [
                 {
@@ -234,6 +242,7 @@ class Settings(BaseSettings):
                     "name": p.name,
                     "litellm_prefix": p.litellm_prefix,
                     "model": p.model,
+                    "realtime_model": p.realtime_model or "",
                     "api_base": p.api_base or "",
                     "api_key_hint": _mask(p.api_key),
                     "configured": bool(p.api_key or p.api_base),
@@ -436,6 +445,9 @@ def reset_settings() -> None:
             settings.providers = [p.model_copy() for p in _DEFAULT_PROVIDERS]
         else:
             setattr(settings, key, getattr(defaults, key))
+    # Re-overlay env/.env API keys — the defaults carry none, so without this a
+    # config reset would silently disable all key-based providers until restart.
+    _seed_providers()
     path = _config_path()
     if path.exists():
         path.unlink()

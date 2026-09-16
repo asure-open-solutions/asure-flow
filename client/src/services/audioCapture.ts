@@ -34,6 +34,24 @@ class PCMProcessor extends AudioWorkletProcessor {
     super();
     this._resampleRatio = sampleRate / 16000;
     this._resampleBuffer = new Float32Array(0);
+    this._pcmBuffer = new Int16Array(0);
+  }
+
+  _emit(pcm) {
+    const combined = new Int16Array(this._pcmBuffer.length + pcm.length);
+    combined.set(this._pcmBuffer);
+    combined.set(pcm, this._pcmBuffer.length);
+
+    // Send 20 ms frames instead of hundreds of tiny AudioWorklet messages per
+    // second. This substantially reduces renderer and WebSocket overhead.
+    const frameSamples = 320;
+    let offset = 0;
+    while (combined.length - offset >= frameSamples) {
+      const frame = combined.slice(offset, offset + frameSamples);
+      this.port.postMessage({ pcmData: frame }, [frame.buffer]);
+      offset += frameSamples;
+    }
+    this._pcmBuffer = combined.slice(offset);
   }
 
   process(inputs) {
@@ -48,7 +66,7 @@ class PCMProcessor extends AudioWorkletProcessor {
       for (let i = 0; i < float32.length; i++) {
         int16[i] = Math.max(-32768, Math.min(32767, Math.round(float32[i] * 32767)));
       }
-      this.port.postMessage({ pcmData: int16 }, [int16.buffer]);
+      this._emit(int16);
       return true;
     }
 
@@ -81,7 +99,7 @@ class PCMProcessor extends AudioWorkletProcessor {
     const consumed = Math.floor(outLen * ratio);
     this._resampleBuffer = combined.slice(consumed);
 
-    this.port.postMessage({ pcmData: int16 }, [int16.buffer]);
+    this._emit(int16);
     return true;
   }
 }

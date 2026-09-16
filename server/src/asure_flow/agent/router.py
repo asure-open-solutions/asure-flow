@@ -23,8 +23,11 @@ def build_router() -> Router | None:
     for order, provider in enumerate(settings.providers, start=1):
         if not provider.enabled:
             continue
-        # Require either an API key or a custom base URL (for local models)
-        if not provider.api_key and not provider.api_base:
+        # Hosted providers require a key even when they define a standard API
+        # base (OpenRouter does). Keyless operation is only valid for custom
+        # OpenAI-compatible endpoints such as Ollama/LM Studio.
+        keyless_custom = provider.litellm_prefix == "openai" and bool(provider.api_base)
+        if not provider.api_key and not keyless_custom:
             continue
 
         entry: dict = {
@@ -40,21 +43,33 @@ def build_router() -> Router | None:
 
         model_list.append(entry)
 
+        # A distinct logical route lets live conversation turns use a faster
+        # model while summaries and follow-ups retain the quality model. When
+        # unset it cleanly falls back to the provider's normal model.
+        fast_entry = {
+            "model_name": "assistant_realtime",
+            "litellm_params": {
+                **entry["litellm_params"],
+                "model": f"{provider.litellm_prefix}/{provider.realtime_model or provider.model}",
+            },
+        }
+        model_list.append(fast_entry)
+
     if not model_list:
         logger.warning("No LLM providers configured — AI features will be unavailable")
         return None
 
-    logger.info("LLM router configured with %d provider(s)", len(model_list))
+    logger.info("LLM router configured with %d provider(s)", len(model_list) // 2)
 
     strategy = settings.routing_strategy
     kwargs: dict = {
         "model_list": model_list,
         "enable_pre_call_checks": True,
-        "num_retries": 2,
+        "num_retries": 1,
         "retry_after": 1,
         "allowed_fails": 1,
         "cooldown_time": 15,
-        "timeout": 30,
+        "timeout": 20,
         "set_verbose": False,
     }
     if strategy and strategy != "simple-shuffle":

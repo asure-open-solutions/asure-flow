@@ -25,8 +25,13 @@ export function StatusBar() {
   const recording = useSessionStore((s) => s.recording);
   const recordingStartedAt = useSessionStore((s) => s.recordingStartedAt);
   const audioWarning = useSessionStore((s) => s.audioWarning);
+  const transcriptionWarning = useSessionStore((s) => s.transcriptionWarning);
   const aiStreaming = useSessionStore((s) => s.aiStreaming);
   const currentToolName = useSessionStore((s) => s.currentToolName);
+  const connectionLatencyMs = useSessionStore((s) => s.connectionLatencyMs);
+  const whisperLoaded = useSessionStore((s) => s.whisperLoaded);
+  const whisperDevice = useSessionStore((s) => s.whisperDevice);
+  const lastAiLatencyMs = useSessionStore((s) => s.lastAiLatencyMs);
 
   const [elapsed, setElapsed] = useState(0);
 
@@ -55,7 +60,14 @@ export function StatusBar() {
       <span className="flex items-center gap-1.5">
         <span className={cn("h-1.5 w-1.5 rounded-full", connColor)} />
         {connLabel}
+        {connectionLatencyMs != null && ` · ${connectionLatencyMs}ms`}
       </span>
+
+      {!isOffline && (
+        <span title="Transcription runtime readiness">
+          Whisper: {whisperLoaded ? (whisperDevice ?? "ready") : "warming"}
+        </span>
+      )}
 
       {!isOffline && (
         <span
@@ -80,8 +92,14 @@ export function StatusBar() {
         </span>
       )}
 
+      {transcriptionWarning && (
+        <span className="text-amber-400 truncate max-w-[220px]" title={transcriptionWarning}>
+          Transcription degraded
+        </span>
+      )}
+
       <span className={cn("ml-auto", aiStreaming && "text-blue-400")}>
-        AI: {aiLabel}
+        AI: {aiLabel}{lastAiLatencyMs != null && !aiStreaming ? ` · ${Math.round(lastAiLatencyMs)}ms` : ""}
       </span>
     </div>
   );

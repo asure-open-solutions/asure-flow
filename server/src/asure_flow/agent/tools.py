@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import TYPE_CHECKING
@@ -203,8 +204,10 @@ async def _execute_search_transcript(arguments: dict, session: Session | None) -
                     "relevance": round(score, 3),
                 })
 
-    # Fallback to substring
-    if not results and search_type == "substring":
+    # Fallback to substring whenever we have no results — including when semantic
+    # search ran but returned nothing (e.g. score threshold filtered everything).
+    # Without this, an exact-keyword query silently returns [] once embeddings are on.
+    if not results:
         q = query.lower()
         for entry in session.transcript:
             if speaker_filter and entry.speaker.lower() != speaker_filter.lower():
@@ -215,6 +218,8 @@ async def _execute_search_transcript(arguments: dict, session: Session | None) -
                     "text": entry.text,
                     "timestamp": _ts(entry),
                 })
+        if results:
+            search_type = "substring"
 
     return json.dumps({
         "results": results[:20],
@@ -231,7 +236,12 @@ async def _execute_search_sessions(arguments: dict) -> str:
 
     query = arguments.get("query", "").strip()
     speaker_filter = arguments.get("speaker")
-    max_results = arguments.get("max_results", 5)
+    # max_results comes from LLM-generated tool args — coerce/clamp so a string or
+    # negative value can't crash the slice/top_k below.
+    try:
+        max_results = max(1, min(int(arguments.get("max_results", 5)), 50))
+    except (TypeError, ValueError):
+        max_results = 5
     if not query:
         return json.dumps({"results": [], "message": "No query provided"})
 
@@ -372,7 +382,9 @@ def _score_credibility(url: str) -> dict[str, object]:
     from urllib.parse import urlparse
 
     try:
-        domain = urlparse(url).netloc.lower().lstrip("www.")
+        domain = urlparse(url).netloc.lower()
+        if domain.startswith("www."):
+            domain = domain[4:]
     except Exception:
         return {"tier": "medium", "score": 0.5}
 
@@ -394,8 +406,11 @@ async def _execute_web_search(arguments: dict) -> str:
     try:
         from duckduckgo_search import DDGS
 
-        with DDGS() as ddgs:
-            raw_results = list(ddgs.text(query, max_results=5))
+        def search_sync() -> list[dict]:
+            with DDGS() as ddgs:
+                return list(ddgs.text(query, max_results=5))
+
+        raw_results = await asyncio.to_thread(search_sync)
 
         results = [
             {

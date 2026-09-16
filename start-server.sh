@@ -54,8 +54,11 @@ if [ -f ".env" ]; then
     set +a
 fi
 
-HOST_="${HOST:-0.0.0.0}"
+HOST_="${HOST:-127.0.0.1}"
 PORT_="${PORT:-8000}"
+if [ "${1:-}" = "lan" ]; then
+    HOST_="0.0.0.0"
+fi
 
 # ---- Detect LAN IP ----
 get_lan_ip() {
@@ -71,11 +74,14 @@ get_lan_ip() {
 LAN_IP=$(get_lan_ip)
 
 echo "  Local:   http://localhost:$PORT_"
-echo "  Network: http://${LAN_IP}:$PORT_"
 echo "  Docs:    http://localhost:$PORT_/docs"
-echo ""
-echo "  Remote client:"
-echo "    ./start-client.sh http://${LAN_IP}:$PORT_"
+if [ "$HOST_" = "0.0.0.0" ]; then
+    echo "  Network: http://${LAN_IP}:$PORT_"
+    echo "  WARNING: The server is exposed without authentication."
+    echo ""
+    echo "  Remote client:"
+    echo "    ./start-client.sh http://${LAN_IP}:$PORT_"
+fi
 echo ""
 echo "  Press Ctrl+C to stop."
 echo ""
@@ -88,6 +94,4 @@ export PYTHONPATH="$(pwd)/src:${PYTHONPATH:-}"
 exec python -m uvicorn asure_flow.main:app \
     --host "$HOST_" \
     --port "$PORT_" \
-    --reload \
-    --reload-exclude '.venv' \
     --ws-max-size 1048576

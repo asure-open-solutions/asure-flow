@@ -1,11 +1,10 @@
-import { Component, useCallback, useEffect, useRef, useState } from "react";
+import { Component, lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import type { ErrorInfo, ReactNode } from "react";
-import { useSessionStore } from "@/stores/sessionStore";
+import { useSessionStore, genId } from "@/stores/sessionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useShallow } from "zustand/react/shallow";
 import { TranscriptPanel } from "@/components/TranscriptPanel";
 import { SessionList } from "@/components/SessionList";
-import { SettingsView } from "@/components/SettingsView";
 import { StatusBar } from "@/components/StatusBar";
 import { SessionContextInput } from "@/components/SessionContextInput";
 import { HeaderMoreMenu } from "@/components/HeaderMoreMenu";
@@ -18,6 +17,8 @@ import { AudioCapture } from "@/services/audioCapture";
 import { AudioWebSocket, SessionWebSocket } from "@/services/websocket";
 import { setServerUrl, getServerConfig, getProfile, checkServerHealth, renameSession, createSession, listSessions, getSession } from "@/services/api";
 import { cn } from "@/lib/utils";
+import { redactPii } from "@/lib/redactPii";
+import { isSameMachine } from "@/lib/sameMachine";
 import {
   Mic,
   MicOff,
@@ -29,6 +30,11 @@ import {
   Loader2,
 } from "lucide-react";
 import { Logo } from "@/components/Logo";
+import type { ServerConfig } from "@/types";
+
+const SettingsView = lazy(() =>
+  import("@/components/SettingsView").then((module) => ({ default: module.SettingsView })),
+);
 
 function isOverlayRoute() {
   return window.location.hash === "#/overlay";
@@ -57,7 +63,7 @@ function MainApp() {
     renameCurrentSession, setServerOnline, setRecording, setAudioWarning,
     setAudioConnected, setSessionConnected, addTranscriptEntry, relabelSpeaker,
     handleAIEvent, clearAgentLog, setInsightsDrawerOpen, setCurrentSession,
-    setSessions, clearRerunRequest, setLlmStatus,
+    setSessions, clearRerunRequest, setLlmStatus, setConnectionDiagnostics,
   } = useSessionStore(useShallow((s) => ({
     renameCurrentSession: s.renameCurrentSession,
     setServerOnline: s.setServerOnline,
@@ -74,13 +80,15 @@ function MainApp() {
     setSessions: s.setSessions,
     clearRerunRequest: s.clearRerunRequest,
     setLlmStatus: s.setLlmStatus,
+    setConnectionDiagnostics: s.setConnectionDiagnostics,
   })));
 
   // Settings data (shallow-compared)
-  const { serverUrl, hydrated, audioToggles, contentProtection } = useSettingsStore(
+  const { serverUrl, hydrated, audioCaptureLocation, audioToggles, contentProtection } = useSettingsStore(
     useShallow((s) => ({
       serverUrl: s.serverUrl,
       hydrated: s._hydrated,
+      audioCaptureLocation: s.audioCaptureLocation,
       audioToggles: s.audioToggles,
       contentProtection: s.overlaySettings.contentProtection,
     })),
@@ -93,6 +101,7 @@ function MainApp() {
   const audioCaptureRef = useRef<AudioCapture | null>(null);
   const serverHandlesSystemRef = useRef(false);
   const serverConfigLoaded = useRef(false);
+  const serverConfigRef = useRef<ServerConfig | null>(null);
   const startingRecordingRef = useRef(false);
 
   // Keep server URL in sync — wait for hydration to avoid overwriting with default
@@ -100,41 +109,65 @@ function MainApp() {
     if (hydrated) setServerUrl(serverUrl);
     // Reset so config/profile reload from the new server
     serverConfigLoaded.current = false;
+    serverConfigRef.current = null;
   }, [serverUrl, hydrated]);
 
   // Poll server health — wait for hydration so we use the correct server URL
   useEffect(() => {
     if (!hydrated) return;
     let active = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
     const check = async () => {
       const health = await checkServerHealth();
       if (active) {
         setServerOnline(health.online);
         setLlmStatus(health.llmAvailable, health.llmProvider);
+        setConnectionDiagnostics(health.latencyMs, health.whisperLoaded, health.whisperDevice);
+        useSessionStore.getState().setTranscriptionWarning(health.whisperWarning);
+        timer = setTimeout(check, health.online ? 30_000 : 3_000);
       }
     };
-    check();
-    const ms = serverOnline ? 30_000 : 3_000;
-    const id = setInterval(check, ms);
+    void check();
     return () => {
       active = false;
-      clearInterval(id);
+      if (timer) clearTimeout(timer);
     };
-  }, [serverOnline, serverUrl, hydrated]);
+  }, [serverUrl, hydrated]);
 
   // Load server config + user profile once on first successful connection (or after URL change)
   useEffect(() => {
-    if (serverOnline && !serverConfigLoaded.current) {
-      serverConfigLoaded.current = true;
-      // Server config: admin/hardware settings (whisper model, providers, etc.)
-      getServerConfig()
-        .then((cfg) => useSettingsStore.getState().initFromServerConfig(cfg))
-        .catch(() => {});
-      // User profile: portable preferences (toggles, AI preset, privacy prefs)
-      getProfile()
-        .then((p) => useSettingsStore.getState().initFromServerProfile(p))
-        .catch(() => {});
-    }
+    if (!serverOnline || serverConfigLoaded.current) return;
+    let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const syncSettings = async () => {
+      const [configResult, profileResult] = await Promise.allSettled([
+        getServerConfig(),
+        getProfile(),
+      ]);
+      if (cancelled) return;
+
+      if (configResult.status === "fulfilled") {
+        serverConfigRef.current = configResult.value;
+        useSettingsStore.getState().initFromServerConfig(configResult.value);
+      }
+      if (profileResult.status === "fulfilled") {
+        useSettingsStore.getState().initFromServerProfile(profileResult.value);
+      }
+
+      if (configResult.status === "fulfilled" && profileResult.status === "fulfilled") {
+        serverConfigLoaded.current = true;
+      } else {
+        console.warn("Server settings sync failed; retrying shortly");
+        retryTimer = setTimeout(syncSettings, 2000);
+      }
+    };
+
+    void syncSettings();
+    return () => {
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+    };
   }, [serverOnline, serverUrl]);
 
   // Connect WebSockets when session changes
@@ -162,15 +195,21 @@ function MainApp() {
       store.renameSpeaker(data.speaker_label, data.display_name);
       store.updateParticipant(data.participant);
     };
+    sws.onServerEvent = (event) => {
+      if (event.type === "error" || event.type === "warning") {
+        handleAIEvent({
+          type: "error",
+          message: event.type === "warning" ? `Warning: ${event.message}` : event.message,
+        });
+      } else if (event.type === "session_ended") {
+        setRecording(false);
+      }
+    };
     sws.onConnectionChange = (connected) => {
       setSessionConnected(connected);
-      // On (re)connect, send config and rerun agent if transcript exists
+      // Queued transcription messages are flushed by the socket on reconnect.
       if (connected) {
         sws.sendConfig(useSettingsStore.getState().getEffectiveToggles());
-        const { transcript } = useSessionStore.getState();
-        if (transcript.length > 0) {
-          sws.sendRerun();
-        }
       }
     };
     sws.connect();
@@ -352,15 +391,23 @@ function MainApp() {
 
     let micDeviceId: string | undefined;
     let serverHandlesSystem = false;
+    let serverHandlesMic = false;
+    let effectiveCaptureLocation: "auto" | "client" | "server" = audioCaptureLocation;
     try {
-      const cfg = await getServerConfig();
-      if (cfg.audio_capture_source === "client") {
+      const cfg = serverConfigRef.current ?? await getServerConfig();
+      serverConfigRef.current = cfg;
+      const remoteClient = !isSameMachine(serverUrl, cfg.hostname);
+      if (audioCaptureLocation === "auto" && remoteClient) {
+        effectiveCaptureLocation = "client";
+      }
+      const forceClientCapture = effectiveCaptureLocation === "client";
+      if (forceClientCapture || cfg.audio_capture_source === "client") {
         // Use the client-local device preference (not the server-stored one,
         // which may refer to hardware on a different machine)
         micDeviceId = useSettingsStore.getState().micDeviceId ?? undefined;
       }
-      // If system_device_id is set, server handles system audio via loopback
-      serverHandlesSystem = !!cfg.system_device_id;
+      serverHandlesMic = !forceClientCapture && cfg.audio_capture_source === "server";
+      serverHandlesSystem = !forceClientCapture && !!cfg.system_device_id;
     } catch {
       // Proceed with system default
     }
@@ -368,7 +415,7 @@ function MainApp() {
 
     // Start audio capture first — check permissions before connecting WebSocket
     const capture = new AudioCapture();
-    const wantMic = audioToggles.mic;
+    const wantMic = audioToggles.mic && !serverHandlesMic;
     const wantSystem = audioToggles.system && !serverHandlesSystem;
 
     let result;
@@ -386,8 +433,10 @@ function MainApp() {
     }
 
     // If nothing is capturing (and server isn't handling system), bail out
-    const serverHandlesEverything = serverHandlesSystem && !wantMic;
-    if (!result.mic && !result.system && !serverHandlesEverything) {
+    const hasServerSource =
+      (audioToggles.mic && serverHandlesMic) ||
+      (audioToggles.system && serverHandlesSystem);
+    if (!result.mic && !result.system && !hasServerSource) {
       capture.stop();
       startingRecordingRef.current = false;
       const errors = [result.micError, result.systemError].filter(Boolean).join(". ");
@@ -402,19 +451,24 @@ function MainApp() {
     setAudioWarning(warnings.length > 0 ? warnings.join(". ") : null);
 
     // Audio is capturing — now connect the WebSocket
-    const aws = new AudioWebSocket();
+    const aws = new AudioWebSocket(effectiveCaptureLocation);
     aws.onConnectionChange = setAudioConnected;
     aws.onTranscription = (data) => {
-      const id = crypto.randomUUID().replace(/-/g, "").slice(0, 12);
+      const id = genId();
+      const settingsState = useSettingsStore.getState();
+      const text =
+        settingsState.getEffectivePrivacyMode() || settingsState.getEffectivePiiRedaction()
+          ? redactPii(data.text)
+          : data.text;
       addTranscriptEntry({
         id,
         speaker: data.speaker,
-        text: data.text,
+        text,
         timestamp: new Date().toISOString(),
         audio_start: data.start,
         audio_end: data.end,
       });
-      sessionWsRef.current?.sendTranscription(id, data.speaker, data.text, data.start, data.end);
+      sessionWsRef.current?.sendTranscription(id, data.speaker, text, data.start, data.end);
     };
     aws.onRelabel = (data) => {
       relabelSpeaker(data.entry_id, data.speaker);
@@ -430,7 +484,7 @@ function MainApp() {
 
     startingRecordingRef.current = false;
     setRecording(true);
-  }, [recording, audioToggles, addTranscriptEntry, relabelSpeaker, setAudioConnected, setAudioWarning, setRecording]);
+  }, [recording, audioToggles, audioCaptureLocation, serverUrl, addTranscriptEntry, relabelSpeaker, setAudioConnected, setAudioWarning, setRecording]);
 
   const stopRecording = useCallback(() => {
     audioCaptureRef.current?.stop();
@@ -641,7 +695,11 @@ function MainApp() {
         <StatusBar />
       </div>
 
-      {showSettings && <SettingsView onClose={() => setShowSettings(false)} />}
+      {showSettings && (
+        <Suspense fallback={null}>
+          <SettingsView onClose={() => setShowSettings(false)} />
+        </Suspense>
+      )}
     </div>
   );
 }

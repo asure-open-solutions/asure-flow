@@ -26,6 +26,7 @@ _PROFILE_FIELDS = frozenset({
     "deep_think",
     "agent_mode",
     "parallel_tools",
+    "ai_response_profile",
     "ai_preset",
     "custom_system_prompt",
     "diarization_enabled",
@@ -55,6 +56,7 @@ class UserProfile:
         # Agent execution mode
         self.agent_mode: str = "unified"  # "unified" | "specialists"
         self.parallel_tools: bool = False  # parallel tool execution in unified mode
+        self.ai_response_profile: str = "balanced"  # "realtime" | "balanced" | "quality"
 
         # AI behaviour
         self.ai_preset: str = "general"
