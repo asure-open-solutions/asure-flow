@@ -270,6 +270,9 @@ class UpdateConfigRequest(BaseModel):
     vad_silence_ms: Optional[int] = None
     vad_min_buffer_sec: Optional[float] = None
     vad_check_interval_ms: Optional[int] = None
+    vad_speech_threshold: Optional[float] = None
+    vad_min_speech_ms: Optional[int] = None
+    audio_min_rms: Optional[float] = None
     # Audio capture (server-mode device IDs — used when audio_capture_source="server")
     audio_capture_source: Optional[str] = None  # "client" | "server"
     mic_device_id: Optional[str] = None

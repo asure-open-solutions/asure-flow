@@ -305,6 +305,7 @@ export interface ServerConfig {
   vad_silence_ms: number;
   vad_min_buffer_sec: number;
   vad_check_interval_ms: number;
+  vad_speech_threshold: number;
   // Admin
   locked_settings: string[];
   // Providers (ordered array — position = fallback priority)

@@ -422,7 +422,6 @@ async def ws_session(websocket: WebSocket, session_id: str):
                     # Unified agent mode (default)
                     fast_lane = (
                         use_realtime_route
-                        and profile.ai_response_profile == "realtime"
                         and effective_suggestions
                     )
                     event_stream = run_agent(
@@ -450,6 +449,7 @@ async def ws_session(websocket: WebSocket, session_id: str):
                         model_name="assistant_realtime" if use_realtime_route else "assistant",
                         request_timeout=12 if use_realtime_route else None,
                         max_completion_tokens=450 if use_realtime_route else None,
+                        fallback_suggestion=fast_lane,
                     )
 
                     if fast_lane and (

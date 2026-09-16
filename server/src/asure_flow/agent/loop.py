@@ -43,6 +43,7 @@ async def run_agent(
     model_name: str = "assistant",
     request_timeout: float | None = None,
     max_completion_tokens: int | None = None,
+    fallback_suggestion: bool = False,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """
     Run the agentic loop on a transcript segment.
@@ -150,6 +151,20 @@ async def run_agent(
 
             # No tool calls — agent is done
             if finish_reason != "tool_calls" or not tool_calls_acc:
+                # Some otherwise capable models answer in plain text instead of
+                # invoking suggest_response. The UI intentionally ignores raw
+                # content deltas, so promote that answer into a real suggestion
+                # for interactive turns rather than appearing to do nothing.
+                if fallback_suggestion and suggestions and full_content.strip():
+                    yield {
+                        "type": "tool_result",
+                        "name": "suggest_response",
+                        "result": {
+                            "suggestion": full_content.strip(),
+                            "responding_to": transcript_text[-500:],
+                            "fallback": True,
+                        },
+                    }
                 yield {"type": "done", "usage": {
                     "prompt_tokens": total_prompt_tokens,
                     "completion_tokens": total_completion_tokens,

@@ -1459,8 +1459,8 @@ function AudioTab() {
 // ── Transcription Tab ──
 
 const SPEED_PROFILES = [
-  { id: "realtime", label: "Realtime", desc: "Fastest response, shorter segments", vad_silence_ms: 250, vad_min_buffer_sec: 0.5, vad_check_interval_ms: 100, whisper_beam_size: 1 },
-  { id: "balanced", label: "Balanced", desc: "Strong speed and accuracy", vad_silence_ms: 450, vad_min_buffer_sec: 1.0, vad_check_interval_ms: 150, whisper_beam_size: 3 },
+  { id: "realtime", label: "Realtime", desc: "Low latency with noise safeguards", vad_silence_ms: 350, vad_min_buffer_sec: 0.75, vad_check_interval_ms: 100, whisper_beam_size: 2 },
+  { id: "balanced", label: "Balanced", desc: "Strong speed and accuracy", vad_silence_ms: 450, vad_min_buffer_sec: 0.9, vad_check_interval_ms: 125, whisper_beam_size: 3 },
   { id: "accurate", label: "Accurate", desc: "More context and beam search", vad_silence_ms: 700, vad_min_buffer_sec: 1.8, vad_check_interval_ms: 250, whisper_beam_size: 5 },
 ] as const;
 

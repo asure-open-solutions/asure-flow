@@ -87,6 +87,7 @@ _PERSISTABLE_FIELDS = frozenset({
     "audio_capture_source", "mic_device_id", "system_device_id",
     # VAD flush
     "vad_silence_ms", "vad_min_buffer_sec", "vad_max_buffer_sec", "vad_check_interval_ms",
+    "vad_speech_threshold", "vad_min_speech_ms", "audio_min_rms",
     # Diarization hardware
     "hf_diarization_token", "diarization_device", "diarization_buffer_sec",
     # LLM routing
@@ -175,6 +176,9 @@ class Settings(BaseSettings):
     vad_min_buffer_sec: float = 1.0
     vad_max_buffer_sec: float = 30.0
     vad_check_interval_ms: int = 150
+    vad_speech_threshold: float = 0.5
+    vad_min_speech_ms: int = 96
+    audio_min_rms: float = 0.002
 
     # ── Diarization hardware (secrets + device — user preference is in profile.py) ──
     hf_diarization_token: Optional[str] = None
@@ -235,6 +239,7 @@ class Settings(BaseSettings):
             "vad_silence_ms": self.vad_silence_ms,
             "vad_min_buffer_sec": self.vad_min_buffer_sec,
             "vad_check_interval_ms": self.vad_check_interval_ms,
+            "vad_speech_threshold": self.vad_speech_threshold,
             # Providers (ordered array — position = priority)
             "llm_providers": [
                 {

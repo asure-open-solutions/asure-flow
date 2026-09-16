@@ -6,13 +6,15 @@ import time
 
 import numpy as np
 import pytest
+from unittest.mock import MagicMock
 
 from asure_flow.api.routes import UpdateProfileRequest
 from asure_flow.agent.context import build_context, SUMMARY_TOKEN_BUDGET
+from asure_flow.agent.loop import run_agent
 from asure_flow.agent.router import build_router
 from asure_flow.config import ProviderEntry, settings
 from asure_flow.sessions.models import Session
-from asure_flow.transcription.engine import WhisperEngine
+from asure_flow.transcription.engine import AudioBuffer, WhisperEngine
 from asure_flow.ws.audio import _resolve_capture_mode
 from asure_flow.ws.session import (
     TriggerSignals,
@@ -95,6 +97,58 @@ def test_hosted_provider_without_key_is_unavailable(monkeypatch):
         ),
     ])
     assert build_router() is None
+
+
+@pytest.mark.asyncio
+async def test_plain_model_answer_becomes_suggestion():
+    class PlainTextRouter:
+        async def acompletion(self, **_kwargs):
+            async def chunks():
+                choice = MagicMock()
+                choice.delta.content = "Use a concise STAR example."
+                choice.delta.tool_calls = None
+                choice.finish_reason = "stop"
+                chunk = MagicMock()
+                chunk.choices = [choice]
+                chunk.usage = None
+                yield chunk
+            return chunks()
+
+    events = [
+        event async for event in run_agent(
+            router=PlainTextRouter(),
+            transcript_text="[Interviewer]: Tell me about a challenge.",
+            fact_checking=False,
+            suggestions=True,
+            notes=False,
+            search_transcript=False,
+            search_sessions=False,
+            web_search=False,
+            format_code=False,
+            max_iterations=1,
+            fallback_suggestion=True,
+        )
+    ]
+    suggestion = next(e for e in events if e["type"] == "tool_result")
+    assert suggestion["name"] == "suggest_response"
+    assert "STAR" in suggestion["result"]["suggestion"]
+
+
+def test_vad_rejects_single_noise_spike(monkeypatch):
+    import asure_flow.transcription.engine as engine_module
+
+    class FakeVad:
+        def __call__(self, audio):
+            windows = max(8, len(audio) // 512)
+            probs = np.full(windows, 0.05, dtype=np.float32)
+            probs[2] = 0.95  # a click/bump, not sustained speech
+            return probs
+
+    monkeypatch.setattr(engine_module, "_vad_model", FakeVad())
+    buffer = AudioBuffer(WhisperEngine(), speaker_label="User")
+    buffer.add_audio(np.zeros(16_000, dtype=np.int16).tobytes())
+    assert buffer._check_vad_state() is False
+    assert buffer._has_speech is False
 
 
 def test_fact_check_result_keeps_triggering_transcript_id():

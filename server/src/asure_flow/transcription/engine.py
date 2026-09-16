@@ -17,14 +17,12 @@ from asure_flow.config import settings
 logger = logging.getLogger(__name__)
 
 SAMPLE_RATE = 16000
-# Speech probability below this value is treated as silence by the flush gate.
-_VAD_SILENCE_THRESHOLD = 0.35
-
 # ── Whisper hallucination filters ──
 # Segments with no_speech_prob above this are likely hallucinations on noise.
-_NO_SPEECH_PROB_THRESHOLD = 0.6
+_NO_SPEECH_PROB_THRESHOLD = 0.55
 # Segments with avg_logprob below this are low-confidence garbage.
-_AVG_LOGPROB_THRESHOLD = -1.0
+_AVG_LOGPROB_THRESHOLD = -0.9
+_COMPRESSION_RATIO_THRESHOLD = 2.4
 
 # ── Cached VAD model (lazy-loaded once) ──
 _vad_model = None
@@ -231,6 +229,12 @@ class WhisperEngine:
                     seg.avg_logprob, text,
                 )
                 continue
+            if getattr(seg, "compression_ratio", 0.0) > _COMPRESSION_RATIO_THRESHOLD:
+                logger.debug(
+                    "Dropping repetitive segment (compression_ratio=%.2f): %s",
+                    seg.compression_ratio, text,
+                )
+                continue
             results.append(TranscriptSegment(start=seg.start, end=seg.end, text=text))
         return results
 
@@ -255,6 +259,10 @@ class AudioBuffer:
         self._min_samples = int(settings.vad_min_buffer_sec * SAMPLE_RATE)
         self._max_samples = int(settings.vad_max_buffer_sec * SAMPLE_RATE)
         self._silence_windows = max(1, int(settings.vad_silence_ms / 1000 * SAMPLE_RATE) // 512)
+        self._speech_windows = max(
+            1,
+            int(settings.vad_min_speech_ms / 1000 * SAMPLE_RATE) // 512,
+        )
         self._vad_check_interval = max(
             512,
             int(settings.vad_check_interval_ms / 1000 * SAMPLE_RATE),
@@ -312,15 +320,23 @@ class AudioBuffer:
         if len(probs) < self._silence_windows:
             return False
 
-        # Track whether the buffer ever contained speech
+        speech_mask = probs >= settings.vad_speech_threshold
+
+        # Require sustained speech rather than one noisy window. This rejects
+        # keyboard clicks, bumps, and short background bursts before Whisper.
         if not self._has_speech:
-            self._has_speech = bool(np.any(probs >= _VAD_SILENCE_THRESHOLD))
+            run = 0
+            for is_speech in speech_mask:
+                run = run + 1 if is_speech else 0
+                if run >= self._speech_windows:
+                    self._has_speech = True
+                    break
 
         # Only flush when speech was detected AND trailing windows are now silent
         if not self._has_speech:
             return False
 
-        return bool(np.all(probs[-self._silence_windows:] < _VAD_SILENCE_THRESHOLD))
+        return bool(np.all(probs[-self._silence_windows:] < settings.vad_speech_threshold))
 
     async def flush(self) -> list[TranscriptSegment]:
         """Transcribe the buffer and return segments.
@@ -349,7 +365,12 @@ class AudioBuffer:
 
         # Skip transcription when VAD never detected speech (e.g. max-buffer
         # timeout on ambient noise) — avoids Whisper hallucinations.
-        if not had_speech:
+        if not had_speech or rms < settings.audio_min_rms:
+            if had_speech:
+                logger.info(
+                    "Dropping low-energy buffer [%s]: RMS %.4f < %.4f",
+                    self.speaker_label, rms, settings.audio_min_rms,
+                )
             return []
 
         # Pass previous text as prompt so Whisper keeps sentence context
