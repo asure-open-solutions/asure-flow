@@ -38,14 +38,29 @@ echo "  Server: $SERVER_URL"
 
 # ---- Health check ----
 if command -v curl &>/dev/null; then
-    if curl -s --max-time 3 "$SERVER_URL/api/health" >/dev/null 2>&1; then
+    echo "  Waiting for server..."
+    SERVER_READY=0
+    ATTEMPT=0
+    while [ "$ATTEMPT" -lt 30 ]; do
+        ATTEMPT=$((ATTEMPT + 1))
+        if curl -s --max-time 2 "$SERVER_URL/api/health" >/dev/null 2>&1; then
+            SERVER_READY=1
+            break
+        fi
+        sleep 1
+    done
+    if [ "$SERVER_READY" -eq 1 ]; then
         echo "  Status: online"
     else
-        echo "  Status: server not reachable (start the server first)"
+        echo "  WARNING: Server is not reachable."
+        echo "  Check its LAN bind, Windows Firewall, IP address, and Wi-Fi network."
     fi
 fi
 
 echo ""
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    echo "  macOS: allow Microphone access, plus Screen Recording for system audio."
+fi
 echo "  Tip: Change server URL in Settings inside the app."
 echo "  Press Ctrl+C to stop."
 echo ""

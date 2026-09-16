@@ -118,7 +118,7 @@ class AudioCaptureManager:
                                 await self.on_transcription(seg)
                     except Exception:
                         logger.exception("Transcription error in capture manager")
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.02)
 
     def stop(self) -> None:
         self._running = False

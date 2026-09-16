@@ -82,7 +82,7 @@ export interface TokenUsage {
 export type AIEvent =
   | { type: "content_delta"; text: string; specialist?: string }
   | { type: "tool_call"; name: string; arguments: Record<string, unknown>; specialist?: string }
-  | { type: "tool_result"; name: string; result: Record<string, unknown>; specialist?: string }
+  | { type: "tool_result"; name: string; result: Record<string, unknown>; transcript_id?: string; latency_ms?: number; specialist?: string }
   | { type: "done"; reason?: string; usage?: TokenUsage }
   | { type: "preempted" }
   | { type: "suggestion_lock"; locked: boolean }
@@ -224,6 +224,7 @@ export interface UserProfile {
   // Agent execution mode
   agent_mode: "unified" | "specialists";
   parallel_tools: boolean;
+  ai_response_profile: "realtime" | "balanced" | "quality";
   // AI behaviour
   ai_preset: string;
   custom_system_prompt: string | null;
@@ -239,6 +240,7 @@ export interface UserProfile {
 export interface AppSettings {
   // Tier 3: device-local (localStorage only — never synced to server)
   serverUrl: string;
+  audioCaptureLocation: "auto" | "client" | "server";
   audioToggles: AudioToggles;
   overlaySettings: OverlaySettings;
   micDeviceId: string | null;
@@ -250,6 +252,7 @@ export interface AppSettings {
   piiRedaction: boolean;
   privacyMode: boolean;
   aiPreset: string;
+  aiResponseProfile: "realtime" | "balanced" | "quality";
   customSystemPrompt: string | null;
 }
 
@@ -269,6 +272,7 @@ export interface LLMProviderConfig {
   name: string;
   litellm_prefix: string;
   model: string;
+  realtime_model: string;
   api_key_hint: string;
   api_base: string;
   configured: boolean;
@@ -284,6 +288,8 @@ export interface ServerConfig {
   whisper_device: string;
   whisper_compute_type: string;
   whisper_language: string | null;
+  whisper_beam_size: number;
+  transcription_profile: "realtime" | "balanced" | "accurate" | "custom";
   // LLM routing
   routing_strategy: string;
   // Audio capture mode + server-side device IDs (only relevant when audio_capture_source="server")
@@ -298,6 +304,7 @@ export interface ServerConfig {
   // VAD / speed
   vad_silence_ms: number;
   vad_min_buffer_sec: number;
+  vad_check_interval_ms: number;
   // Admin
   locked_settings: string[];
   // Providers (ordered array — position = fallback priority)

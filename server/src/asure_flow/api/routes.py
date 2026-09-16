@@ -32,7 +32,8 @@ async def health():
     llm = get_router()
     provider_name = None
     if llm and llm.model_list:
-        provider_name = llm.model_list[0].get("model_name", "unknown")
+        first = llm.model_list[0]
+        provider_name = first.get("litellm_params", {}).get("model") or first.get("model_name", "unknown")
 
     whisper_status = whisper_engine.status
 
@@ -262,9 +263,13 @@ class UpdateConfigRequest(BaseModel):
     # Transcription
     whisper_model: Optional[str] = None
     whisper_device: Optional[str] = None  # "cuda" | "cpu"
+    whisper_language: Optional[str] = None
+    whisper_beam_size: Optional[int] = None
+    transcription_profile: Optional[str] = None
     # VAD / speed profile
     vad_silence_ms: Optional[int] = None
     vad_min_buffer_sec: Optional[float] = None
+    vad_check_interval_ms: Optional[int] = None
     # Audio capture (server-mode device IDs — used when audio_capture_source="server")
     audio_capture_source: Optional[str] = None  # "client" | "server"
     mic_device_id: Optional[str] = None
@@ -291,6 +296,9 @@ class UpdateProfileRequest(BaseModel):
     web_search: Optional[bool] = None
     format_code: Optional[bool] = None
     deep_think: Optional[str] = None  # "off" | "auto" | "always"
+    agent_mode: Optional[str] = None  # "unified" | "specialists"
+    parallel_tools: Optional[bool] = None
+    ai_response_profile: Optional[str] = None
     # AI behaviour
     ai_preset: Optional[str] = None
     custom_system_prompt: Optional[str] = None
@@ -350,7 +358,7 @@ async def update_config(body: UpdateConfigRequest):
         needs_reload = True
 
     if needs_reload:
-        await whisper_engine.load()
+        await whisper_engine.load(force=True)
 
     return settings.to_client_config()
 
@@ -376,7 +384,7 @@ async def reset_config():
     reset_settings()
     reset_profile()
     init_router()
-    await whisper_engine.load()
+    await whisper_engine.load(force=True)
     logger.info("Config and profile reset to defaults, router and whisper reloaded")
     return settings.to_client_config()
 
@@ -389,6 +397,7 @@ class ProviderUpdateRequest(BaseModel):
     name: Optional[str] = None
     litellm_prefix: Optional[str] = None
     model: Optional[str] = None
+    realtime_model: Optional[str] = None
     api_key: Optional[str] = None
     api_base: Optional[str] = None
     enabled: Optional[bool] = None
@@ -400,6 +409,7 @@ class ProviderCreateRequest(BaseModel):
     name: str
     litellm_prefix: str = "openai"
     model: str = ""
+    realtime_model: Optional[str] = None
     api_key: Optional[str] = None
     api_base: Optional[str] = None
     enabled: bool = True

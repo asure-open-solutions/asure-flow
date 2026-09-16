@@ -54,18 +54,25 @@ if exist ".env" (
         if not "%%a"=="" set "%%a=%%b"
     )
 )
-if not defined HOST set "HOST=0.0.0.0"
+if not defined HOST set "HOST=127.0.0.1"
 if not defined PORT set "PORT=8000"
+if /i "%~1"=="lan" set "HOST=0.0.0.0"
 
 echo   Python: %PY_EXE%
 echo   Local:  http://localhost:%PORT%
 echo   Docs:   http://localhost:%PORT%/docs
+if "%HOST%"=="0.0.0.0" (
+    for /f "usebackq delims=" %%i in (`powershell -NoProfile -Command "$ip=(Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.IPAddress -notlike '127.*' -and $_.PrefixOrigin -ne 'WellKnown'} | Select-Object -First 1 -ExpandProperty IPAddress); if($ip){$ip}else{'your-pc-ip'}"`) do set "LAN_IP=%%i"
+    echo   Network: http://%LAN_IP%:%PORT%
+    echo   WARNING: Server is exposed to your local network without authentication.
+    echo   If blocked, allow inbound TCP %PORT% in Windows Firewall.
+)
 echo.
 echo   Press Ctrl+C to stop.
 echo.
 
 set "PYTHONPATH=%~dp0server\src"
 cd /d "%~dp0server"
-"%PY_EXE%" -m uvicorn asure_flow.main:app --host %HOST% --port %PORT% --reload --reload-exclude .venv --ws-max-size 1048576
+"%PY_EXE%" -m uvicorn asure_flow.main:app --host %HOST% --port %PORT% --ws-max-size 1048576
 pause
 exit /b %errorlevel%

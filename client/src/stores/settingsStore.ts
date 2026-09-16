@@ -34,6 +34,7 @@ function getEnvServerUrl(): string | null {
 const DEFAULT_SETTINGS: AppSettings = {
   // Tier 3: device-local
   serverUrl: "http://localhost:8000",
+  audioCaptureLocation: "auto",
   audioToggles: { mic: true, system: true },
   overlaySettings: {
     contentProtection: true,
@@ -63,6 +64,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   piiRedaction: false,
   privacyMode: false,
   aiPreset: "general",
+  aiResponseProfile: "balanced",
   customSystemPrompt: null,
 };
 
@@ -74,6 +76,7 @@ interface SettingsState extends AppSettings {
   _hydrated: boolean;
 
   setServerUrl: (url: string) => void;
+  setAudioCaptureLocation: (location: "auto" | "client" | "server") => void;
   setFeatureToggles: (toggles: Partial<FeatureToggles>) => void;
   setDiarization: (enabled: boolean) => void;
   setAudioToggles: (toggles: Partial<AudioToggles>) => void;
@@ -81,6 +84,7 @@ interface SettingsState extends AppSettings {
   setPiiRedaction: (enabled: boolean) => void;
   setPrivacyMode: (enabled: boolean) => void;
   setAiPreset: (preset: string) => void;
+  setAiResponseProfile: (profile: "realtime" | "balanced" | "quality") => void;
   setCustomSystemPrompt: (prompt: string | null) => void;
   setMicDeviceId: (id: string | null) => void;
   setSystemDeviceId: (id: string | null) => void;
@@ -111,6 +115,7 @@ export const useSettingsStore = create<SettingsState>()(
       _hydrated: false,
 
       setServerUrl: (url) => set({ serverUrl: url }),
+      setAudioCaptureLocation: (audioCaptureLocation) => set({ audioCaptureLocation }),
 
       setFeatureToggles: (toggles) =>
         set((state) => ({
@@ -144,6 +149,7 @@ export const useSettingsStore = create<SettingsState>()(
         })),
 
       setAiPreset: (preset) => set({ aiPreset: preset }),
+      setAiResponseProfile: (aiResponseProfile) => set({ aiResponseProfile }),
 
       setCustomSystemPrompt: (prompt) => set({ customSystemPrompt: prompt }),
 
@@ -177,6 +183,7 @@ export const useSettingsStore = create<SettingsState>()(
             piiRedaction: serverProfile.pii_redaction,
             privacyMode: serverProfile.privacy_mode,
             aiPreset: serverProfile.ai_preset,
+            aiResponseProfile: serverProfile.ai_response_profile ?? "balanced",
             customSystemPrompt: serverProfile.custom_system_prompt,
           };
         }),

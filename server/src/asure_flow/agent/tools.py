@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import TYPE_CHECKING
@@ -405,8 +406,11 @@ async def _execute_web_search(arguments: dict) -> str:
     try:
         from duckduckgo_search import DDGS
 
-        with DDGS() as ddgs:
-            raw_results = list(ddgs.text(query, max_results=5))
+        def search_sync() -> list[dict]:
+            with DDGS() as ddgs:
+                return list(ddgs.text(query, max_results=5))
+
+        raw_results = await asyncio.to_thread(search_sync)
 
         results = [
             {

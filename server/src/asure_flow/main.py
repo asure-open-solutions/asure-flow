@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -13,7 +14,7 @@ from asure_flow.api.routes import router as api_router
 from asure_flow.audio.manager import audio_capture_manager
 from asure_flow.config import settings
 from asure_flow.profile import profile
-from asure_flow.transcription.engine import whisper_engine
+from asure_flow.transcription.engine import warm_vad, whisper_engine
 from asure_flow.ws.audio import router as audio_ws_router
 from asure_flow.ws.session import router as session_ws_router
 
@@ -28,26 +29,35 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     logger.info("Starting Asuré Flow server …")
 
-    # Load Whisper/VAD lazily on first transcription so the API starts immediately.
-    logger.info("Whisper/VAD will load lazily on first transcription")
-
     # Initialise LLM router
     init_router()
 
-    # Load embedding engine for semantic search
-    try:
-        from asure_flow.search.embeddings import embedding_engine
-        await embedding_engine.load()
-    except Exception:
-        logger.info("Embedding engine unavailable — search will use substring matching")
+    if settings.host in {"0.0.0.0", "::"}:
+        logger.warning(
+            "Server is listening on all interfaces without authentication. "
+            "Use only on a trusted network."
+        )
 
-    # Load diarization engine if enabled
-    if profile.diarization_enabled:
+    async def warm_runtime() -> None:
+        """Warm heavy optional services without delaying API readiness."""
         try:
-            from asure_flow.transcription.diarization import diarization_engine
-            await diarization_engine.load()
+            await warm_vad()
+            await whisper_engine.load()
         except Exception:
-            logger.info("Diarization engine unavailable")
+            logger.exception("Whisper warm-up failed; first transcription will retry")
+
+        try:
+            from asure_flow.search.embeddings import embedding_engine
+            await embedding_engine.load()
+        except Exception:
+            logger.info("Embedding engine unavailable — search will use substring matching")
+
+        if profile.diarization_enabled:
+            try:
+                from asure_flow.transcription.diarization import diarization_engine
+                await diarization_engine.load()
+            except Exception:
+                logger.info("Diarization engine unavailable")
 
     # Start server-side audio capture if configured.
     # Mic uses server capture only when audio_capture_source == "server".
@@ -76,11 +86,19 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.warning("Server-side audio capture failed to start", exc_info=True)
 
-    logger.info("Server ready on %s:%d", settings.host, settings.port)
-    yield
-
-    audio_capture_manager.stop()
-    logger.info("Shutting down …")
+    warmup_task = asyncio.create_task(warm_runtime(), name="runtime-warmup")
+    logger.info("Server ready on %s:%d (runtime warming in background)", settings.host, settings.port)
+    try:
+        yield
+    finally:
+        if not warmup_task.done():
+            warmup_task.cancel()
+            try:
+                await warmup_task
+            except asyncio.CancelledError:
+                pass
+        audio_capture_manager.stop()
+        logger.info("Shutting down …")
 
 
 app = FastAPI(
@@ -93,12 +111,8 @@ app = FastAPI(
 # CORS — restrict to localhost origins (file:// doesn't trigger CORS preflight)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:8000",
-        "http://127.0.0.1:8000",
-    ],
+    allow_origins=[],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

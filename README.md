@@ -248,10 +248,10 @@ cd asure-flow
 # Configure your LLM API key
 echo "OPENROUTER_API_KEY=sk-or-..." > .env
 
-# Start the server
-# Windows:     double-click start-server.bat
+# Start the server in LAN mode
+# Windows:     start-server.bat lan
 # macOS:       double-click start-server.command
-# Linux:       ./start-server.sh
+# Linux/macOS: ./start-server.sh lan
 ```
 
 The script prints your LAN IP on startup, e.g. `Network: http://192.168.1.50:8000`.
@@ -274,7 +274,9 @@ cd asure-flow
 ./start-client.sh http://192.168.1.50:8000
 ```
 
-On macOS: double-click `start-client.command` (set server URL in Settings after launch)
+On macOS: run `./start-client.sh http://<server-ip>:8000` (or set the URL in Settings).
+The default **Auto** audio capture location uses the Mac's mic/system audio when
+the server is on another machine. Grant Microphone and Screen Recording access.
 On Windows: `start-client.bat http://192.168.1.50:8000`
 
 You can also set the server URL in **Settings → Server URL** inside the app — it persists across restarts.

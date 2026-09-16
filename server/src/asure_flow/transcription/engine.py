@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
@@ -40,6 +41,15 @@ def _get_cached_vad_model():
     return _vad_model
 
 
+async def warm_vad() -> None:
+    """Load and exercise Silero once so the first spoken segment stays fast."""
+    def _warm() -> None:
+        model = _get_cached_vad_model()
+        model(np.zeros(512, dtype=np.float32))
+
+    await asyncio.to_thread(_warm)
+
+
 @dataclass
 class TranscriptSegment:
     start: float
@@ -64,18 +74,22 @@ class WhisperEngine:
         self._loaded_device: str | None = None
         self._loaded_compute_type: str | None = None
         self._degraded: bool = False  # True if we fell back to a weaker model/device
+        self._loading: bool = False
+        self._last_transcription_ms: float | None = None
 
     @property
     def status(self) -> dict:
         """Current engine state — surfaced via /health so the UI can warn on degradation."""
         return {
             "loaded": self._model is not None,
+            "loading": self._loading,
             "requested_model": settings.whisper_model,
             "requested_device": settings.detect_device(),
             "model": self._loaded_model,
             "device": self._loaded_device,
             "compute_type": self._loaded_compute_type,
             "degraded": self._degraded,
+            "last_transcription_ms": self._last_transcription_ms,
         }
 
     def _effective_beam_size(self) -> int:
@@ -89,22 +103,28 @@ class WhisperEngine:
             return settings.whisper_beam_size
         return 5 if self._loaded_device == "cuda" else 1
 
-    async def load(self) -> None:
-        """Load the whisper model (call once at server startup)."""
-        loop = asyncio.get_event_loop()
-        self._model = await loop.run_in_executor(None, self._load_model)
-        if self._degraded:
-            logger.warning(
-                "Whisper running DEGRADED: requested %s on %s but loaded %s on %s (%s) "
-                "after out-of-memory fallback — transcription accuracy is reduced.",
-                settings.whisper_model, settings.detect_device(),
-                self._loaded_model, self._loaded_device, self._loaded_compute_type,
-            )
-        else:
-            logger.info(
-                "Whisper model loaded: %s on %s (%s)",
-                self._loaded_model, self._loaded_device, self._loaded_compute_type,
-            )
+    async def load(self, *, force: bool = False) -> None:
+        """Load the Whisper model once, serialized across all audio streams."""
+        async with self._lock:
+            if self._model is not None and not force:
+                return
+            self._loading = True
+            try:
+                self._model = await asyncio.to_thread(self._load_model)
+                if self._degraded:
+                    logger.warning(
+                        "Whisper running DEGRADED: requested %s on %s but loaded %s on %s (%s) "
+                        "after out-of-memory fallback — transcription accuracy is reduced.",
+                        settings.whisper_model, settings.detect_device(),
+                        self._loaded_model, self._loaded_device, self._loaded_compute_type,
+                    )
+                else:
+                    logger.info(
+                        "Whisper model loaded: %s on %s (%s)",
+                        self._loaded_model, self._loaded_device, self._loaded_compute_type,
+                    )
+            finally:
+                self._loading = False
 
     def _load_model(self):
         from faster_whisper import WhisperModel
@@ -160,11 +180,16 @@ class WhisperEngine:
         if self._model is None:
             await self.load()
 
-        loop = asyncio.get_event_loop()
-        segments = await loop.run_in_executor(
-            None, self._transcribe_sync, audio, initial_prompt,
-        )
-        return segments
+        # faster-whisper/CTranslate2 model use is serialized. Mic and system
+        # buffers can flush concurrently and sharing one model unsafely causes
+        # intermittent corruption or device errors.
+        async with self._lock:
+            started = time.perf_counter()
+            result = await asyncio.to_thread(
+                self._transcribe_sync, audio, initial_prompt,
+            )
+            self._last_transcription_ms = round((time.perf_counter() - started) * 1000, 1)
+            return result
 
     def _transcribe_sync(
         self, audio: np.ndarray, initial_prompt: str | None = None,
@@ -230,8 +255,10 @@ class AudioBuffer:
         self._min_samples = int(settings.vad_min_buffer_sec * SAMPLE_RATE)
         self._max_samples = int(settings.vad_max_buffer_sec * SAMPLE_RATE)
         self._silence_windows = max(1, int(settings.vad_silence_ms / 1000 * SAMPLE_RATE) // 512)
-        # VAD check interval: half the silence window, minimum ~150 ms
-        self._vad_check_interval = max(int(settings.vad_silence_ms / 1000 * 0.5 * SAMPLE_RATE), 2400)
+        self._vad_check_interval = max(
+            512,
+            int(settings.vad_check_interval_ms / 1000 * SAMPLE_RATE),
+        )
 
         # Rate-limiting state for VAD checks
         self._last_vad_len: int = 0

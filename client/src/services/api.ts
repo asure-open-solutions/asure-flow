@@ -31,16 +31,28 @@ export function getServerUrl() {
   return baseUrl;
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${baseUrl}${path}`, {
-    headers: { "Content-Type": "application/json" },
-    ...init,
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "Unknown error");
-    throw new Error(`API ${res.status}: ${text}`);
+async function request<T>(path: string, init?: RequestInit, timeoutMs = 15_000): Promise<T> {
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  const signal = init?.signal
+    ? AbortSignal.any([init.signal, timeoutSignal])
+    : timeoutSignal;
+  try {
+    const res = await fetch(`${baseUrl}${path}`, {
+      headers: { "Content-Type": "application/json" },
+      ...init,
+      signal,
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "Unknown error");
+      throw new Error(`API ${res.status}: ${text}`);
+    }
+    return res.json() as Promise<T>;
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "TimeoutError") {
+      throw new Error(`Server request timed out after ${Math.round(timeoutMs / 1000)}s`);
+    }
+    throw error;
   }
-  return res.json() as Promise<T>;
 }
 
 // ── Health ──
@@ -49,6 +61,9 @@ export interface HealthStatus {
   online: boolean;
   llmAvailable: boolean;
   llmProvider: string | null;
+  latencyMs: number | null;
+  whisperLoaded: boolean;
+  whisperDevice: string | null;
   /** Set when Whisper fell back to a weaker model/device (reduced accuracy). */
   whisperWarning: string | null;
 }
@@ -59,11 +74,12 @@ export async function checkHealth(): Promise<{ status: string; llm_available: bo
 
 /** Non-throwing health check — returns server online status + LLM availability. */
 export async function checkServerHealth(): Promise<HealthStatus> {
+  const started = performance.now();
   try {
     const res = await fetch(`${baseUrl}/api/health`, {
       signal: AbortSignal.timeout(3000),
     });
-    if (!res.ok) return { online: false, llmAvailable: false, llmProvider: null, whisperWarning: null };
+    if (!res.ok) return { online: false, llmAvailable: false, llmProvider: null, latencyMs: null, whisperLoaded: false, whisperDevice: null, whisperWarning: null };
     const data = await res.json();
     const w = data.whisper;
     const whisperWarning =
@@ -74,10 +90,13 @@ export async function checkServerHealth(): Promise<HealthStatus> {
       online: true,
       llmAvailable: data.llm_available ?? false,
       llmProvider: data.llm_provider ?? null,
+      latencyMs: Math.round(performance.now() - started),
+      whisperLoaded: data.whisper_loaded ?? false,
+      whisperDevice: w?.device ?? null,
       whisperWarning,
     };
   } catch {
-    return { online: false, llmAvailable: false, llmProvider: null, whisperWarning: null };
+    return { online: false, llmAvailable: false, llmProvider: null, latencyMs: null, whisperLoaded: false, whisperDevice: null, whisperWarning: null };
   }
 }
 
@@ -157,7 +176,9 @@ export async function exportSession(id: string): Promise<Session> {
 }
 
 export async function exportSessionMarkdown(id: string): Promise<string> {
-  const res = await fetch(`${baseUrl}/api/sessions/${id}/export/markdown`);
+  const res = await fetch(`${baseUrl}/api/sessions/${id}/export/markdown`, {
+    signal: AbortSignal.timeout(15_000),
+  });
   if (!res.ok) throw new Error(`API ${res.status}`);
   return res.text();
 }
@@ -191,10 +212,14 @@ export async function generateFollowup(
   sessionId: string,
   format: "email" | "message" | "summary" = "email",
 ): Promise<FollowupResult> {
-  return request(`/api/sessions/${sessionId}/followup`, {
-    method: "POST",
-    body: JSON.stringify({ format }),
-  });
+  return request(
+    `/api/sessions/${sessionId}/followup`,
+    {
+      method: "POST",
+      body: JSON.stringify({ format }),
+    },
+    45_000,
+  );
 }
 
 // ── Config ──
@@ -237,6 +262,7 @@ export async function addProvider(provider: {
   name: string;
   litellm_prefix?: string;
   model?: string;
+  realtime_model?: string;
   api_key?: string;
   api_base?: string;
   enabled?: boolean;
